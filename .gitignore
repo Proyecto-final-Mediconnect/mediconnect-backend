@@ -1,0 +1,36 @@
+# Dependencias
+node_modules/
+.pnpm-store/
+
+# Build / output
+dist/
+build/
+.next/
+out/
+
+# Variables de entorno 
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Caché de herramientas
+.vite/
+.cache/
+coverage/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Editores
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Prisma (solo backend) - el cliente generado, se regenera, no se versiona
+# /src/generated/prisma
