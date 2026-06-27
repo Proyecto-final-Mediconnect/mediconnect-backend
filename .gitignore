@@ -34,3 +34,4 @@ Thumbs.db
 
 # Prisma (solo backend) - el cliente generado, se regenera, no se versiona
 # /src/generated/prisma
+/generated/prisma
