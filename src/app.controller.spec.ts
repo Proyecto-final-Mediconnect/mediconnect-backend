@@ -15,8 +15,10 @@ describe('AppController', () => {
   });
 
   describe('root', () => {
-    it('should return "Hello World!"', () => {
-      expect(appController.getHello()).toBe('Hello World!');
+    it('devuelve la página HTML de confirmación con la marca', () => {
+      const html = appController.getConfirmationPage();
+      expect(html).toContain('MediConnect');
+      expect(html).toContain('¡Email confirmado!');
     });
   });
 });
