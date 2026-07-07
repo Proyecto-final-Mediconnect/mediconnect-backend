@@ -6,6 +6,7 @@ import {
 import { AuthService } from './auth.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { RegisterPatientDto } from './dto/register-patient.dto';
+import { RegisterProfessionalDto } from './dto/register-professional.dto';
 import { LoginDto } from './dto/login.dto';
 
 describe('AuthService', () => {
@@ -17,6 +18,15 @@ describe('AuthService', () => {
     email: 'nuevo@test.com',
     password: 'Password1',
     passwordConfirmation: 'Password1',
+  };
+  const proDto: RegisterProfessionalDto = {
+    email: 'pro@test.com',
+    password: 'Password1',
+    passwordConfirmation: 'Password1',
+    firstName: 'Ana',
+    lastName: 'García',
+    specialty: 'Cardiología',
+    licenseNumber: 'MP-12345',
   };
   const loginDto: LoginDto = { email: 'user@test.com', password: 'Password1' };
 
@@ -75,6 +85,76 @@ describe('AuthService', () => {
     await expect(service.registerPatient(dto)).rejects.toBeInstanceOf(
       BadRequestException,
     );
+  });
+
+  it('ante fallo de red (sin status) lanza ServiceUnavailable, sin filtrar el detalle crudo', async () => {
+    signUp.mockResolvedValue({
+      data: {},
+      error: { message: 'fetch failed' },
+    });
+
+    await expect(service.registerPatient(dto)).rejects.toMatchObject({
+      constructor: ServiceUnavailableException,
+      message: expect.not.stringContaining('fetch failed'),
+    });
+  });
+
+  it('registra un profesional enviando role y datos en options.data', async () => {
+    signUp.mockResolvedValue({
+      data: { user: { identities: [{ id: 'abc' }] } },
+      error: null,
+    });
+
+    const result = await service.registerProfessional(proDto);
+
+    expect(signUp).toHaveBeenCalledWith({
+      email: proDto.email,
+      password: proDto.password,
+      options: {
+        data: {
+          role: 'PROFESIONAL',
+          first_name: proDto.firstName,
+          last_name: proDto.lastName,
+          specialty: proDto.specialty,
+          license_number: proDto.licenseNumber,
+        },
+      },
+    });
+    expect(result.message).toContain('Revisá tu email');
+  });
+
+  it('registro profesional con email ya existente devuelve el MISMO mensaje', async () => {
+    signUp.mockResolvedValue({
+      data: { user: { identities: [] } },
+      error: null,
+    });
+
+    const result = await service.registerProfessional(proDto);
+
+    expect(result.message).toContain('Revisá tu email');
+  });
+
+  it('registro profesional con rate limit lanza ServiceUnavailable', async () => {
+    signUp.mockResolvedValue({
+      data: {},
+      error: { status: 429, message: 'email rate limit exceeded' },
+    });
+
+    await expect(service.registerProfessional(proDto)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('registro profesional con fallo de red lanza ServiceUnavailable sin filtrar el detalle crudo', async () => {
+    signUp.mockResolvedValue({
+      data: {},
+      error: { message: 'fetch failed' },
+    });
+
+    await expect(service.registerProfessional(proDto)).rejects.toMatchObject({
+      constructor: ServiceUnavailableException,
+      message: expect.not.stringContaining('fetch failed'),
+    });
   });
 
   it('login exitoso devuelve tokens y datos del usuario', async () => {
