@@ -5,10 +5,12 @@
 -- role=PROFESIONAL en raw_user_meta_data, cree la fila de profesional en estado
 -- PENDIENTE_VALIDACION_MATRICULA (validación de matrícula manual en el MVP).
 --
--- NOTA: revisar `handle_new_user` contra la definición vigente en Supabase antes
--- de aplicar — acá se asume que hoy sólo inserta en `profiles`. La especialidad
--- entra por metadata y se asigna desde el catálogo (professional_specialties)
--- durante la validación manual; no se persiste como columna.
+-- NOTA: `handle_new_user` se reconcilió contra la definición vigente en Supabase
+-- (verificada el 2026-07-06): hoy sólo inserta en `profiles` leyendo el rol del
+-- metadata. Acá se preserva esa lógica idéntica (nullif + on conflict) y sólo se
+-- agrega la rama de profesional. La especialidad entra por metadata y se asigna
+-- desde el catálogo (professional_specialties) en la validación manual; no se
+-- persiste como columna.
 
 -- 1. Estado de validación del profesional -----------------------------------
 do $$
@@ -53,17 +55,20 @@ create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
 security definer
-set search_path = public
-as $$
+set search_path to 'public'
+as $function$
 declare
   v_role public.user_role := coalesce(
-    (new.raw_user_meta_data ->> 'role')::public.user_role,
+    nullif(new.raw_user_meta_data ->> 'role', '')::public.user_role,
     'PACIENTE'
   );
 begin
+  -- Igual que la versión original (ENG-42): crea el perfil con el rol del metadata.
   insert into public.profiles (id, email, role)
-  values (new.id, new.email, v_role);
+  values (new.id, new.email, v_role)
+  on conflict (id) do nothing;
 
+  -- Nuevo (ENG-43): si es profesional, crea su fila en estado pendiente.
   if v_role = 'PROFESIONAL' then
     insert into public.professionals (profile_id, first_name, last_name, license_number)
     values (
@@ -71,12 +76,13 @@ begin
       coalesce(new.raw_user_meta_data ->> 'first_name', ''),
       coalesce(new.raw_user_meta_data ->> 'last_name', ''),
       coalesce(new.raw_user_meta_data ->> 'license_number', '')
-    );
+    )
+    on conflict (profile_id) do nothing;
   end if;
 
   return new;
 end;
-$$;
+$function$;
 
 -- El trigger on_auth_user_created ya existe (ENG-42); esta migración sólo
 -- redefine la función. Si no existiera, recrearlo:
