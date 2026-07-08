@@ -1,8 +1,16 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, Res } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Res,
+} from '@nestjs/common';
 import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterPatientDto } from './dto/register-patient.dto';
+import { RegisterProfessionalDto } from './dto/register-professional.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -12,6 +20,12 @@ export class AuthController {
   @HttpCode(HttpStatus.CREATED)
   registerPatient(@Body() dto: RegisterPatientDto) {
     return this.authService.registerPatient(dto);
+  }
+
+  @Post('register/professional')
+  @HttpCode(HttpStatus.CREATED)
+  registerProfessional(@Body() dto: RegisterProfessionalDto) {
+    return this.authService.registerProfessional(dto);
   }
 
   @Post('login')
