@@ -32,4 +32,16 @@ export default tseslint.config(
       "prettier/prettier": ["error", { endOfLine: "auto" }],
     },
   },
+  {
+    // En tests, las respuestas de supertest (`res.body`) y los matchers de Jest
+    // (`expect.*`) están tipados como `any` por diseño. Relajamos las reglas
+    // type-checked `no-unsafe-*` solo en archivos de test para no exigir casts
+    // ruidosos en cada aserción. El código de producción sigue estricto.
+    files: ['**/*.spec.ts', '**/*.e2e-spec.ts', 'test/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+    },
+  },
 );
