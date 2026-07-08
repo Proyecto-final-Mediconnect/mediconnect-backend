@@ -1,0 +1,37 @@
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/typescript-node:24-bookworm
+    volumes:
+      - .:/workspaces/mediconnect-backend:cached
+    command: sleep infinity
+    environment:
+      # Dentro de la red de Compose los servicios se resuelven por nombre,
+      # no por localhost: por eso el devcontainer apunta a postgres-test:5432
+      # (distinto del localhost:5433 que usan los procesos corridos en el host).
+      DATABASE_URL: postgresql://mediconnect:mediconnect@postgres-test:5432/mediconnect_test?schema=public
+      SKIP_DOCKER: 'true'
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+
+  postgres-test:
+    image: postgres:15
+    container_name: mediconnect-postgres-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_TEST_USER:-mediconnect}
+      POSTGRES_PASSWORD: ${POSTGRES_TEST_PASSWORD:-mediconnect}
+      POSTGRES_DB: ${POSTGRES_TEST_DB:-mediconnect_test}
+    ports:
+      - '${POSTGRES_TEST_PORT:-5433}:5432'
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  postgres_test_data:
