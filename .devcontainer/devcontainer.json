@@ -8,7 +8,7 @@
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-  "postCreateCommand": "pnpm install --frozen-lockfile --offline",
+  "postCreateCommand": "pnpm install --frozen-lockfile",
   "postStartCommand": "./node_modules/.bin/prisma db push --accept-data-loss",
   "customizations": {
     "vscode": {
