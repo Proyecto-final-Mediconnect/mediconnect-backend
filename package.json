@@ -18,7 +18,12 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "verify:rls": "node --env-file=.env --import tsx scripts/verify-rls.ts"
+    "verify:rls": "node --env-file=.env --import tsx scripts/verify-rls.ts",
+    "db:migrate": "prisma migrate deploy",
+    "db:seed": "node --env-file=.env --import tsx prisma/seed.ts",
+    "db:setup": "prisma migrate deploy && pnpm run db:seed",
+    "db:reset": "prisma migrate reset --force",
+    "db:studio": "prisma studio"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",

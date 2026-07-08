@@ -1,0 +1,46 @@
+name: mediconnect-backend
+
+services:
+  # ---------------------------------------------------------------------------
+  # Postgres local de desarrollo. Es el equivalente a Supabase pero en tu máquina.
+  # Se abre con DBeaver en localhost:5432 (postgres / postgres / db mediconnect).
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: mediconnect
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # "El dump": se ejecuta UNA vez al crear el volumen (emula Supabase local).
+      - ./db/bootstrap:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mediconnect"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Contenedor de desarrollo (lo usa el devcontainer de VS Code). Trae Node 24;
+  # pnpm se activa vía corepack en postCreate. No hace falta levantarlo a mano:
+  # "Reopen in Container" lo arranca. Para solo la BD: `docker compose up -d db`.
+  # ---------------------------------------------------------------------------
+  app:
+    image: mcr.microsoft.com/devcontainers/typescript-node:24-bookworm
+    command: sleep infinity
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:cached
+    environment:
+      # Dentro de la red de compose, el host de la BD es el nombre del servicio.
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/mediconnect?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db-data:

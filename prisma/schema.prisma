@@ -8,11 +8,88 @@ datasource db {
   url = env("DATABASE_URL")
 }
 
+// ===========================================================================
+// Tipos ENUM (ver mediconnect-docs/modelo-de-datos/esquema.md § "Tipos ENUM")
+// ===========================================================================
+
 enum user_role {
   PACIENTE
   PROFESIONAL
   MODERADOR
 }
+
+enum professional_status {
+  PENDIENTE_VALIDACION_MATRICULA
+  ACTIVO
+  SUSPENDIDO
+}
+
+enum appointment_status {
+  RESERVADO_SIN_PAGAR
+  CONFIRMADO
+  CANCELADO
+  COMPLETADO
+  NO_ASISTIO
+  LIBERADO
+}
+
+enum video_session_status {
+  CREADA
+  EN_CURSO
+  FINALIZADA
+}
+
+enum payment_status {
+  PENDIENTE
+  APROBADO
+  RECHAZADO
+  REEMBOLSADO
+}
+
+enum refund_status {
+  PENDIENTE
+  PROCESADO
+  RECHAZADO
+}
+
+enum entry_type {
+  CONSULTA
+  DIAGNOSTICO
+  PRESCRIPCION
+  ESTUDIO
+  CORRECCION
+}
+
+enum summary_status {
+  PENDIENTE_VALIDACION
+  VALIDADO
+  DESCARTADO
+}
+
+enum review_status {
+  PENDIENTE_MODERACION
+  APROBADA
+  RECHAZADA
+}
+
+enum notification_type {
+  TURNO_RESERVADO
+  RECORDATORIO_24H
+  RECORDATORIO_1H
+  NUEVO_MENSAJE
+  PAGO_CONFIRMADO
+  RESENA_MODERADA
+}
+
+enum notification_channel {
+  IN_APP
+  PUSH
+  EMAIL
+}
+
+// ===========================================================================
+// EP-01 — Identidad y Acceso
+// ===========================================================================
 
 /// Perfil base 1:1 con auth.users de Supabase. Portador del rol.
 /// La fila se crea automáticamente vía trigger on_auth_user_created al
@@ -24,7 +101,16 @@ model Profile {
   mfa_enabled Boolean   @default(false)
   created_at  DateTime  @default(now()) @db.Timestamptz(6)
   updated_at  DateTime  @default(now()) @db.Timestamptz(6)
-  patient     Patient?
+
+  patient                Patient?
+  professional           Professional?
+  notifications          Notification[]
+  push_tokens            PushToken[]
+  messages               Message[]
+  moderated_reviews      Review[]          @relation("ReviewModerator")
+  audit_logs             AuditLog[]
+  medipass_as_consultant MediPassSession[] @relation("MediPassConsultant")
+  medipass_revoked       MediPassSession[] @relation("MediPassRevoker")
 
   @@map("profiles")
 }
@@ -41,7 +127,500 @@ model Patient {
   address    String?
   created_at DateTime  @default(now()) @db.Timestamptz(6)
   updated_at DateTime  @default(now()) @db.Timestamptz(6)
-  profile    Profile   @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+
+  profile                 Profile               @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+  appointments            Appointment[]
+  reviews                 Review[]
+  clinical_record_entries ClinicalRecordEntry[]
+  conversations           Conversation[]
+  medipass_codes          MediPassCode[]
+  medipass_sessions       MediPassSession[]
+  medipass_access_logs    MediPassAccessLog[]
 
   @@map("patients")
+}
+
+/// Perfil de profesional 1:1 con Profile (role = PROFESIONAL).
+model Professional {
+  profile_id             String              @id @db.Uuid
+  first_name             String
+  last_name              String
+  license_number         String              @db.VarChar(30)
+  bio                    String?             @db.VarChar(500)
+  photo_url              String?
+  consultation_price     Decimal?            @db.Decimal(10, 2)
+  currency               String              @default("ARS") @db.Char(3)
+  status                 professional_status @default(PENDIENTE_VALIDACION_MATRICULA)
+  mercadopago_account_id String?
+  created_at             DateTime            @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime            @default(now()) @db.Timestamptz(6)
+
+  profile                 Profile                 @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+  specialties             ProfessionalSpecialty[]
+  education               ProfessionalEducation[]
+  schedule_rules          ScheduleRule[]
+  schedule_blocks         ScheduleBlock[]
+  cancellation_policy     CancellationPolicy?
+  appointments            Appointment[]
+  reviews                 Review[]
+  review_responses        ReviewResponse[]
+  clinical_record_entries ClinicalRecordEntry[]
+  conversations           Conversation[]
+  validated_summaries     ConsultationSummary[]
+
+  @@index([status])
+  @@map("professionals")
+}
+
+// ===========================================================================
+// EP-02 — Catálogo, Búsqueda y Reseñas
+// ===========================================================================
+
+/// Catálogo curado de especialidades.
+model Specialty {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name       String   @unique
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  professionals ProfessionalSpecialty[]
+
+  @@map("specialties")
+}
+
+/// Junction N:M profesional ↔ especialidad (máx. 3 por profesional, validado en backend).
+model ProfessionalSpecialty {
+  professional_id String @db.Uuid
+  specialty_id    String @db.Uuid
+
+  professional Professional @relation(fields: [professional_id], references: [profile_id], onDelete: Cascade)
+  specialty    Specialty    @relation(fields: [specialty_id], references: [id], onDelete: Restrict)
+
+  @@id([professional_id, specialty_id])
+  @@map("professional_specialties")
+}
+
+/// Formación académica del profesional (1:N).
+model ProfessionalEducation {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  professional_id String   @db.Uuid
+  institution     String
+  degree          String
+  year            Int?     @db.SmallInt
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  professional Professional @relation(fields: [professional_id], references: [profile_id], onDelete: Cascade)
+
+  @@map("professional_education")
+}
+
+/// Reseña de un paciente a un profesional, atada al turno atendido (1 reseña por turno).
+model Review {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id        String        @db.Uuid
+  professional_id   String        @db.Uuid
+  appointment_id    String        @unique @db.Uuid
+  rating            Int           @db.SmallInt
+  comment           String?
+  status            review_status @default(PENDIENTE_MODERACION)
+  moderator_id      String?       @db.Uuid
+  moderation_reason String?
+  moderated_at      DateTime?     @db.Timestamptz(6)
+  created_at        DateTime      @default(now()) @db.Timestamptz(6)
+
+  patient      Patient         @relation(fields: [patient_id], references: [profile_id])
+  professional Professional    @relation(fields: [professional_id], references: [profile_id])
+  appointment  Appointment     @relation(fields: [appointment_id], references: [id])
+  moderator    Profile?        @relation("ReviewModerator", fields: [moderator_id], references: [id])
+  response     ReviewResponse?
+
+  @@map("reviews")
+}
+
+/// Respuesta pública del profesional (1:1 con la reseña).
+model ReviewResponse {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  review_id       String   @unique @db.Uuid
+  professional_id String   @db.Uuid
+  content         String
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  review       Review       @relation(fields: [review_id], references: [id], onDelete: Cascade)
+  professional Professional @relation(fields: [professional_id], references: [profile_id])
+
+  @@map("review_responses")
+}
+
+// ===========================================================================
+// EP-03 — Agenda y Turnos
+// ===========================================================================
+
+/// Disponibilidad semanal recurrente del profesional.
+model ScheduleRule {
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  professional_id       String   @db.Uuid
+  weekday               Int      @db.SmallInt
+  start_time            DateTime @db.Time(6)
+  end_time              DateTime @db.Time(6)
+  slot_duration_minutes Int      @db.SmallInt
+  created_at            DateTime @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime @default(now()) @db.Timestamptz(6)
+
+  professional Professional @relation(fields: [professional_id], references: [profile_id], onDelete: Cascade)
+
+  @@map("schedule_rules")
+}
+
+/// Bloqueos puntuales / feriados.
+model ScheduleBlock {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  professional_id String   @db.Uuid
+  block_date      DateTime @db.Date
+  reason          String?
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  professional Professional @relation(fields: [professional_id], references: [profile_id], onDelete: Cascade)
+
+  @@map("schedule_blocks")
+}
+
+/// Política de cancelación/reembolso por profesional (1:1).
+model CancellationPolicy {
+  professional_id        String   @id @db.Uuid
+  hours_full_refund      Int?     @db.SmallInt
+  hours_partial_refund   Int?     @db.SmallInt
+  partial_refund_percent Int?     @db.SmallInt
+  created_at             DateTime @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime @default(now()) @db.Timestamptz(6)
+
+  professional Professional @relation(fields: [professional_id], references: [profile_id], onDelete: Cascade)
+
+  @@map("cancellation_policies")
+}
+
+/// Turno reservado. La relación profesional↔paciente se deriva de esta tabla.
+model Appointment {
+  id                  String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id          String             @db.Uuid
+  professional_id     String             @db.Uuid
+  scheduled_at        DateTime           @db.Timestamptz(6)
+  duration_minutes    Int                @db.SmallInt
+  price               Decimal            @db.Decimal(10, 2)
+  status              appointment_status @default(RESERVADO_SIN_PAGAR)
+  cancellation_reason String?
+  cancelled_at        DateTime?          @db.Timestamptz(6)
+  created_at          DateTime           @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime           @default(now()) @db.Timestamptz(6)
+
+  patient      Patient      @relation(fields: [patient_id], references: [profile_id])
+  professional Professional @relation(fields: [professional_id], references: [profile_id])
+  consultation Consultation?
+  payment      Payment?
+  review       Review?
+
+  @@index([professional_id, scheduled_at])
+  @@index([patient_id, scheduled_at])
+  @@map("appointments")
+}
+
+// ===========================================================================
+// EP-05 — Consulta y Videoconsulta
+// ===========================================================================
+
+/// Sesión efectivamente realizada (glosario: Consulta), 1:1 con el turno.
+model Consultation {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  appointment_id     String    @unique @db.Uuid
+  started_at         DateTime? @db.Timestamptz(6)
+  ended_at           DateTime? @db.Timestamptz(6)
+  professional_notes String?
+  created_at         DateTime  @default(now()) @db.Timestamptz(6)
+
+  appointment             Appointment           @relation(fields: [appointment_id], references: [id])
+  video_session           VideoSession?
+  summary                 ConsultationSummary?
+  clinical_record_entries ClinicalRecordEntry[]
+
+  @@map("consultations")
+}
+
+/// Sala de Daily.co asociada a la consulta (ADR-010).
+model VideoSession {
+  id                  String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  consultation_id     String               @unique @db.Uuid
+  daily_room_name     String?
+  daily_room_url      String?
+  audio_recording_url String?
+  status              video_session_status @default(CREADA)
+  started_at          DateTime?            @db.Timestamptz(6)
+  ended_at            DateTime?            @db.Timestamptz(6)
+  created_at          DateTime             @default(now()) @db.Timestamptz(6)
+
+  consultation Consultation @relation(fields: [consultation_id], references: [id], onDelete: Cascade)
+
+  @@map("video_sessions")
+}
+
+// ===========================================================================
+// EP-04 — Pagos (MercadoPago, ADR-013)
+// ===========================================================================
+
+/// Pago de un turno (1:1). No se almacenan datos de tarjeta (PCI queda en MercadoPago).
+model Payment {
+  id                        String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  appointment_id            String         @unique @db.Uuid
+  mercadopago_preference_id String?
+  mercadopago_payment_id    String?
+  amount                    Decimal        @db.Decimal(10, 2)
+  currency                  String         @default("ARS") @db.Char(3)
+  method                    String?
+  status                    payment_status @default(PENDIENTE)
+  confirmed_at              DateTime?      @db.Timestamptz(6)
+  created_at                DateTime       @default(now()) @db.Timestamptz(6)
+
+  appointment    Appointment           @relation(fields: [appointment_id], references: [id])
+  webhook_events PaymentWebhookEvent[]
+  refunds        Refund[]
+
+  @@map("payments")
+}
+
+/// Bitácora cruda de webhooks de MercadoPago (idempotencia + auditoría de firma).
+model PaymentWebhookEvent {
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payment_id             String?   @db.Uuid
+  mercadopago_payment_id String?
+  raw_payload            Json      @db.JsonB
+  signature              String?
+  processed              Boolean   @default(false)
+  received_at            DateTime  @default(now()) @db.Timestamptz(6)
+  processed_at           DateTime? @db.Timestamptz(6)
+
+  payment Payment? @relation(fields: [payment_id], references: [id])
+
+  @@index([mercadopago_payment_id])
+  @@map("payment_webhook_events")
+}
+
+/// Reembolsos (1:N sobre un pago).
+model Refund {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payment_id   String        @db.Uuid
+  amount       Decimal       @db.Decimal(10, 2)
+  status       refund_status @default(PENDIENTE)
+  reason       String?
+  processed_at DateTime?     @db.Timestamptz(6)
+  created_at   DateTime      @default(now()) @db.Timestamptz(6)
+
+  payment Payment @relation(fields: [payment_id], references: [id])
+
+  @@map("refunds")
+}
+
+// ===========================================================================
+// EP-06 — Historia Clínica (append-only + cadena de hash, ADR-014/015)
+// ===========================================================================
+
+/// Entrada inmutable de HC. Los datos clínicos se guardan como recurso FHIR R5 en
+/// content (JSONB). La inmutabilidad (append-only) y la cadena de hash se aplican
+/// vía RLS/triggers en una migración de EP-06, no desde Prisma.
+model ClinicalRecordEntry {
+  id                 String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id         String     @db.Uuid
+  professional_id    String     @db.Uuid
+  consultation_id    String?    @db.Uuid
+  corrects_entry_id  String?    @db.Uuid
+  entry_type         entry_type
+  fhir_resource_type String
+  content            Json       @db.JsonB
+  sequence_number    BigInt
+  content_hash       String     @db.Char(64)
+  previous_hash      String     @db.Char(64)
+  created_at         DateTime   @default(now()) @db.Timestamptz(6)
+
+  patient      Patient               @relation(fields: [patient_id], references: [profile_id])
+  professional Professional          @relation(fields: [professional_id], references: [profile_id])
+  consultation Consultation?         @relation(fields: [consultation_id], references: [id])
+  corrects     ClinicalRecordEntry?  @relation("EntryCorrections", fields: [corrects_entry_id], references: [id])
+  corrected_by ClinicalRecordEntry[] @relation("EntryCorrections")
+  summary      ConsultationSummary?
+
+  @@unique([patient_id, sequence_number])
+  @@index([patient_id, sequence_number])
+  @@map("clinical_record_entries")
+}
+
+// ===========================================================================
+// EP-07 — Inteligencia Artificial Clínica
+// ===========================================================================
+
+/// Transcripción (Whisper) + resumen estructurado (Gemini) pendiente de validación
+/// profesional (ADR-012). Solo al validarse se incorpora como entrada de HC.
+model ConsultationSummary {
+  id                    String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  consultation_id       String         @unique @db.Uuid
+  transcription_text    String?
+  summary_content       Json?          @db.JsonB
+  status                summary_status @default(PENDIENTE_VALIDACION)
+  validated_by          String?        @db.Uuid
+  incorporated_entry_id String?        @unique @db.Uuid
+  generated_at          DateTime?      @db.Timestamptz(6)
+  validated_at          DateTime?      @db.Timestamptz(6)
+  created_at            DateTime       @default(now()) @db.Timestamptz(6)
+
+  consultation       Consultation         @relation(fields: [consultation_id], references: [id])
+  validator          Professional?        @relation(fields: [validated_by], references: [profile_id])
+  incorporated_entry ClinicalRecordEntry? @relation(fields: [incorporated_entry_id], references: [id])
+
+  @@map("consultation_summaries")
+}
+
+// ===========================================================================
+// EP-08 — Comunicación
+// ===========================================================================
+
+/// Hilo único por par paciente-profesional.
+model Conversation {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id      String   @db.Uuid
+  professional_id String   @db.Uuid
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  patient      Patient      @relation(fields: [patient_id], references: [profile_id])
+  professional Professional @relation(fields: [professional_id], references: [profile_id])
+  messages     Message[]
+
+  @@unique([patient_id, professional_id])
+  @@map("conversations")
+}
+
+/// Mensajes del chat (ADR-011, Supabase Realtime).
+model Message {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversation_id String    @db.Uuid
+  sender_id       String    @db.Uuid
+  content         String?
+  attachment_url  String?
+  read_at         DateTime? @db.Timestamptz(6)
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+
+  conversation Conversation @relation(fields: [conversation_id], references: [id], onDelete: Cascade)
+  sender       Profile      @relation(fields: [sender_id], references: [id])
+
+  @@index([conversation_id, created_at])
+  @@map("messages")
+}
+
+/// Notificaciones in-app / push / email.
+model Notification {
+  id         String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id    String               @db.Uuid
+  type       notification_type
+  channel    notification_channel
+  payload    Json?                @db.JsonB
+  sent_at    DateTime?            @db.Timestamptz(6)
+  read_at    DateTime?            @db.Timestamptz(6)
+  created_at DateTime             @default(now()) @db.Timestamptz(6)
+
+  user Profile @relation(fields: [user_id], references: [id])
+
+  @@map("notifications")
+}
+
+/// Tokens de Expo Push por dispositivo.
+model PushToken {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id    String   @db.Uuid
+  token      String   @unique
+  platform   String?
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  user Profile @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("push_tokens")
+}
+
+// ===========================================================================
+// EP-09 — MediPass
+// ===========================================================================
+
+/// Código rotatorio de un solo uso, vigente 5 minutos.
+model MediPassCode {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id String    @db.Uuid
+  code       String    @db.VarChar(8)
+  expires_at DateTime  @db.Timestamptz(6)
+  used_at    DateTime? @db.Timestamptz(6)
+  created_at DateTime  @default(now()) @db.Timestamptz(6)
+
+  patient  Patient           @relation(fields: [patient_id], references: [profile_id], onDelete: Cascade)
+  sessions MediPassSession[]
+
+  @@map("medipass_codes")
+}
+
+/// Sesión de acceso de un consultante (por defecto 30 min, revocable).
+model MediPassSession {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id            String    @db.Uuid
+  medipass_code_id      String    @db.Uuid
+  consultant_profile_id String?   @db.Uuid
+  consultant_name       String?
+  consultant_license    String?   @db.VarChar(30)
+  expires_at            DateTime  @db.Timestamptz(6)
+  revoked_at            DateTime? @db.Timestamptz(6)
+  revoked_by            String?   @db.Uuid
+  started_at            DateTime  @default(now()) @db.Timestamptz(6)
+
+  patient     Patient             @relation(fields: [patient_id], references: [profile_id])
+  code        MediPassCode        @relation(fields: [medipass_code_id], references: [id])
+  consultant  Profile?            @relation("MediPassConsultant", fields: [consultant_profile_id], references: [id])
+  revoker     Profile?            @relation("MediPassRevoker", fields: [revoked_by], references: [id])
+  access_logs MediPassAccessLog[]
+
+  @@index([patient_id, expires_at])
+  @@map("medipass_sessions")
+}
+
+/// Auditoría de accesos dentro de una sesión MediPass.
+model MediPassAccessLog {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  session_id        String   @db.Uuid
+  patient_id        String   @db.Uuid
+  resource_accessed String?
+  accessed_at       DateTime @default(now()) @db.Timestamptz(6)
+
+  session MediPassSession @relation(fields: [session_id], references: [id])
+  patient Patient         @relation(fields: [patient_id], references: [profile_id])
+
+  @@map("medipass_access_logs")
+}
+
+// ===========================================================================
+// EP-10 — Plataforma y Auditoría
+// ===========================================================================
+
+/// Bitácora inmutable (append-only vía RLS) de accesos a HC/MediPass y acciones sensibles.
+model AuditLog {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actor_id      String?  @db.Uuid
+  action        String
+  resource_type String
+  resource_id   String?  @db.Uuid
+  metadata      Json?    @db.JsonB
+  created_at    DateTime @default(now()) @db.Timestamptz(6)
+
+  actor Profile? @relation(fields: [actor_id], references: [id])
+
+  @@map("audit_logs")
+}
+
+/// Resultado del job semanal de verificación de la cadena de hash (TT-03 / ENG-85).
+model IntegrityCheck {
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  status                String
+  inconsistencies_found Int      @default(0)
+  details               Json?    @db.JsonB
+  run_at                DateTime @default(now()) @db.Timestamptz(6)
+
+  @@map("integrity_checks")
 }
