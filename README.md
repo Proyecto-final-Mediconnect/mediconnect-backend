@@ -57,6 +57,81 @@ $ pnpm run test:e2e
 $ pnpm run test:cov
 ```
 
+## Integration tests (PostgreSQL 15 via Docker)
+
+Integration tests run against a real PostgreSQL 15 instance instead of Supabase,
+so the results reflect actual database behavior. The database is provided by
+[`docker-compose.yml`](./docker-compose.yml) locally, and by a GitHub Actions
+`services:` container in CI — both are driven by the same
+[`scripts/test-integration.sh`](./scripts/test-integration.sh) script, which
+applies the Prisma schema (`prisma db push`) before running the suite.
+
+Test files for this suite use the `*.integration.spec.ts` suffix (see
+[`test/jest-integration.json`](./test/jest-integration.json)), separate from
+unit tests (`pnpm run test`) and e2e tests (`pnpm run test:e2e`).
+
+### Dev Container (recommended)
+
+Opening the repo in the [dev container](./.devcontainer/devcontainer.json) starts
+everything automatically: `docker-compose.yml` defines an `app` service (the
+container VS Code attaches to) alongside `postgres-test`, wired together via
+`depends_on`/healthcheck so `postgres-test` is ready before `app` starts. Inside
+the dev container, `DATABASE_URL` already points at `postgres-test:5432` (the
+Compose network hostname — not `localhost`, which only works for processes
+running on the host), and `postStartCommand` runs `prisma db push` on every
+start. Once it's up, just run:
+
+```bash
+$ pnpm run test:integration
+```
+
+`SKIP_DOCKER=true` is set inside the dev container, so the script skips trying
+to run `docker compose up` from within the `app` container (no Docker CLI in
+there) — `postgres-test` is already running as a sibling service.
+
+### Requirements (without the Dev Container)
+
+- Docker and Docker Compose v2 installed locally.
+
+### Usage
+
+```bash
+# start the test database (postgres:15, healthcheck via pg_isready)
+$ pnpm run db:test:up
+
+# apply the Prisma schema and run the integration suite
+$ pnpm run test:integration
+
+# stop the test database (keeps the data volume)
+$ pnpm run db:test:down
+
+# stop the test database and wipe its data volume
+$ pnpm run db:test:reset
+```
+
+`pnpm run test:integration` starts the database automatically if it isn't
+running yet, so `pnpm run db:test:up` is optional — it's just handy to keep
+the database up between test runs during local development.
+
+### Environment variables
+
+The test database defaults (see [`docker-compose.yml`](./docker-compose.yml)
+and [`scripts/test-integration.sh`](./scripts/test-integration.sh)) work out
+of the box with no configuration. To override them, set these in your `.env`
+(see [`.env.example`](./.env.example)):
+
+| Variable                 | Default                                                                      | Description                     |
+| ------------------------ | ----------------------------------------------------------------------------- | -------------------------------- |
+| `POSTGRES_TEST_USER`     | `mediconnect`                                                                | Test DB user                     |
+| `POSTGRES_TEST_PASSWORD` | `mediconnect`                                                                | Test DB password                 |
+| `POSTGRES_TEST_DB`       | `mediconnect_test`                                                           | Test DB name                     |
+| `POSTGRES_TEST_PORT`     | `5433`                                                                       | Host port mapped to the container |
+| `DATABASE_URL`           | `postgresql://mediconnect:mediconnect@localhost:5433/mediconnect_test?schema=public` | Full connection string used by Prisma and Jest during `test:integration` |
+
+In CI (see [`.github/workflows/integration-tests.yml`](./.github/workflows/integration-tests.yml)),
+PostgreSQL 15 runs as a `services:` container instead of via Docker Compose,
+and `DATABASE_URL` points at that container.
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.

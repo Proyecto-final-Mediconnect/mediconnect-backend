@@ -19,6 +19,10 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "verify:rls": "node --env-file=.env --import tsx scripts/verify-rls.ts"
+    "db:test:up": "docker compose up -d --wait postgres-test",
+    "db:test:down": "docker compose down",
+    "db:test:reset": "docker compose down -v",
+    "test:integration": "bash scripts/test-integration.sh"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",

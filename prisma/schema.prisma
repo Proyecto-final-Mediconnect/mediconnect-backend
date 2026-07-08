@@ -1,5 +1,5 @@
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
   output   = "../generated/prisma"
 }
 
@@ -14,6 +14,16 @@ enum user_role {
   MODERADOR
 }
 
+/// Estado de validación de un profesional. Al registrarse queda en
+/// PENDIENTE_VALIDACION_MATRICULA; el equipo valida la matrícula manualmente
+/// en el MVP (ENG-43).
+enum professional_status {
+  PENDIENTE_VALIDACION_MATRICULA
+  VALIDADO
+  RECHAZADO
+  SUSPENDIDO
+}
+
 /// Perfil base 1:1 con auth.users de Supabase. Portador del rol.
 /// La fila se crea automáticamente vía trigger on_auth_user_created al
 /// registrarse el usuario en Supabase Auth (ver migración ep01_*).
@@ -22,9 +32,10 @@ model Profile {
   email       String    @unique
   role        user_role
   mfa_enabled Boolean   @default(false)
-  created_at  DateTime  @default(now()) @db.Timestamptz(6)
-  updated_at  DateTime  @default(now()) @db.Timestamptz(6)
-  patient     Patient?
+  created_at   DateTime      @default(now()) @db.Timestamptz(6)
+  updated_at   DateTime      @default(now()) @db.Timestamptz(6)
+  patient      Patient?
+  professional Professional?
 
   @@map("profiles")
 }
@@ -44,4 +55,26 @@ model Patient {
   profile    Profile   @relation(fields: [profile_id], references: [id], onDelete: Cascade)
 
   @@map("patients")
+}
+
+/// Perfil de profesional 1:1 con Profile (role = PROFESIONAL).
+/// Se crea al registrarse (ENG-43) con status PENDIENTE_VALIDACION_MATRICULA.
+/// La especialidad se asigna desde el catálogo (professional_specialties) en la
+/// validación manual de matrícula; en el registro se captura en metadata.
+model Professional {
+  profile_id             String              @id @db.Uuid
+  first_name             String
+  last_name              String
+  license_number         String              @db.VarChar(30)
+  status                 professional_status @default(PENDIENTE_VALIDACION_MATRICULA)
+  bio                    String?             @db.VarChar(500)
+  photo_url              String?
+  consultation_price     Decimal?            @db.Decimal(10, 2)
+  currency               String?             @db.Char(3)
+  mercadopago_account_id String?
+  created_at             DateTime            @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime            @default(now()) @db.Timestamptz(6)
+  profile                Profile             @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+
+  @@map("professionals")
 }

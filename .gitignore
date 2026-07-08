@@ -32,6 +32,9 @@ Thumbs.db
 !.vscode/extensions.json
 .idea/
 
+# Claude Code (config local, no del repo)
+.claude/
+
 # Prisma (solo backend) - el cliente generado, se regenera, no se versiona
 # /src/generated/prisma
 /generated/prisma
