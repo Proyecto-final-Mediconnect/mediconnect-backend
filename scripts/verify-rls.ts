@@ -6,19 +6,20 @@
 // `sub` del JWT (lo que en Supabase alimenta a auth.uid()). Sin ese patrón, Prisma
 // conecta como `postgres` y NO queda sujeto a RLS.
 //
-// Requisitos previos:
-//   1. .env con DATABASE_URL (conexión directa, 5432), SUPABASE_URL y
-//      SUPABASE_SERVICE_ROLE_KEY del proyecto mediconnect-dev.
-//   2. Migración aplicada:
-//        node node_modules/prisma/build/index.js db execute \
-//          --file prisma/migrations/20260706000000_ep01_identity_rls/migration.sql \
-//          --schema prisma/schema.prisma
-//   3. Client generado:  node node_modules/prisma/build/index.js generate
+// Modos (se autodetecta según el .env):
+//   * LOCAL (docker-compose, sin Supabase): basta DATABASE_URL. Los usuarios de
+//     prueba se insertan directo en auth.users y el trigger on_auth_user_created
+//     crea el profile — igual que hace GoTrue en prod.
+//   * PROD/DEV (Supabase): además SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY del
+//     proyecto mediconnect-dev; los usuarios se crean vía la Admin API de Auth.
+//
+// Requisitos comunes: migraciones aplicadas (prisma migrate deploy) y client
+// generado (prisma generate).
 //
 // Ejecutar:  node --env-file=.env --import tsx scripts/verify-rls.ts
 //
-// Crea 2 usuarios de prueba vía Admin API, corre las aserciones y los borra al
-// final (con limpieza incluso ante error).
+// Crea 2 usuarios de prueba, corre las aserciones y los borra al final (con
+// limpieza incluso ante error).
 
 import { createClient } from '@supabase/supabase-js';
 import { PrismaClient } from '../generated/prisma/client';
@@ -27,17 +28,57 @@ type Row = Record<string, unknown>;
 
 async function main(): Promise<void> {
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, DATABASE_URL } = process.env;
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !DATABASE_URL) {
-    console.error(
-      '❌ Faltan variables: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY y DATABASE_URL en .env',
-    );
+  if (!DATABASE_URL) {
+    console.error('❌ Falta DATABASE_URL en .env');
     process.exit(1);
   }
 
-  const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  // Si están las credenciales de Supabase, se usan usuarios reales vía Admin API
+  // (prod/dev). Si no, modo local: usuarios directo en auth.users (dispara el
+  // trigger que crea el profile). Así el mismo script corre contra el docker.
+  const admin =
+    SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+      ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        })
+      : null;
   const prisma = new PrismaClient();
+
+  // Alta de usuario de prueba, transparente al modo. Devuelve el id del usuario.
+  const createTestUser = async (email: string): Promise<string> => {
+    if (admin) {
+      const { data, error } = await admin.auth.admin.createUser({
+        email,
+        password: 'Password1',
+        email_confirm: true,
+      });
+      if (error) throw new Error(`createUser falló: ${error.message}`);
+      return data.user!.id;
+    }
+    const rows = await prisma.$queryRawUnsafe<{ id: string }[]>(
+      'insert into auth.users (email, email_confirmed_at) values ($1, now()) returning id',
+      email,
+    );
+    return rows[0].id;
+  };
+
+  // Baja del usuario y sus filas. En prod la FK profiles→auth.users cascadea
+  // todo; en local esa FK no existe, así que borramos profiles (cascadea
+  // patients) y también la fila de auth.users.
+  const deleteTestUser = async (id: string): Promise<void> => {
+    if (admin) {
+      await admin.auth.admin.deleteUser(id);
+      return;
+    }
+    await prisma.$executeRawUnsafe(
+      'delete from public.profiles where id = $1::uuid',
+      id,
+    );
+    await prisma.$executeRawUnsafe(
+      'delete from auth.users where id = $1::uuid',
+      id,
+    );
+  };
 
   let allOk = true;
   const check = (name: string, condition: boolean): void => {
@@ -71,19 +112,11 @@ async function main(): Promise<void> {
   let B = '';
   try {
     const stamp = Date.now();
-    const { data: da, error: ea } = await admin.auth.admin.createUser({
-      email: `eng37.a.${stamp}@test.mediconnect.dev`,
-      password: 'Password1',
-      email_confirm: true,
-    });
-    const { data: db, error: eb } = await admin.auth.admin.createUser({
-      email: `eng37.b.${stamp}@test.mediconnect.dev`,
-      password: 'Password1',
-      email_confirm: true,
-    });
-    if (ea || eb) throw new Error(`createUser falló: ${(ea ?? eb)!.message}`);
-    A = da.user!.id;
-    B = db.user!.id;
+    A = await createTestUser(`eng37.a.${stamp}@test.mediconnect.dev`);
+    B = await createTestUser(`eng37.b.${stamp}@test.mediconnect.dev`);
+    console.log(
+      `Modo: ${admin ? 'Supabase Auth (prod/dev)' : 'local (auth.users)'}`,
+    );
     console.log(`Usuarios de prueba:\n  A=${A}\n  B=${B}\n`);
 
     // Cada usuario crea SU fila de patients (prueba la policy de INSERT).
@@ -178,12 +211,11 @@ async function main(): Promise<void> {
       `\n${allOk ? '✅ TODAS las verificaciones de RLS pasaron' : '❌ Hubo fallos de aislamiento — revisar arriba'}`,
     );
   } finally {
-    // Borrar el usuario de Auth cascadea sus filas de profiles y patients
-    // (FK ON DELETE CASCADE). Cada borrado va aislado para que un fallo no impida
-    // los demás.
+    // deleteTestUser borra el usuario y cascadea sus filas de profiles/patients.
+    // Cada borrado va aislado para que un fallo no impida los demás.
     for (const id of [A, B].filter(Boolean)) {
       try {
-        await admin.auth.admin.deleteUser(id);
+        await deleteTestUser(id);
       } catch (e) {
         console.error(
           `⚠️  No se pudo borrar el usuario ${id}:`,

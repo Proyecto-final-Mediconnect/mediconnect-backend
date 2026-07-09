@@ -3,9 +3,9 @@
 # dependencias, cliente de Prisma, esquema aplicado a la BD del compose y seed.
 set -euo pipefail
 
-corepack enable
-corepack prepare pnpm@10 --activate
-
+# La imagen typescript-node ya trae pnpm en el PATH. No usamos corepack: como
+# usuario `node` no puede symlinkear en /usr/local/bin (EACCES) y, además, el
+# pnpm de la imagen tapa al shim de corepack, con lo que el pin no aplicaría.
 pnpm install
 
 # .env local (idempotente). Apunta al Postgres del docker-compose (host "db").
