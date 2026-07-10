@@ -7,6 +7,8 @@ export default defineConfig({
   schema: 'prisma/schema.prisma',
   migrations: {
     path: 'prisma/migrations',
+    // Usado por `prisma migrate reset` / `prisma db seed`.
+    seed: 'node --env-file=.env --import tsx prisma/seed.ts',
   },
   engine: 'classic',
   datasource: {
