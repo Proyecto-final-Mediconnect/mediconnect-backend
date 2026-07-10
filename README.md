@@ -1,173 +1,132 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# MediConnect — Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+API en **NestJS + Prisma**. La base es **PostgreSQL**: en local corre en Docker
+(este repo lo levanta solo); en producción es **Supabase**.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Puesta en marcha (local)
 
-## Description
+### Opción A — Devcontainer (recomendada)
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+1. Abrí el repo en VS Code → **"Reopen in Container"**.
+2. Listo. El devcontainer levanta Postgres (docker-compose), instala dependencias,
+   aplica las migraciones y corre el seed automáticamente (`.devcontainer/post-create.sh`).
 
-## Project setup
+### Opción B — Solo la base (para usar con DBeaver, o backend en tu host)
 
 ```bash
-$ pnpm install
+docker compose up -d db          # levanta Postgres en localhost:5432
+cp .env.example .env             # DATABASE_URL ya apunta al Postgres local
+#   ↑ si NO usás el devcontainer, cambiá el host "db" por "localhost" en .env
+pnpm install
+pnpm prisma generate
+pnpm run db:setup                # migrate deploy + seed
 ```
 
-## Compile and run the project
+**Conexión con DBeaver:** host `localhost`, puerto `5432`, base `mediconnect`,
+usuario `postgres`, contraseña `postgres`.
+
+## ¿Cómo tenemos todos la misma base? (migraciones vs. dump)
+
+La fuente de verdad del **esquema** son las **migraciones** de Prisma
+(`prisma/migrations/`), versionadas en git. Nadie se pasa un `.dump` para
+sincronizar tablas: cada uno corre las mismas migraciones y obtiene una base
+idéntica.
+
+| Pieza | Qué es | Dónde |
+|---|---|---|
+| **Migraciones** | El esquema (tablas, FKs, índices, enums, RLS). Fuente de verdad. | `prisma/migrations/*` |
+| **Seed** | Datos base compartidos (catálogo de especialidades). Es código, no binario. | `prisma/seed.ts` |
+| **Bootstrap ("el dump")** | Recrea en el Postgres local lo que en prod da Supabase: extensiones, roles (`anon`/`authenticated`/`service_role`), el schema `auth` y `auth.uid()`. Sin esto, las migraciones (que usan esas piezas) no aplicarían en un Postgres pelado. Corre una sola vez al crear el volumen. | `db/bootstrap/*.sql` |
+
+Entonces: **bootstrap (una vez) + migraciones + seed = base completa**, igual en la
+máquina de cada uno. Actualizar tras un `git pull`:
 
 ```bash
-# development
-$ pnpm run start
-
-# watch mode
-$ pnpm run start:dev
-
-# production mode
-$ pnpm run start:prod
+pnpm run db:migrate   # aplica migraciones nuevas
+pnpm run db:seed      # (si cambió el catálogo)
 ```
 
-## Run tests
+## Comandos de base de datos
+
+| Comando | Qué hace |
+|---|---|
+| `pnpm run db:setup` | Aplica migraciones + seed (primer arranque). |
+| `pnpm run db:migrate` | Aplica migraciones pendientes (`prisma migrate deploy`). |
+| `pnpm run db:seed` | Carga/actualiza los datos base. |
+| `pnpm run db:reset` | Borra el schema `public`, reaplica migraciones y seed. **Borra datos.** |
+| `pnpm run db:studio` | Abre Prisma Studio (explorador web de la BD). |
+
+> Se usa `prisma migrate deploy` (no `migrate dev`): nuestras migraciones incluyen
+> SQL que referencia el schema `auth`, que no existe en la shadow-DB que `migrate
+> dev` necesita.
+
+## Notas sobre Supabase (producción)
+
+- El esquema se aplica con `prisma migrate deploy` contra la connection string de
+  Supabase. Supabase ya provee `auth`, los roles y las extensiones, así que el
+  bootstrap local NO se usa allá.
+- La base `mediconnect-dev` que ya existía se debe **baselinear** la primera vez
+  (marcar como aplicadas las migraciones cuyas tablas ya creó `db push`):
+  `prisma migrate resolve --applied <migración>`.
+
+## Tests de integración (PostgreSQL 15 via Docker)
+
+La suite de integración corre contra un PostgreSQL 15 real (base **separada** de la
+de desarrollo, para no tocar tus datos). La provee
+[`docker-compose.yml`](./docker-compose.yml) (servicio `postgres-test`, puerto
+`5433`) localmente, y un contenedor `services:` de GitHub Actions en CI — ambos
+los maneja [`scripts/test-integration.sh`](./scripts/test-integration.sh), que
+aplica el esquema con `prisma db push` antes de correr los tests.
+
+Los archivos de esta suite usan el sufijo `*.integration.spec.ts` (ver
+[`test/jest-integration.json`](./test/jest-integration.json)), separado de los
+unit tests (`pnpm run test`) y los e2e (`pnpm run test:e2e`).
+
+### Desde el host (recomendado)
 
 ```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
-```
-
-## Integration tests (PostgreSQL 15 via Docker)
-
-Integration tests run against a real PostgreSQL 15 instance instead of Supabase,
-so the results reflect actual database behavior. The database is provided by
-[`docker-compose.yml`](./docker-compose.yml) locally, and by a GitHub Actions
-`services:` container in CI — both are driven by the same
-[`scripts/test-integration.sh`](./scripts/test-integration.sh) script, which
-applies the Prisma schema (`prisma db push`) before running the suite.
-
-Test files for this suite use the `*.integration.spec.ts` suffix (see
-[`test/jest-integration.json`](./test/jest-integration.json)), separate from
-unit tests (`pnpm run test`) and e2e tests (`pnpm run test:e2e`).
-
-### Dev Container (recommended)
-
-Opening the repo in the [dev container](./.devcontainer/devcontainer.json) starts
-everything automatically: `docker-compose.yml` defines an `app` service (the
-container VS Code attaches to) alongside `postgres-test`, wired together via
-`depends_on`/healthcheck so `postgres-test` is ready before `app` starts. Inside
-the dev container, `DATABASE_URL` already points at `postgres-test:5432` (the
-Compose network hostname — not `localhost`, which only works for processes
-running on the host), and `postStartCommand` runs `prisma db push` on every
-start. Once it's up, just run:
-
-```bash
-$ pnpm run test:integration
-```
-
-`SKIP_DOCKER=true` is set inside the dev container, so the script skips trying
-to run `docker compose up` from within the `app` container (no Docker CLI in
-there) — `postgres-test` is already running as a sibling service.
-
-### Requirements (without the Dev Container)
-
-- Docker and Docker Compose v2 installed locally.
-
-### Usage
-
-```bash
-# start the test database (postgres:15, healthcheck via pg_isready)
+# arranca la BD de test (postgres:15, healthcheck vía pg_isready)
 $ pnpm run db:test:up
 
-# apply the Prisma schema and run the integration suite
+# aplica el esquema y corre la suite de integración
 $ pnpm run test:integration
 
-# stop the test database (keeps the data volume)
+# frena la BD de test (conserva el volumen)
 $ pnpm run db:test:down
 
-# stop the test database and wipe its data volume
+# frena la BD de test y borra su volumen
 $ pnpm run db:test:reset
 ```
 
-`pnpm run test:integration` starts the database automatically if it isn't
-running yet, so `pnpm run db:test:up` is optional — it's just handy to keep
-the database up between test runs during local development.
+`test:integration` arranca la BD sola si no está corriendo, así que `db:test:up`
+es opcional. Por defecto apunta a `localhost:5433/mediconnect_test`.
 
-### Environment variables
+### Dentro del Dev Container
 
-The test database defaults (see [`docker-compose.yml`](./docker-compose.yml)
-and [`scripts/test-integration.sh`](./scripts/test-integration.sh)) work out
-of the box with no configuration. To override them, set these in your `.env`
-(see [`.env.example`](./.env.example)):
+El devcontainer levanta la BD de **desarrollo** (`db`, base `mediconnect`) y corre
+migraciones + seed automáticamente (ver [`post-create.sh`](./.devcontainer/post-create.sh)).
+Su `DATABASE_URL` apunta a esa BD de dev, **no** a la de test. Para correr la suite
+de integración dentro del contenedor, apuntá explícito a `postgres-test` y evitá que
+el script intente `docker compose` (no hay Docker CLI adentro):
 
-| Variable                 | Default                                                                      | Description                     |
-| ------------------------ | ----------------------------------------------------------------------------- | -------------------------------- |
-| `POSTGRES_TEST_USER`     | `mediconnect`                                                                | Test DB user                     |
-| `POSTGRES_TEST_PASSWORD` | `mediconnect`                                                                | Test DB password                 |
-| `POSTGRES_TEST_DB`       | `mediconnect_test`                                                           | Test DB name                     |
-| `POSTGRES_TEST_PORT`     | `5433`                                                                       | Host port mapped to the container |
-| `DATABASE_URL`           | `postgresql://mediconnect:mediconnect@localhost:5433/mediconnect_test?schema=public` | Full connection string used by Prisma and Jest during `test:integration` |
+```bash
+$ DATABASE_URL="postgresql://mediconnect:mediconnect@postgres-test:5432/mediconnect_test?schema=public" \
+    SKIP_DOCKER=true pnpm run test:integration
+```
 
-In CI (see [`.github/workflows/integration-tests.yml`](./.github/workflows/integration-tests.yml)),
-PostgreSQL 15 runs as a `services:` container instead of via Docker Compose,
-and `DATABASE_URL` points at that container.
+### Variables de entorno
+
+Los defaults de la BD de test (ver [`docker-compose.yml`](./docker-compose.yml) y
+[`scripts/test-integration.sh`](./scripts/test-integration.sh)) funcionan sin
+configurar nada. Para sobreescribirlos, poné en tu `.env` (ver
+[`.env.example`](./.env.example)): `POSTGRES_TEST_USER`, `POSTGRES_TEST_PASSWORD`,
+`POSTGRES_TEST_DB` (default `mediconnect_test`), `POSTGRES_TEST_PORT` (default
+`5433`). En CI (ver
+[`.github/workflows/integration-tests.yml`](./.github/workflows/integration-tests.yml)),
+Postgres 15 corre como contenedor `services:` y `DATABASE_URL` apunta a él.
 
 ## Deployment
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Modelo de datos
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Especificación completa en `mediconnect-docs/modelo-de-datos/` (`esquema.md`, `der.md`).

@@ -1,19 +1,52 @@
+name: mediconnect-backend
+
 services:
+  # ---------------------------------------------------------------------------
+  # Postgres local de desarrollo. Es el equivalente a Supabase pero en tu máquina.
+  # Se abre con DBeaver en localhost:5432 (postgres / postgres / db mediconnect).
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: mediconnect
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # "El dump": se ejecuta UNA vez al crear el volumen (emula Supabase local).
+      - ./db/bootstrap:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mediconnect"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Contenedor de desarrollo (lo usa el devcontainer de VS Code). Trae Node 24 y
+  # pnpm ya instalado. No hace falta levantarlo a mano: "Reopen in Container" lo
+  # arranca. Para solo la BD de dev: `docker compose up -d db`.
+  # ---------------------------------------------------------------------------
   app:
     image: mcr.microsoft.com/devcontainers/typescript-node:24-bookworm
-    volumes:
-      - .:/workspaces/mediconnect-backend:cached
     command: sleep infinity
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:cached
     environment:
-      # Dentro de la red de Compose los servicios se resuelven por nombre,
-      # no por localhost: por eso el devcontainer apunta a postgres-test:5432
-      # (distinto del localhost:5433 que usan los procesos corridos en el host).
-      DATABASE_URL: postgresql://mediconnect:mediconnect@postgres-test:5432/mediconnect_test?schema=public
-      SKIP_DOCKER: 'true'
+      # Dentro de la red de compose, el host de la BD es el nombre del servicio.
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/mediconnect?schema=public
     depends_on:
-      postgres-test:
+      db:
         condition: service_healthy
 
+  # ---------------------------------------------------------------------------
+  # Postgres SOLO para tests de integración (ENG-43+). Base separada de la de dev
+  # para que `prisma db push --accept-data-loss` de la suite NO toque tus datos.
+  # La usa `pnpm run test:integration` (localhost:5433). Ver scripts/test-integration.sh.
+  # ---------------------------------------------------------------------------
   postgres-test:
     image: postgres:15
     container_name: mediconnect-postgres-test
@@ -34,4 +67,5 @@ services:
       start_period: 5s
 
 volumes:
+  db-data:
   postgres_test_data:
