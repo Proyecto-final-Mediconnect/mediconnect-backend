@@ -1,5 +1,5 @@
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
   output   = "../generated/prisma"
 }
 
@@ -18,9 +18,13 @@ enum user_role {
   MODERADOR
 }
 
+/// Estado de validación de un profesional. Al registrarse queda en
+/// PENDIENTE_VALIDACION_MATRICULA; el equipo valida la matrícula manualmente
+/// en el MVP (ENG-43).
 enum professional_status {
   PENDIENTE_VALIDACION_MATRICULA
-  ACTIVO
+  VALIDADO
+  RECHAZADO
   SUSPENDIDO
 }
 
@@ -141,6 +145,9 @@ model Patient {
 }
 
 /// Perfil de profesional 1:1 con Profile (role = PROFESIONAL).
+/// Se crea al registrarse (ENG-43) con status PENDIENTE_VALIDACION_MATRICULA.
+/// La especialidad se asigna desde el catálogo (professional_specialties) en la
+/// validación manual de matrícula; en el registro se captura en metadata.
 model Professional {
   profile_id             String              @id @db.Uuid
   first_name             String

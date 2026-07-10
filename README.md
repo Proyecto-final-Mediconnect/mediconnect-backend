@@ -69,6 +69,64 @@ pnpm run db:seed      # (si cambió el catálogo)
   (marcar como aplicadas las migraciones cuyas tablas ya creó `db push`):
   `prisma migrate resolve --applied <migración>`.
 
+## Tests de integración (PostgreSQL 15 via Docker)
+
+La suite de integración corre contra un PostgreSQL 15 real (base **separada** de la
+de desarrollo, para no tocar tus datos). La provee
+[`docker-compose.yml`](./docker-compose.yml) (servicio `postgres-test`, puerto
+`5433`) localmente, y un contenedor `services:` de GitHub Actions en CI — ambos
+los maneja [`scripts/test-integration.sh`](./scripts/test-integration.sh), que
+aplica el esquema con `prisma db push` antes de correr los tests.
+
+Los archivos de esta suite usan el sufijo `*.integration.spec.ts` (ver
+[`test/jest-integration.json`](./test/jest-integration.json)), separado de los
+unit tests (`pnpm run test`) y los e2e (`pnpm run test:e2e`).
+
+### Desde el host (recomendado)
+
+```bash
+# arranca la BD de test (postgres:15, healthcheck vía pg_isready)
+$ pnpm run db:test:up
+
+# aplica el esquema y corre la suite de integración
+$ pnpm run test:integration
+
+# frena la BD de test (conserva el volumen)
+$ pnpm run db:test:down
+
+# frena la BD de test y borra su volumen
+$ pnpm run db:test:reset
+```
+
+`test:integration` arranca la BD sola si no está corriendo, así que `db:test:up`
+es opcional. Por defecto apunta a `localhost:5433/mediconnect_test`.
+
+### Dentro del Dev Container
+
+El devcontainer levanta la BD de **desarrollo** (`db`, base `mediconnect`) y corre
+migraciones + seed automáticamente (ver [`post-create.sh`](./.devcontainer/post-create.sh)).
+Su `DATABASE_URL` apunta a esa BD de dev, **no** a la de test. Para correr la suite
+de integración dentro del contenedor, apuntá explícito a `postgres-test` y evitá que
+el script intente `docker compose` (no hay Docker CLI adentro):
+
+```bash
+$ DATABASE_URL="postgresql://mediconnect:mediconnect@postgres-test:5432/mediconnect_test?schema=public" \
+    SKIP_DOCKER=true pnpm run test:integration
+```
+
+### Variables de entorno
+
+Los defaults de la BD de test (ver [`docker-compose.yml`](./docker-compose.yml) y
+[`scripts/test-integration.sh`](./scripts/test-integration.sh)) funcionan sin
+configurar nada. Para sobreescribirlos, poné en tu `.env` (ver
+[`.env.example`](./.env.example)): `POSTGRES_TEST_USER`, `POSTGRES_TEST_PASSWORD`,
+`POSTGRES_TEST_DB` (default `mediconnect_test`), `POSTGRES_TEST_PORT` (default
+`5433`). En CI (ver
+[`.github/workflows/integration-tests.yml`](./.github/workflows/integration-tests.yml)),
+Postgres 15 corre como contenedor `services:` y `DATABASE_URL` apunta a él.
+
+## Deployment
+
 ## Modelo de datos
 
 Especificación completa en `mediconnect-docs/modelo-de-datos/` (`esquema.md`, `der.md`).

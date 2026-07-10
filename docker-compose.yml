@@ -25,9 +25,9 @@ services:
       retries: 10
 
   # ---------------------------------------------------------------------------
-  # Contenedor de desarrollo (lo usa el devcontainer de VS Code). Trae Node 24;
-  # pnpm se activa vía corepack en postCreate. No hace falta levantarlo a mano:
-  # "Reopen in Container" lo arranca. Para solo la BD: `docker compose up -d db`.
+  # Contenedor de desarrollo (lo usa el devcontainer de VS Code). Trae Node 24 y
+  # pnpm ya instalado. No hace falta levantarlo a mano: "Reopen in Container" lo
+  # arranca. Para solo la BD de dev: `docker compose up -d db`.
   # ---------------------------------------------------------------------------
   app:
     image: mcr.microsoft.com/devcontainers/typescript-node:24-bookworm
@@ -42,5 +42,30 @@ services:
       db:
         condition: service_healthy
 
+  # ---------------------------------------------------------------------------
+  # Postgres SOLO para tests de integración (ENG-43+). Base separada de la de dev
+  # para que `prisma db push --accept-data-loss` de la suite NO toque tus datos.
+  # La usa `pnpm run test:integration` (localhost:5433). Ver scripts/test-integration.sh.
+  # ---------------------------------------------------------------------------
+  postgres-test:
+    image: postgres:15
+    container_name: mediconnect-postgres-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_TEST_USER:-mediconnect}
+      POSTGRES_PASSWORD: ${POSTGRES_TEST_PASSWORD:-mediconnect}
+      POSTGRES_DB: ${POSTGRES_TEST_DB:-mediconnect_test}
+    ports:
+      - '${POSTGRES_TEST_PORT:-5433}:5432'
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
 volumes:
   db-data:
+  postgres_test_data:

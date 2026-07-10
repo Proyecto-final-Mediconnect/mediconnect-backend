@@ -3,6 +3,8 @@
   "dockerComposeFile": "../docker-compose.yml",
   "service": "app",
   "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+  "forwardPorts": [3000, 5432, 5433],
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },

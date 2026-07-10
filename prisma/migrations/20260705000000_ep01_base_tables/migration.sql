@@ -22,7 +22,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 DO $$ BEGIN
-  CREATE TYPE "professional_status" AS ENUM ('PENDIENTE_VALIDACION_MATRICULA', 'ACTIVO', 'SUSPENDIDO');
+  CREATE TYPE "professional_status" AS ENUM ('PENDIENTE_VALIDACION_MATRICULA', 'VALIDADO', 'RECHAZADO', 'SUSPENDIDO');
 EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 -- CreateTable
