@@ -1,12 +1,16 @@
 name: Integration Tests
 
 on:
+  # ENG-38 extendió estos triggers para sumar `main`: la matriz 3.5.4 del Sprint 0
+  # pide la suite de integración también en el PR a main y en el merge a main.
   pull_request:
     branches:
       - 'release/**'
+      - 'main'
   push:
     branches:
       - 'release/**'
+      - 'main'
 
 jobs:
   integration:

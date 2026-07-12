@@ -1,0 +1,27 @@
+name: Deploy Production
+
+# Dispara el deploy en Render SOLO después de que el workflow "CI" haya pasado
+# sobre main (workflow_run + conclusion == success). Render tiene Auto-Deploy = No
+# para que el deploy lo controle este workflow.
+#
+# Gate de integración: la protección de rama de `main` (Sprint 0 §2.6) exige como
+# required checks tanto "CI" como "Integration Tests". Por eso ningún código con
+# integración rota puede llegar a main, y basta con esperar a que CI pase acá.
+#
+# Nota: workflow_run usa la definición del archivo en la rama por defecto (main),
+# así que este gate recién queda activo cuando ci.yml + este archivo estén en main.
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        run: curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
