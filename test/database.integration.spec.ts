@@ -8,7 +8,9 @@ describe('Database connectivity (integration)', () => {
   });
 
   it('connects to the real PostgreSQL instance and runs a query', async () => {
-    const result = await prisma.$queryRaw<{ result: number }[]>`SELECT 1 as result`;
+    const result = await prisma.$queryRaw<
+      { result: number }[]
+    >`SELECT 1 as result`;
 
     expect(result[0].result).toBe(1);
   });
