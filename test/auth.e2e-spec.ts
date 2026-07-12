@@ -128,7 +128,11 @@ describe('Auth registro (e2e)', () => {
   it('401 login con email sin confirmar (mismo mensaje genérico)', () => {
     signInWithPassword.mockResolvedValue({
       data: {},
-      error: { code: 'email_not_confirmed', status: 400, message: 'not confirmed' },
+      error: {
+        code: 'email_not_confirmed',
+        status: 400,
+        message: 'not confirmed',
+      },
     });
     return request(app.getHttpServer())
       .post('/auth/login')
