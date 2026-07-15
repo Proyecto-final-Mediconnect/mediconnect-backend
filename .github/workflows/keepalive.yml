@@ -1,0 +1,41 @@
+name: Keepalive
+
+# Mantiene vivos los servicios del plan Free:
+#  - Render Free duerme tras 15 min sin requests  -> ping cada 10 min (mitiga cold start).
+#  - Supabase Free se auto-pausa tras 7 días       -> ping cada 3 días.
+# workflow_dispatch permite dispararlo a mano para probar.
+on:
+  schedule:
+    - cron: '*/10 * * * *' # Render: cada 10 minutos
+    - cron: '17 3 */3 * *' # Supabase: cada 3 días, 03:17 UTC
+  workflow_dispatch:
+
+jobs:
+  ping-render:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/10 * * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render backend
+        # Pega a /health (contrato estable de monitoreo) en vez de a `/`, que es
+        # una página de usuario y podría cambiar.
+        # --max-time 60: un cold start de Render Free puede tardar ~30-50s.
+        # --retry 3 + --retry-all-errors: mientras el server despierta puede
+        # devolver 502/503; reintentamos en vez de dejar el job rojo.
+        run: >-
+          curl -fsS --max-time 60 --retry 3 --retry-all-errors
+          "$RENDER_BACKEND_URL/health" > /dev/null
+        env:
+          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
+
+  ping-supabase:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 3 */3 * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase REST
+        # Block scalar (>-) para que el "apikey: ..." del header no rompa el YAML.
+        run: >-
+          curl -fsS --max-time 30 "$SUPABASE_URL/rest/v1/"
+          -H "apikey: $SUPABASE_ANON_KEY" > /dev/null
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}

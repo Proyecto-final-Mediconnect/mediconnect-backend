@@ -1,0 +1,12 @@
+# Normaliza fin de línea: LF en el repo, sin importar el SO del dev.
+# Evita el ruido "LF will be replaced by CRLF" y que prettier/eslint difieran
+# entre Windows (dev) y Linux (CI).
+* text=auto eol=lf
+
+# Binarios: nunca tocar EOL.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
