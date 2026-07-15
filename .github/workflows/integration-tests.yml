@@ -47,7 +47,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          # ENG-38: centralizado en .nvmrc para no derivar entre workflows.
+          node-version-file: '.nvmrc'
           cache: pnpm
 
       - name: Install dependencies

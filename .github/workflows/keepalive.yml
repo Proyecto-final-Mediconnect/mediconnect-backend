@@ -16,9 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Render backend
-        # --max-time 60: un cold start de Render Free puede tardar ~30-50s en responder.
-        # TODO: cuando exista GET /health, apuntar RENDER_BACKEND_URL a .../health.
-        run: curl -fsS --max-time 60 --retry 2 "$RENDER_BACKEND_URL" > /dev/null
+        # Pega a /health (contrato estable de monitoreo) en vez de a `/`, que es
+        # una página de usuario y podría cambiar.
+        # --max-time 60: un cold start de Render Free puede tardar ~30-50s.
+        # --retry 3 + --retry-all-errors: mientras el server despierta puede
+        # devolver 502/503; reintentamos en vez de dejar el job rojo.
+        run: >-
+          curl -fsS --max-time 60 --retry 3 --retry-all-errors
+          "$RENDER_BACKEND_URL/health" > /dev/null
         env:
           RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
 
