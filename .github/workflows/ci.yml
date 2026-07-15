@@ -1,0 +1,84 @@
+name: CI
+
+# Calidad del código, alineado a la matriz 3.5.4 del Sprint 0.
+# La suite de INTEGRACIÓN vive en integration-tests.yml (ENG-39), que corre en
+# PR/merge a release/** y main. La protección de rama exige ambos checks en verde
+# antes de mergear, así que juntos forman el "pipeline completo" del doc.
+#
+#   push feature/** · bugfix/**   -> lint + type-check + unit
+#   PR/merge a release/** · main  -> lint + type-check + unit + e2e + build
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - 'bugfix/**'
+      - 'release/**'
+      - 'main'
+  pull_request:
+    branches:
+      - 'release/**'
+      - 'main'
+
+# Cancela runs obsoletos del mismo ref: si pusheás dos veces seguidas, el primero
+# se descarta en vez de encolarse. Ahorra minutos de runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint · Type-check · Unit
+    runs-on: ubuntu-latest
+    env:
+      # Valores dummy: ninguno se conecta a nada en CI.
+      #  - DATABASE_URL: prisma.config.ts lo exige para cargar; `prisma generate`
+      #    no conecta, solo necesita que exista.
+      #  - SUPABASE_*: app.e2e-spec.ts levanta el AppModule real, y
+      #    SupabaseService.onModuleInit() hace getOrThrow() de estas dos.
+      #    `createClient` no hace llamadas de red al construirse.
+      DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+      SUPABASE_URL: https://placeholder.supabase.co
+      SUPABASE_ANON_KEY: placeholder-anon-key
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: pnpm exec prisma generate
+
+      - name: Lint
+        run: pnpm run lint:ci
+
+      - name: Type-check
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: E2E tests (stack HTTP)
+        # Tests de endpoints REST con Supertest. El doc los ubica en el nivel de
+        # INTEGRACIÓN (§4.2.2.3), así que corren desde el PR a release en
+        # adelante, igual que el build. No necesitan Postgres: auth mockea
+        # Supabase y app solo renderiza HTML.
+        if: github.event_name == 'pull_request' || startsWith(github.ref_name, 'release/') || github.ref_name == 'main'
+        run: pnpm run test:e2e
+
+      - name: Build (producción)
+        # El doc pone el "build de producción" a partir del PR a release, no en
+        # el push a feature/bugfix.
+        if: github.event_name == 'pull_request' || startsWith(github.ref_name, 'release/') || github.ref_name == 'main'
+        run: pnpm run build
