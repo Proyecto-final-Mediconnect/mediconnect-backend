@@ -45,19 +45,26 @@ async function main(): Promise<void> {
   const prisma = new PrismaClient();
 
   // Alta de usuario de prueba, transparente al modo. Devuelve el id del usuario.
-  const createTestUser = async (email: string): Promise<string> => {
+  // `role` (opcional) viaja en el metadata del signUp, igual que en el registro
+  // real, para poder probar el clamp anti-escalada del alta.
+  const createTestUser = async (
+    email: string,
+    role?: string,
+  ): Promise<string> => {
     if (admin) {
       const { data, error } = await admin.auth.admin.createUser({
         email,
         password: 'Password1',
         email_confirm: true,
+        user_metadata: role ? { role } : undefined,
       });
       if (error) throw new Error(`createUser falló: ${error.message}`);
-      return data.user!.id;
+      return data.user.id;
     }
     const rows = await prisma.$queryRawUnsafe<{ id: string }[]>(
-      'insert into auth.users (email, email_confirmed_at) values ($1, now()) returning id',
+      'insert into auth.users (email, email_confirmed_at, raw_user_meta_data) values ($1, now(), $2::jsonb) returning id',
       email,
+      JSON.stringify(role ? { role } : {}),
     );
     return rows[0].id;
   };
@@ -86,6 +93,22 @@ async function main(): Promise<void> {
     if (!condition) allOk = false;
   };
 
+  // Corre `work` esperando que una policy/trigger lo bloquee. Devuelve true SOLO
+  // si el error es del tipo esperado (RLS / permiso / trigger). Así una excepción
+  // por otra causa (FK, typo, red) no da un "verde en falso" en un check de
+  // seguridad: si no hubo error, o el error no matchea, la aserción falla.
+  const expectBlocked = async (
+    work: () => Promise<unknown>,
+    pattern: RegExp,
+  ): Promise<boolean> => {
+    try {
+      await work();
+      return false;
+    } catch (e) {
+      return pattern.test((e as Error).message);
+    }
+  };
+
   // Corre `work(tx)` como usuario autenticado: adopta el rol `authenticated` y
   // publica el claim `sub`. Es el patrón exacto a usar en el backend con Prisma.
   const asUser = <T>(
@@ -110,10 +133,17 @@ async function main(): Promise<void> {
 
   let A = '';
   let B = '';
+  let M = '';
   try {
     const stamp = Date.now();
     A = await createTestUser(`eng37.a.${stamp}@test.mediconnect.dev`);
     B = await createTestUser(`eng37.b.${stamp}@test.mediconnect.dev`);
+    // M se registra pidiendo role=MODERADOR en el metadata: el trigger debe
+    // acotarlo a PACIENTE (ver check de escalada por metadata más abajo).
+    M = await createTestUser(
+      `eng37.mod.${stamp}@test.mediconnect.dev`,
+      'MODERADOR',
+    );
     console.log(
       `Modo: ${admin ? 'Supabase Auth (prod/dev)' : 'local (auth.users)'}`,
     );
@@ -130,17 +160,16 @@ async function main(): Promise<void> {
     // Caso negativo del WITH CHECK: A NO puede insertar una fila de patients a
     // nombre de B. Se corre ANTES de que B cree la suya, así el único bloqueo es
     // la policy (profile_id = auth.uid()), no un choque de PK.
-    let insertForOtherBlocked = false;
-    try {
-      await asUser(A, (tx) =>
-        tx.$executeRawUnsafe(
-          "insert into patients (profile_id, first_name, last_name) values ($1::uuid, 'Falso', 'Ajeno')",
-          B,
+    const insertForOtherBlocked = await expectBlocked(
+      () =>
+        asUser(A, (tx) =>
+          tx.$executeRawUnsafe(
+            "insert into patients (profile_id, first_name, last_name) values ($1::uuid, 'Falso', 'Ajeno')",
+            B,
+          ),
         ),
-      );
-    } catch {
-      insertForOtherBlocked = true;
-    }
+      /row-level security|violates|permission denied/i,
+    );
     check(
       'patients: A NO puede insertar una fila a nombre de B (WITH CHECK)',
       insertForOtherBlocked,
@@ -194,21 +223,34 @@ async function main(): Promise<void> {
       updated === 0,
     );
 
-    // Escalada de privilegios: A intenta convertirse en MODERADOR sobre su fila.
-    let roleEscalationBlocked = false;
-    try {
-      await asUser(A, (tx) =>
-        tx.$executeRawUnsafe(
-          "update profiles set role = 'MODERADOR' where id = $1::uuid",
-          A,
+    // Escalada de privilegios vía UPDATE: A intenta convertirse en MODERADOR
+    // sobre su propia fila (lo frena el trigger prevent_profile_role_change).
+    const roleEscalationBlocked = await expectBlocked(
+      () =>
+        asUser(A, (tx) =>
+          tx.$executeRawUnsafe(
+            "update profiles set role = 'MODERADOR' where id = $1::uuid",
+            A,
+          ),
         ),
-      );
-    } catch {
-      roleEscalationBlocked = true;
-    }
+      /rol del perfil|row-level security|permission denied/i,
+    );
     check(
-      'profiles: A NO puede auto-escalar su rol a MODERADOR',
+      'profiles: A NO puede auto-escalar su rol a MODERADOR (UPDATE)',
       roleEscalationBlocked,
+    );
+
+    // Escalada de privilegios en el ALTA: la anon key es pública, así que un
+    // signUp directo puede mandar role=MODERADOR en el metadata (M se creó así).
+    // El trigger handle_new_user debe degradarlo a PACIENTE. Se lee como owner
+    // (sin RLS) para ver el rol realmente persistido.
+    const modRole = await prisma.$queryRawUnsafe<{ role: string }[]>(
+      'select role from public.profiles where id = $1::uuid',
+      M,
+    );
+    check(
+      'profiles: un signup con role=MODERADOR en el metadata NO obtiene rol privilegiado',
+      modRole.length === 1 && modRole[0].role === 'PACIENTE',
     );
 
     // Deny-all para anónimo: sin GRANT a `anon`, la lectura es denegada a nivel
@@ -233,7 +275,7 @@ async function main(): Promise<void> {
   } finally {
     // deleteTestUser borra el usuario y cascadea sus filas de profiles/patients.
     // Cada borrado va aislado para que un fallo no impida los demás.
-    for (const id of [A, B].filter(Boolean)) {
+    for (const id of [A, B, M].filter(Boolean)) {
       try {
         await deleteTestUser(id);
       } catch (e) {

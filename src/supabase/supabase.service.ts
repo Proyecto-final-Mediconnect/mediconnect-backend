@@ -1,6 +1,11 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
+
+// Tipo del cliente tal como lo infiere `createClient`. Declarar el campo con
+// este tipo (en vez de `SupabaseClient` con genéricos por defecto) evita el
+// `no-unsafe-assignment` por desajuste de parámetros genéricos de la librería.
+type SupabaseAnonClient = ReturnType<typeof createClient>;
 
 /**
  * Provee un cliente de Supabase configurado con la anon key.
@@ -10,7 +15,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
  */
 @Injectable()
 export class SupabaseService implements OnModuleInit {
-  private client!: SupabaseClient;
+  private client!: SupabaseAnonClient;
 
   constructor(private readonly config: ConfigService) {}
 
@@ -27,7 +32,7 @@ export class SupabaseService implements OnModuleInit {
     });
   }
 
-  getClient(): SupabaseClient {
+  getClient(): SupabaseAnonClient {
     return this.client;
   }
 }

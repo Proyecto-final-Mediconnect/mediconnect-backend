@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Security
+- Prevent privilege escalation at signup: `handle_new_user` now clamps the role
+  from client-controlled `raw_user_meta_data` to non-privileged roles
+  (PACIENTE / PROFESIONAL); MODERADOR can only be assigned by service_role (ENG-37)
+- FORCE ROW LEVEL SECURITY on profiles/patients/professionals as defense in depth,
+  mirrored in the Supabase migrations (ENG-37)
+
+### Added
+- RLS verification script now checks the signup role clamp and asserts the exact
+  RLS/trigger error on negative cases to avoid false positives (ENG-37)
+
 ## 1.0.0 - 2026-07-06
 
 ### Added
