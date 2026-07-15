@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient } from '@supabase/supabase-js';
+import { createRemoteJWKSet, type JWTVerifyGetKey } from 'jose';
 
 // Tipo del cliente tal como lo infiere `createClient`. Declarar el campo con
 // este tipo (en vez de `SupabaseClient` con genéricos por defecto) evita el
@@ -8,14 +9,18 @@ import { createClient } from '@supabase/supabase-js';
 type SupabaseAnonClient = ReturnType<typeof createClient>;
 
 /**
- * Provee un cliente de Supabase configurado con la anon key.
- * Se usa para operaciones de Supabase Auth (signUp, signIn, etc.).
+ * Provee un cliente de Supabase configurado con la anon key, y el JWKS del
+ * proyecto para verificar JWTs localmente (ver ENG-40/ENG-92: los tokens se
+ * firman con ES256, no hay JWT_SECRET). El JWKS se construye una única vez
+ * (singleton, cacheado por `createRemoteJWKSet`) y no por request.
  * El registro/verificación de email pasa por acá; el perfil en la tabla
  * `profiles` lo crea un trigger de Postgres al insertarse el usuario.
  */
 @Injectable()
 export class SupabaseService implements OnModuleInit {
   private client!: SupabaseAnonClient;
+  private jwks!: JWTVerifyGetKey;
+  private issuer!: string;
 
   constructor(private readonly config: ConfigService) {}
 
@@ -30,9 +35,22 @@ export class SupabaseService implements OnModuleInit {
         autoRefreshToken: false,
       },
     });
+
+    this.issuer = `${url}/auth/v1`;
+    this.jwks = createRemoteJWKSet(
+      new URL(`${this.issuer}/.well-known/jwks.json`),
+    );
   }
 
   getClient(): SupabaseAnonClient {
     return this.client;
+  }
+
+  getJWKS(): JWTVerifyGetKey {
+    return this.jwks;
+  }
+
+  getIssuer(): string {
+    return this.issuer;
   }
 }

@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - RLS verification script now checks the signup role clamp and asserts the exact
   RLS/trigger error on negative cases to avoid false positives (ENG-37)
+- `JwtAuthGuard`: verifies Supabase JWTs locally against the project's JWKS
+  (ES256, no shared secret), reading the token from the `Authorization` header
+  or the `sb-access-token` cookie, and attaches the authenticated user to the
+  request (ENG-92)
+- Environment variable validation on startup (`DATABASE_URL`, `SUPABASE_URL`,
+  `SUPABASE_ANON_KEY`) so misconfiguration fails fast with a clear error (ENG-92)
 
 ## 1.0.0 - 2026-07-06
 
