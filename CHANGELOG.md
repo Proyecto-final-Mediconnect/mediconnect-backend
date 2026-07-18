@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RequestLoggerMiddleware`: logs method, path, status code, duration and the
   authenticated user id (never body/headers/cookies/tokens) for every request
   except `GET /health` (ENG-92)
+- `POST /auth/refresh`: exchanges the `sb-refresh-token` cookie for a new
+  access/refresh token pair via Supabase, re-setting both cookies. Invalid,
+  expired or reused refresh tokens clear the session cookies and respond
+  401; a Supabase rate limit responds 503 without touching the cookies
+  (ENG-92)
 
 ## 1.0.0 - 2026-07-06
 

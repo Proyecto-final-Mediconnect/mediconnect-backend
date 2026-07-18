@@ -13,6 +13,7 @@ describe('Auth registro (e2e)', () => {
   let app: INestApplication<App>;
   const signUp = jest.fn();
   const signInWithPassword = jest.fn();
+  const refreshSession = jest.fn();
   let publicKey: CryptoKey;
   let privateKey: CryptoKey;
 
@@ -29,6 +30,7 @@ describe('Auth registro (e2e)', () => {
   beforeEach(async () => {
     signUp.mockReset();
     signInWithPassword.mockReset();
+    refreshSession.mockReset();
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
@@ -38,7 +40,9 @@ describe('Auth registro (e2e)', () => {
       // verifique tokens firmados en el test, sin red.
       .overrideProvider(SupabaseService)
       .useValue({
-        getClient: () => ({ auth: { signUp, signInWithPassword } }),
+        getClient: () => ({
+          auth: { signUp, signInWithPassword, refreshSession },
+        }),
         getJWKS: () => publicKey,
         getIssuer: () => ISSUER,
       })
@@ -214,6 +218,79 @@ describe('Auth registro (e2e)', () => {
         expect(
           setCookie.some((c) => /sb-refresh-token=;.*Expires/i.test(c)),
         ).toBe(true);
+      });
+  });
+
+  it('200 POST /auth/refresh rota ambas cookies y no expone tokens en el body', () => {
+    refreshSession.mockResolvedValue({
+      data: {
+        session: { access_token: 'new-acc', refresh_token: 'new-ref' },
+        user: { id: 'uid', email: creds.email },
+      },
+      error: null,
+    });
+
+    return request(app.getHttpServer())
+      .post('/auth/refresh')
+      .set('Cookie', ['sb-refresh-token=old-ref'])
+      .expect(200)
+      .expect((res) => {
+        expect(refreshSession).toHaveBeenCalledWith({
+          refresh_token: 'old-ref',
+        });
+        expect(res.body.user.email).toBe(creds.email);
+        expect(res.body.accessToken).toBeUndefined();
+        expect(res.body.refreshToken).toBeUndefined();
+        const setCookie = res.headers['set-cookie'] as unknown as string[];
+        expect(
+          setCookie.some((c) => c.startsWith('sb-access-token=new-acc')),
+        ).toBe(true);
+        expect(
+          setCookie.some((c) => c.startsWith('sb-refresh-token=new-ref')),
+        ).toBe(true);
+      });
+  });
+
+  it('401 POST /auth/refresh sin cookie de refresh token', () => {
+    return request(app.getHttpServer()).post('/auth/refresh').expect(401);
+  });
+
+  it('401 POST /auth/refresh con refresh token inválido/ya usado, y limpia las cookies', () => {
+    refreshSession.mockResolvedValue({
+      data: {},
+      error: { status: 400, message: 'Invalid Refresh Token' },
+    });
+
+    return request(app.getHttpServer())
+      .post('/auth/refresh')
+      .set('Cookie', ['sb-refresh-token=token-viejo'])
+      .expect(401)
+      .expect((res) => {
+        const setCookie = res.headers['set-cookie'] as unknown as string[];
+        expect(
+          setCookie.some((c) => /sb-access-token=;.*Expires/i.test(c)),
+        ).toBe(true);
+        expect(
+          setCookie.some((c) => /sb-refresh-token=;.*Expires/i.test(c)),
+        ).toBe(true);
+      });
+  });
+
+  it('503 POST /auth/refresh con rate limit, sin limpiar las cookies', () => {
+    refreshSession.mockResolvedValue({
+      data: {},
+      error: { status: 429, message: 'rate limit' },
+    });
+
+    return request(app.getHttpServer())
+      .post('/auth/refresh')
+      .set('Cookie', ['sb-refresh-token=ref'])
+      .expect(503)
+      .expect((res) => {
+        const setCookie = res.headers['set-cookie'] as unknown as
+          | string[]
+          | undefined;
+        expect(setCookie).toBeUndefined();
       });
   });
 });

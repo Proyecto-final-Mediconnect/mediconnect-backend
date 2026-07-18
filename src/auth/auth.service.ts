@@ -119,4 +119,30 @@ export class AuthService {
       user: { id: data.user.id, email: data.user.email },
     };
   }
+
+  async refresh(refreshToken: string) {
+    const { data, error } = await this.supabase
+      .getClient()
+      .auth.refreshSession({ refresh_token: refreshToken });
+
+    if (error || !data.session || !data.user) {
+      if (error?.status === 429) {
+        throw new ServiceUnavailableException(
+          'Demasiados intentos. Probá de nuevo en unos minutos.',
+        );
+      }
+      // Refresh token inválido, vencido o ya usado (Supabase rota el refresh
+      // token en cada uso: uno viejo reusado cae acá). No hay nada que
+      // reintentar del lado del cliente salvo loguearse de nuevo.
+      throw new UnauthorizedException(
+        'Sesión inválida. Iniciá sesión de nuevo.',
+      );
+    }
+
+    return {
+      accessToken: data.session.access_token,
+      refreshToken: data.session.refresh_token,
+      user: { id: data.user.id, email: data.user.email },
+    };
+  }
 }
