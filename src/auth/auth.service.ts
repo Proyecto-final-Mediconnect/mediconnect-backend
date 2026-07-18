@@ -131,6 +131,16 @@ export class AuthService {
           'Demasiados intentos. Probá de nuevo en unos minutos.',
         );
       }
+      // Fallo de infra (Supabase inalcanzable = sin `status`, o 5xx
+      // transitorio): NO es un token inválido. Devolvemos 503 para que el
+      // controller NO limpie las cookies — deslogear al usuario por una caída
+      // temporal de Supabase sería un falso negativo (mismo criterio que
+      // JwtAuthGuard). Solo un error real del token (400) desloguea.
+      if (error && (!error.status || error.status >= 500)) {
+        throw new ServiceUnavailableException(
+          'No pudimos renovar tu sesión. Probá de nuevo en unos minutos.',
+        );
+      }
       // Refresh token inválido, vencido o ya usado (Supabase rota el refresh
       // token en cada uso: uno viejo reusado cae acá). No hay nada que
       // reintentar del lado del cliente salvo loguearse de nuevo.

@@ -36,7 +36,9 @@ export class SupabaseService implements OnModuleInit {
       },
     });
 
-    this.issuer = `${url}/auth/v1`;
+    // Sin slash final: un SUPABASE_URL con `/` al final generaría `//auth/v1`
+    // y el `issuer` no matchearía el `iss` del token → todo 401 (JwtAuthGuard).
+    this.issuer = `${url.replace(/\/+$/, '')}/auth/v1`;
     this.jwks = createRemoteJWKSet(
       new URL(`${this.issuer}/.well-known/jwks.json`),
     );

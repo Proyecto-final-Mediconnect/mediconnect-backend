@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`@nestjs/throttler`), as a stopgap while Supabase's refresh-token
   reuse-detection is confirmed non-functional on this project (see
   `docs/security/refresh-token-reuse-risk-plan.md`)
+- Enable `trust proxy` so `ThrottlerGuard` keys the rate limit on the real
+  client IP behind a reverse proxy, instead of collapsing every user onto the
+  proxy IP (which would neutralize the per-IP limit and self-DoS the app)
+- `POST /auth/refresh` now maps Supabase infra failures (network / 5xx) to 503
+  without clearing the session cookies, so a transient Supabase outage no longer
+  logs the user out; only a genuinely invalid/reused token (400) clears cookies
+- `RequestLoggerMiddleware` logs the request path without its query string, so a
+  future secret-in-query route (e.g. an OAuth `?code=`) can't leak into logs
+- Strip a trailing slash from `SUPABASE_URL` when building the JWKS issuer, so a
+  `https://…/` value doesn't produce a `//auth/v1` issuer that fails JWT checks
 
 ### Added
 - RLS verification script now checks the signup role clamp and asserts the exact

@@ -261,4 +261,26 @@ describe('AuthService', () => {
       ServiceUnavailableException,
     );
   });
+
+  it('refresh con Supabase caído (sin status) lanza ServiceUnavailable, no Unauthorized', async () => {
+    refreshSession.mockResolvedValue({
+      data: {},
+      error: { message: 'fetch failed' },
+    });
+
+    await expect(service.refresh('ref')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('refresh con error 5xx de Supabase lanza ServiceUnavailable, no Unauthorized', async () => {
+    refreshSession.mockResolvedValue({
+      data: {},
+      error: { status: 500, message: 'internal error' },
+    });
+
+    await expect(service.refresh('ref')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
 });

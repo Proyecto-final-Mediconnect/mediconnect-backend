@@ -17,8 +17,11 @@ export class RequestLoggerMiddleware implements NestMiddleware {
     res.on('finish', () => {
       const durationMs = Date.now() - start;
       const userId = req.user?.id ?? 'anon';
+      // Solo el path, sin query string: si alguna ruta futura recibiera un
+      // secreto por query (ej. un callback `?code=...`), no se filtra al log.
+      const path = req.originalUrl.split('?')[0];
       this.logger.log(
-        `${req.method} ${req.originalUrl} ${res.statusCode} ${durationMs}ms user=${userId}`,
+        `${req.method} ${path} ${res.statusCode} ${durationMs}ms user=${userId}`,
       );
     });
 
