@@ -1,8 +1,14 @@
-import { Module } from '@nestjs/common';
+import {
+  MiddlewareConsumer,
+  Module,
+  NestModule,
+  RequestMethod,
+} from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
+import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { SupabaseModule } from './supabase/supabase.module';
@@ -17,4 +23,11 @@ import { SupabaseModule } from './supabase/supabase.module';
   controllers: [AppController],
   providers: [AppService],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(RequestLoggerMiddleware)
+      .exclude({ path: 'health', method: RequestMethod.GET })
+      .forRoutes('*');
+  }
+}

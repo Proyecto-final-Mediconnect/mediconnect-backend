@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /auth/me` (protected by `JwtAuthGuard`, returns the authenticated user)
   and `POST /auth/logout` (clears the session cookies) so the frontend has a
   concrete way to exercise the guard end-to-end (ENG-92)
+- `RequestLoggerMiddleware`: logs method, path, status code, duration and the
+  authenticated user id (never body/headers/cookies/tokens) for every request
+  except `GET /health` (ENG-92)
 
 ## 1.0.0 - 2026-07-06
 
