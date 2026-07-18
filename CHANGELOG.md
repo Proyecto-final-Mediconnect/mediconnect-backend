@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (PACIENTE / PROFESIONAL); MODERADOR can only be assigned by service_role (ENG-37)
 - FORCE ROW LEVEL SECURITY on profiles/patients/professionals as defense in depth,
   mirrored in the Supabase migrations (ENG-37)
+- Rate limit `POST /auth/refresh` to 5 requests/minute per IP
+  (`@nestjs/throttler`), as a stopgap while Supabase's refresh-token
+  reuse-detection is confirmed non-functional on this project (see
+  `docs/security/refresh-token-reuse-risk-plan.md`)
 
 ### Added
 - RLS verification script now checks the signup role clamp and asserts the exact

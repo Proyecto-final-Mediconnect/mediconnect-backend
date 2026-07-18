@@ -293,4 +293,12 @@ describe('Auth registro (e2e)', () => {
         expect(setCookie).toBeUndefined();
       });
   });
+
+  it('429 tras superar el límite de POST /auth/refresh (mitigación: Supabase no rechaza el reuso, ver docs/security)', async () => {
+    for (let i = 0; i < 5; i++) {
+      await request(app.getHttpServer()).post('/auth/refresh');
+    }
+
+    return request(app.getHttpServer()).post('/auth/refresh').expect(429);
+  });
 });

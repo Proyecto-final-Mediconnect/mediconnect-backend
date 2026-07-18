@@ -10,6 +10,7 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
@@ -86,6 +87,10 @@ export class AuthController {
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
+  // Supabase no está rechazando el reuso de refresh tokens (ver
+  // docs/security/refresh-token-reuse-risk-plan.md) — limitamos fuerte por
+  // IP como mitigación de defensa en profundidad mientras se resuelve.
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
