@@ -1,9 +1,15 @@
-import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import {
+  ExecutionContext,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { generateKeyPair, SignJWT } from 'jose';
+import { JWKSTimeout } from 'jose/errors';
 import { SupabaseService } from '../../supabase/supabase.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
+const AUDIENCE = 'authenticated';
 
 function makeContext(request: object): ExecutionContext {
   return {
@@ -17,12 +23,14 @@ describe('JwtAuthGuard', () => {
   let guard: JwtAuthGuard;
   let publicKey: CryptoKey;
   let privateKey: CryptoKey;
+  let rsaPrivateKey: CryptoKey;
 
   async function sign(
     overrides: {
       issuer?: string;
+      audience?: string;
       expired?: boolean;
-      sub?: string;
+      sub?: string | null;
       email?: string;
       role?: string;
     } = {},
@@ -32,9 +40,13 @@ describe('JwtAuthGuard', () => {
       role: overrides.role ?? 'authenticated',
     })
       .setProtectedHeader({ alg: 'ES256' })
-      .setSubject(overrides.sub ?? 'user-id-123')
       .setIssuer(overrides.issuer ?? ISSUER)
+      .setAudience(overrides.audience ?? AUDIENCE)
       .setIssuedAt();
+
+    if (overrides.sub !== null) {
+      jwt.setSubject(overrides.sub ?? 'user-id-123');
+    }
 
     if (overrides.expired) {
       jwt.setExpirationTime('-1h');
@@ -49,6 +61,7 @@ describe('JwtAuthGuard', () => {
     const keyPair = await generateKeyPair('ES256');
     publicKey = keyPair.publicKey;
     privateKey = keyPair.privateKey;
+    ({ privateKey: rsaPrivateKey } = await generateKeyPair('RS256'));
   });
 
   beforeEach(() => {
@@ -111,6 +124,43 @@ describe('JwtAuthGuard', () => {
     );
   });
 
+  it('rechaza un token con audiencia incorrecta', async () => {
+    const token = await sign({ audience: 'anon' });
+    const request = { headers: { authorization: `Bearer ${token}` } };
+
+    await expect(guard.canActivate(makeContext(request))).rejects.toThrow(
+      UnauthorizedException,
+    );
+  });
+
+  it('rechaza un token firmado con un algoritmo no permitido (RS256)', async () => {
+    const token = await new SignJWT({
+      email: 'paciente@test.com',
+      role: 'authenticated',
+    })
+      .setProtectedHeader({ alg: 'RS256' })
+      .setSubject('user-id-123')
+      .setIssuer(ISSUER)
+      .setAudience(AUDIENCE)
+      .setIssuedAt()
+      .setExpirationTime('1h')
+      .sign(rsaPrivateKey);
+    const request = { headers: { authorization: `Bearer ${token}` } };
+
+    await expect(guard.canActivate(makeContext(request))).rejects.toThrow(
+      UnauthorizedException,
+    );
+  });
+
+  it('rechaza un token sin sub', async () => {
+    const token = await sign({ sub: null });
+    const request = { headers: { authorization: `Bearer ${token}` } };
+
+    await expect(guard.canActivate(makeContext(request))).rejects.toThrow(
+      UnauthorizedException,
+    );
+  });
+
   it('rechaza un token con firma manipulada', async () => {
     const token = await sign();
     const tampered = token.slice(0, -3) + 'AAA';
@@ -118,6 +168,40 @@ describe('JwtAuthGuard', () => {
 
     await expect(guard.canActivate(makeContext(request))).rejects.toThrow(
       UnauthorizedException,
+    );
+  });
+
+  it('responde 503 (no 401) si el JWKS no responde (timeout)', async () => {
+    const supabase = {
+      getJWKS: () => {
+        throw new JWKSTimeout();
+      },
+      getIssuer: () => ISSUER,
+    } as unknown as SupabaseService;
+    guard = new JwtAuthGuard(supabase);
+
+    const token = await sign();
+    const request = { headers: { authorization: `Bearer ${token}` } };
+
+    await expect(guard.canActivate(makeContext(request))).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('responde 503 (no 401) ante un error de red al buscar el JWKS', async () => {
+    const supabase = {
+      getJWKS: () => {
+        throw new TypeError('fetch failed');
+      },
+      getIssuer: () => ISSUER,
+    } as unknown as SupabaseService;
+    guard = new JwtAuthGuard(supabase);
+
+    const token = await sign();
+    const request = { headers: { authorization: `Bearer ${token}` } };
+
+    await expect(guard.canActivate(makeContext(request))).rejects.toThrow(
+      ServiceUnavailableException,
     );
   });
 });

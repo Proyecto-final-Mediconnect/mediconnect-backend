@@ -18,11 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RLS verification script now checks the signup role clamp and asserts the exact
   RLS/trigger error on negative cases to avoid false positives (ENG-37)
 - `JwtAuthGuard`: verifies Supabase JWTs locally against the project's JWKS
-  (ES256, no shared secret), reading the token from the `Authorization` header
-  or the `sb-access-token` cookie, and attaches the authenticated user to the
-  request (ENG-92)
+  (ES256 allowlisted, `authenticated` audience, issuer and expiration all
+  checked, no shared secret), reading the token from the `Authorization`
+  header or the `sb-access-token` cookie, rejecting tokens without a `sub`,
+  and attaches the authenticated user to the request. JWKS infra failures
+  (timeout/network) surface as 503 instead of being mistaken for an invalid
+  token (401) (ENG-92)
 - Environment variable validation on startup (`DATABASE_URL`, `SUPABASE_URL`,
   `SUPABASE_ANON_KEY`) so misconfiguration fails fast with a clear error (ENG-92)
+- `GET /auth/me` (protected by `JwtAuthGuard`, returns the authenticated user)
+  and `POST /auth/logout` (clears the session cookies) so the frontend has a
+  concrete way to exercise the guard end-to-end (ENG-92)
 
 ## 1.0.0 - 2026-07-06
 
