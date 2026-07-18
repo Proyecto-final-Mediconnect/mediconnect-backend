@@ -30,11 +30,16 @@ describe('AuthService', () => {
   };
   const loginDto: LoginDto = { email: 'user@test.com', password: 'Password1' };
 
+  let refreshSession: jest.Mock;
+
   beforeEach(() => {
     signUp = jest.fn();
     signInWithPassword = jest.fn();
+    refreshSession = jest.fn();
     const supabaseMock = {
-      getClient: () => ({ auth: { signUp, signInWithPassword } }),
+      getClient: () => ({
+        auth: { signUp, signInWithPassword, refreshSession },
+      }),
     } as unknown as SupabaseService;
     service = new AuthService(supabaseMock);
   });
@@ -212,6 +217,69 @@ describe('AuthService', () => {
     });
 
     await expect(service.login(loginDto)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('refresh exitoso devuelve el par de tokens ROTADO y los datos del usuario', async () => {
+    refreshSession.mockResolvedValue({
+      data: {
+        session: { access_token: 'new-acc', refresh_token: 'new-ref' },
+        user: { id: 'uid', email: loginDto.email },
+      },
+      error: null,
+    });
+
+    const result = await service.refresh('old-ref');
+
+    expect(refreshSession).toHaveBeenCalledWith({ refresh_token: 'old-ref' });
+    expect(result).toEqual({
+      accessToken: 'new-acc',
+      refreshToken: 'new-ref',
+      user: { id: 'uid', email: loginDto.email },
+    });
+  });
+
+  it('refresh con token inválido/vencido/ya usado lanza Unauthorized', async () => {
+    refreshSession.mockResolvedValue({
+      data: {},
+      error: { status: 400, message: 'Invalid Refresh Token' },
+    });
+
+    await expect(service.refresh('token-viejo')).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+
+  it('refresh con rate limit lanza ServiceUnavailable', async () => {
+    refreshSession.mockResolvedValue({
+      data: {},
+      error: { status: 429, message: 'rate limit' },
+    });
+
+    await expect(service.refresh('ref')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('refresh con Supabase caído (sin status) lanza ServiceUnavailable, no Unauthorized', async () => {
+    refreshSession.mockResolvedValue({
+      data: {},
+      error: { message: 'fetch failed' },
+    });
+
+    await expect(service.refresh('ref')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  });
+
+  it('refresh con error 5xx de Supabase lanza ServiceUnavailable, no Unauthorized', async () => {
+    refreshSession.mockResolvedValue({
+      data: {},
+      error: { status: 500, message: 'internal error' },
+    });
+
+    await expect(service.refresh('ref')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
   });

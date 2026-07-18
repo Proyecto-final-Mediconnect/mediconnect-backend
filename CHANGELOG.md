@@ -13,10 +13,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (PACIENTE / PROFESIONAL); MODERADOR can only be assigned by service_role (ENG-37)
 - FORCE ROW LEVEL SECURITY on profiles/patients/professionals as defense in depth,
   mirrored in the Supabase migrations (ENG-37)
+- Rate limit `POST /auth/refresh` to 5 requests/minute per IP
+  (`@nestjs/throttler`), as a stopgap while Supabase's refresh-token
+  reuse-detection is confirmed non-functional on this project (see
+  `docs/security/refresh-token-reuse-risk-plan.md`)
+- Enable `trust proxy` so `ThrottlerGuard` keys the rate limit on the real
+  client IP behind a reverse proxy, instead of collapsing every user onto the
+  proxy IP (which would neutralize the per-IP limit and self-DoS the app)
+- `POST /auth/refresh` now maps Supabase infra failures (network / 5xx) to 503
+  without clearing the session cookies, so a transient Supabase outage no longer
+  logs the user out; only a genuinely invalid/reused token (400) clears cookies
+- `RequestLoggerMiddleware` logs the request path without its query string, so a
+  future secret-in-query route (e.g. an OAuth `?code=`) can't leak into logs
+- Strip a trailing slash from `SUPABASE_URL` when building the JWKS issuer, so a
+  `https://…/` value doesn't produce a `//auth/v1` issuer that fails JWT checks
 
 ### Added
 - RLS verification script now checks the signup role clamp and asserts the exact
   RLS/trigger error on negative cases to avoid false positives (ENG-37)
+- `JwtAuthGuard`: verifies Supabase JWTs locally against the project's JWKS
+  (ES256 allowlisted, `authenticated` audience, issuer and expiration all
+  checked, no shared secret), reading the token from the `Authorization`
+  header or the `sb-access-token` cookie, rejecting tokens without a `sub`,
+  and attaches the authenticated user to the request. JWKS infra failures
+  (timeout/network) surface as 503 instead of being mistaken for an invalid
+  token (401) (ENG-92)
+- Environment variable validation on startup (`DATABASE_URL`, `SUPABASE_URL`,
+  `SUPABASE_ANON_KEY`) so misconfiguration fails fast with a clear error (ENG-92)
+- `GET /auth/me` (protected by `JwtAuthGuard`, returns the authenticated user)
+  and `POST /auth/logout` (clears the session cookies) so the frontend has a
+  concrete way to exercise the guard end-to-end (ENG-92)
+- `RequestLoggerMiddleware`: logs method, path, status code, duration and the
+  authenticated user id (never body/headers/cookies/tokens) for every request
+  except `GET /health` (ENG-92)
+- `POST /auth/refresh`: exchanges the `sb-refresh-token` cookie for a new
+  access/refresh token pair via Supabase, re-setting both cookies. Invalid,
+  expired or reused refresh tokens clear the session cookies and respond
+  401; a Supabase rate limit responds 503 without touching the cookies
+  (ENG-92)
 
 ## 1.0.0 - 2026-07-06
 
