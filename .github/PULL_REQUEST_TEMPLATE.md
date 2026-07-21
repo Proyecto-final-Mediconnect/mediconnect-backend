@@ -1,6 +1,3 @@
-mkdir -p .github
-cat > .github/PULL_REQUEST_TEMPLATE.md << 'EOF'
-
 ## Descripción
 
 > Breve descripción del cambio: qué hace este PR y por qué. Referencia al ticket ENG-XXX correspondiente. Si modifica una feature implementada previamente, mencionar el ticket original.
