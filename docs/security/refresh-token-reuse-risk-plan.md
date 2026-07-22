@@ -70,7 +70,7 @@ el `RequestLoggerMiddleware` muestra un volumen anormal de `POST
 3. **Investigar**: revisar los logs de `RequestLoggerMiddleware` (método,
    path, status, `user=<uuid>`) alrededor del horario reportado, buscando:
    - Múltiples `POST /auth/refresh` para el mismo usuario en corto tiempo.
-   - Requests a rutas protegidas (`/auth/me`, futuras rutas de negocio) que
+   - Requests a rutas protegidas (`/me`, futuras rutas de negocio) que
      el usuario dice no haber hecho.
    - **Limitación actual del logging**: no se registra IP ni user-agent, así
      que hoy no se puede diferenciar "dos dispositivos legítimos del mismo
