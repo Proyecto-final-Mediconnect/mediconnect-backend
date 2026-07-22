@@ -30,7 +30,7 @@ export class UserService {
 
     // El nombre vive en la fila de paciente o de profesional según el rol; un
     // MODERADOR (u otro perfil sin fila asociada) no tiene nombre → null.
-    const named = profile.patient ?? profile.professional ?? null;
+    const named = profile.patient ?? profile.professional;
 
     return {
       id: profile.id,
