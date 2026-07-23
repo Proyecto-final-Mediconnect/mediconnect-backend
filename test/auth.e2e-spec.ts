@@ -1,10 +1,11 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
-import { generateKeyPair, SignJWT } from 'jose';
+import { generateKeyPair } from 'jose';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
 
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
@@ -15,7 +16,6 @@ describe('Auth registro (e2e)', () => {
   const signInWithPassword = jest.fn();
   const refreshSession = jest.fn();
   let publicKey: CryptoKey;
-  let privateKey: CryptoKey;
 
   const valid = {
     email: 'nuevo@test.com',
@@ -24,7 +24,7 @@ describe('Auth registro (e2e)', () => {
   };
 
   beforeAll(async () => {
-    ({ publicKey, privateKey } = await generateKeyPair('ES256'));
+    ({ publicKey } = await generateKeyPair('ES256'));
   });
 
   beforeEach(async () => {
@@ -46,6 +46,10 @@ describe('Auth registro (e2e)', () => {
         getJWKS: () => publicKey,
         getIssuer: () => ISSUER,
       })
+      // Auth no usa Prisma, pero el PrismaModule global intentaría conectar a la
+      // base real en onModuleInit: lo reemplazamos por un stub sin lifecycle.
+      .overrideProvider(PrismaService)
+      .useValue({})
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -158,51 +162,6 @@ describe('Auth registro (e2e)', () => {
     return request(app.getHttpServer())
       .post('/auth/login')
       .send(creds)
-      .expect(401);
-  });
-
-  async function signToken(): Promise<string> {
-    return new SignJWT({ email: 'paciente@test.com', role: 'authenticated' })
-      .setProtectedHeader({ alg: 'ES256' })
-      .setSubject('user-id-123')
-      .setIssuer(ISSUER)
-      .setAudience('authenticated')
-      .setIssuedAt()
-      .setExpirationTime('1h')
-      .sign(privateKey);
-  }
-
-  it('200 GET /auth/me con la cookie de sesión devuelve el usuario', async () => {
-    const token = await signToken();
-    return request(app.getHttpServer())
-      .get('/auth/me')
-      .set('Cookie', [`sb-access-token=${token}`])
-      .expect(200)
-      .expect((res) => {
-        expect(res.body).toEqual({
-          id: 'user-id-123',
-          email: 'paciente@test.com',
-          role: 'authenticated',
-        });
-      });
-  });
-
-  it('200 GET /auth/me con Authorization: Bearer devuelve el usuario', async () => {
-    const token = await signToken();
-    return request(app.getHttpServer())
-      .get('/auth/me')
-      .set('Authorization', `Bearer ${token}`)
-      .expect(200);
-  });
-
-  it('401 GET /auth/me sin token', () => {
-    return request(app.getHttpServer()).get('/auth/me').expect(401);
-  });
-
-  it('401 GET /auth/me con token inválido', () => {
-    return request(app.getHttpServer())
-      .get('/auth/me')
-      .set('Cookie', ['sb-access-token=token-invalido'])
       .expect(401);
   });
 

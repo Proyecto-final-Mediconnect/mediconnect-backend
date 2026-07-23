@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `https://…/` value doesn't produce a `//auth/v1` issuer that fails JWT checks
 
 ### Added
+- `GET /me`: protected endpoint (`JwtAuthGuard`) returning the authenticated
+  user's public profile (`id`, `email`, `role`, `firstName`, `lastName`), read
+  from the `profiles` table via Prisma using the token's `sub` — never from the
+  JWT's `user_metadata`, closing the privilege-escalation surface. Returns 401
+  without/expired/invalid token, and 404 when the JWT is valid but no profile
+  exists. Accepts the token from the `Authorization` header or the
+  `sb-access-token` cookie (ENG-94)
+- `PrismaModule`/`PrismaService`: global provider wrapping the generated Prisma
+  client with connect/disconnect lifecycle, the first use of Prisma from the
+  Nest app (ENG-94)
 - RLS verification script now checks the signup role clamp and asserts the exact
   RLS/trigger error on negative cases to avoid false positives (ENG-37)
 - `JwtAuthGuard`: verifies Supabase JWTs locally against the project's JWKS
@@ -40,9 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token (401) (ENG-92)
 - Environment variable validation on startup (`DATABASE_URL`, `SUPABASE_URL`,
   `SUPABASE_ANON_KEY`) so misconfiguration fails fast with a clear error (ENG-92)
-- `GET /auth/me` (protected by `JwtAuthGuard`, returns the authenticated user)
-  and `POST /auth/logout` (clears the session cookies) so the frontend has a
-  concrete way to exercise the guard end-to-end (ENG-92)
+- `POST /auth/logout` (clears the session cookies) so the frontend has a
+  concrete way to end a session. (ENG-92 also shipped a stub `GET /auth/me` to
+  exercise the guard; ENG-94 supersedes it with the real `GET /me` backed by the
+  `profiles` table.)
 - `RequestLoggerMiddleware`: logs method, path, status code, duration and the
   authenticated user id (never body/headers/cookies/tokens) for every request
   except `GET /health` (ENG-92)
