@@ -13,6 +13,7 @@ import { AuthModule } from './auth/auth.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
+import { ProfessionalsModule } from './professionals/professionals.module';
 import { SupabaseModule } from './supabase/supabase.module';
 
 @Module({
@@ -26,6 +27,7 @@ import { SupabaseModule } from './supabase/supabase.module';
     SupabaseModule,
     AuthModule,
     HealthModule,
+    ProfessionalsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
