@@ -82,3 +82,26 @@ jobs:
         # el push a feature/bugfix.
         if: github.event_name == 'pull_request' || startsWith(github.ref_name, 'release/') || github.ref_name == 'main'
         run: pnpm run build
+
+      - name: Smoke test (el bundle arranca)
+        # Un build verde no garantiza que el bundle levante: fue el caso de
+        # ENG-95 (tsconfig.build.json emitía a dist/src/, así que `node dist/main`
+        # no existía y ni start:prod ni start:dev arrancaban). El paso de Build no
+        # lo detecta; este sí: corre el bundle de producción y exige un 200 de
+        # /health. Reusa las env dummy del job (SUPABASE_* las lee
+        # SupabaseService.onModuleInit; createClient no hace red al construirse).
+        if: github.event_name == 'pull_request' || startsWith(github.ref_name, 'release/') || github.ref_name == 'main'
+        run: |
+          node dist/main &
+          SERVER_PID=$!
+          for i in $(seq 1 15); do
+            if curl -fsS --max-time 5 http://localhost:3000/health > /dev/null 2>&1; then
+              echo "El bundle levantó y /health respondió 200."
+              kill "$SERVER_PID" 2>/dev/null || true
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::El bundle no respondió en /health tras 30s."
+          kill "$SERVER_PID" 2>/dev/null || true
+          exit 1
