@@ -13,8 +13,10 @@ import { AuthModule } from './auth/auth.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
+import { PrismaModule } from './prisma/prisma.module';
 import { ProfessionalsModule } from './professionals/professionals.module';
 import { SupabaseModule } from './supabase/supabase.module';
+import { UserModule } from './user/user.module';
 
 @Module({
   imports: [
@@ -24,8 +26,10 @@ import { SupabaseModule } from './supabase/supabase.module';
     // docs/security/refresh-token-reuse-risk-plan.md (mitigación de reuso de
     // refresh tokens no detectado por Supabase).
     ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 60 }]),
+    PrismaModule,
     SupabaseModule,
     AuthModule,
+    UserModule,
     HealthModule,
     ProfessionalsModule,
   ],
