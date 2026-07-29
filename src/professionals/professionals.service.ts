@@ -9,13 +9,17 @@ import { UpdateProfessionalProfileDto } from './dto/update-professional-profile.
 
 /** Bucket de Supabase Storage donde viven las fotos de perfil de profesionales.
  *  Su creación y políticas RLS se versionan en
- *  supabase/migrations/*_professional_photos_bucket.sql. */
+ *  prisma/migrations/20260729000000_eng48_professional_profile_grants/. */
 const PHOTO_BUCKET = 'professional-photos';
 
 /** Tipos de imagen aceptados para la foto de perfil. La compresión ocurre en el
  *  cliente (web); acá solo validamos y almacenamos. */
 const ALLOWED_PHOTO_MIME = ['image/jpeg', 'image/png', 'image/webp'];
-const MAX_PHOTO_BYTES = 2 * 1024 * 1024; // 2 MB (ya comprimida en el cliente)
+
+/** Tope real de la foto de perfil (ya comprimida en el cliente). Lo valida este
+ *  service para poder devolver un 400 con un mensaje claro; el tope duro
+ *  anti-abuso, mucho más alto, lo pone el `FileInterceptor` del controller. */
+export const MAX_PHOTO_BYTES = 2 * 1024 * 1024; // 2 MB
 
 /** Extensión de archivo según el MIME type de la imagen subida. */
 const PHOTO_EXT_BY_MIME: Record<string, string> = {
@@ -42,6 +46,8 @@ interface ProfessionalRow {
   consultation_price: string | number | null;
   currency: string;
   status: string;
+  // Se usa para versionar la URL de la foto (ver `withPhotoVersion`).
+  updated_at: string;
   professional_specialties: { specialty: SpecialtyRow | null }[] | null;
 }
 
@@ -61,8 +67,32 @@ export interface ProfessionalProfile {
 
 const PROFILE_SELECT =
   'profile_id, first_name, last_name, license_number, bio, photo_url, ' +
-  'consultation_price, currency, status, ' +
+  'consultation_price, currency, status, updated_at, ' +
   'professional_specialties(specialty:specialties(id, name))';
+
+/** Cliente de Supabase scopeado al JWT del profesional (RLS evalúa `auth.uid()`
+ *  como su `profiles.id`). Se crea UNO por request y se pasa a los helpers. */
+type UserClient = ReturnType<SupabaseService['getClientForToken']>;
+
+/** La escritura ya se hizo y lo que falló es la relectura del perfil. Decir "no
+ *  pudimos guardar" acá sería mentira: el cambio está aplicado. */
+const PROFILE_REREAD_ERROR =
+  'Guardamos tus cambios, pero no pudimos volver a leer tu perfil. Recargá la página.';
+
+/**
+ * Agrega a la URL pública de la foto un `?v=` derivado de `updated_at`. La ruta en
+ * Storage es fija por usuario (`<uid>/avatar.ext`), así que sin esto el browser
+ * seguiría mostrando la foto anterior.
+ *
+ * Se hace al salir y NO se persiste (review de #19): lo que queda en
+ * `professionals.photo_url` es la URL canónica, y la versión se deriva de un valor
+ * estable de la fila en vez de un `Date.now()` distinto en cada lectura.
+ */
+function withPhotoVersion(photoUrl: string, updatedAt: string): string {
+  const version = Date.parse(updatedAt);
+  if (Number.isNaN(version)) return photoUrl;
+  return `${photoUrl}${photoUrl.includes('?') ? '&' : '?'}v=${version}`;
+}
 
 @Injectable()
 export class ProfessionalsService {
@@ -93,25 +123,7 @@ export class ProfessionalsService {
     userId: string,
   ): Promise<ProfessionalProfile> {
     const client = this.supabase.getClientForToken(accessToken);
-
-    const { data, error } = await client
-      .from('professionals')
-      .select(PROFILE_SELECT)
-      .eq('profile_id', userId)
-      .maybeSingle();
-
-    if (error) {
-      throw new InternalServerErrorException(
-        'No pudimos cargar tu perfil. Probá de nuevo en unos minutos.',
-      );
-    }
-
-    const row = data as unknown as ProfessionalRow | null;
-    if (!row) {
-      throw new NotFoundException('No se encontró tu perfil profesional.');
-    }
-
-    return this.toProfile(row);
+    return this.readProfile(client, userId);
   }
 
   async updateMyProfile(
@@ -122,14 +134,21 @@ export class ProfessionalsService {
     const client = this.supabase.getClientForToken(accessToken);
 
     // Asegura que el usuario tenga perfil profesional antes de escribir (y da un
-    // 404 claro si un paciente llamara este endpoint).
-    await this.getMyProfile(accessToken, userId);
+    // 404 claro si un paciente llamara este endpoint). Sonda barata: no trae el
+    // perfil completo, y si falla el mensaje habla de guardar, no de cargar.
+    await this.assertProfileExists(
+      client,
+      userId,
+      'No pudimos guardar tu perfil. Probá de nuevo en unos minutos.',
+    );
 
     if (dto.specialtyIds) {
       await this.assertSpecialtiesExist(dto.specialtyIds);
     }
 
     // 1) Campos escalares del perfil (solo los que vengan definidos).
+    //    Ojo con la diferencia entre `undefined` y `null`: omitir el campo es "no
+    //    lo toques", mandarlo en null es "borralo" (ej. dejar de publicar precio).
     const patch: Record<string, string | number | null> = {};
     if (dto.bio !== undefined) patch.bio = dto.bio;
     if (dto.consultationPrice !== undefined) {
@@ -157,7 +176,7 @@ export class ProfessionalsService {
       await this.replaceSpecialties(client, userId, dto.specialtyIds);
     }
 
-    return this.getMyProfile(accessToken, userId);
+    return this.readProfile(client, userId, PROFILE_REREAD_ERROR);
   }
 
   /** Sube la foto de perfil a Storage y guarda su URL pública en el perfil. */
@@ -174,7 +193,11 @@ export class ProfessionalsService {
     }
 
     const client = this.supabase.getClientForToken(accessToken);
-    await this.getMyProfile(accessToken, userId);
+    await this.assertProfileExists(
+      client,
+      userId,
+      'No pudimos guardar tu foto de perfil. Probá de nuevo en unos minutos.',
+    );
 
     const ext = PHOTO_EXT_BY_MIME[file.mimetype] ?? 'jpg';
     // Ruta fija por usuario (upsert) → una sola foto vigente, sin acumular
@@ -198,13 +221,15 @@ export class ProfessionalsService {
     const { data: publicData } = client.storage
       .from(PHOTO_BUCKET)
       .getPublicUrl(path);
-    // Cache-busting: el nombre de archivo es fijo, así que agregamos un query
-    // param con el timestamp para que el browser no muestre la foto vieja.
-    const photoUrl = `${publicData.publicUrl}?v=${Date.now()}`;
 
+    // Se persiste la URL canónica, sin query params. El cache-busting lo agrega
+    // `withPhotoVersion` al serializar, derivado de `updated_at`.
     const { error: updateError } = await client
       .from('professionals')
-      .update({ photo_url: photoUrl, updated_at: new Date().toISOString() })
+      .update({
+        photo_url: publicData.publicUrl,
+        updated_at: new Date().toISOString(),
+      })
       .eq('profile_id', userId);
 
     if (updateError) {
@@ -213,7 +238,55 @@ export class ProfessionalsService {
       );
     }
 
-    return this.getMyProfile(accessToken, userId);
+    return this.readProfile(client, userId, PROFILE_REREAD_ERROR);
+  }
+
+  /** Lee el perfil del profesional con sus especialidades. `onReadError` permite
+   *  distinguir "no pudimos cargar tu perfil" de la relectura posterior a una
+   *  escritura que sí funcionó. */
+  private async readProfile(
+    client: UserClient,
+    userId: string,
+    onReadError = 'No pudimos cargar tu perfil. Probá de nuevo en unos minutos.',
+  ): Promise<ProfessionalProfile> {
+    const { data, error } = await client
+      .from('professionals')
+      .select(PROFILE_SELECT)
+      .eq('profile_id', userId)
+      .maybeSingle();
+
+    if (error) {
+      throw new InternalServerErrorException(onReadError);
+    }
+
+    const row = data as unknown as ProfessionalRow | null;
+    if (!row) {
+      throw new NotFoundException('No se encontró tu perfil profesional.');
+    }
+
+    return this.toProfile(row);
+  }
+
+  /** Confirma que el usuario tenga perfil profesional antes de escribir. Si la
+   *  consulta falla, el mensaje tiene que hablar de la operación que el usuario
+   *  pidió (guardar), no de una lectura que él nunca pidió. */
+  private async assertProfileExists(
+    client: UserClient,
+    userId: string,
+    onError: string,
+  ): Promise<void> {
+    const { data, error } = await client
+      .from('professionals')
+      .select('profile_id')
+      .eq('profile_id', userId)
+      .maybeSingle();
+
+    if (error) {
+      throw new InternalServerErrorException(onError);
+    }
+    if (!data) {
+      throw new NotFoundException('No se encontró tu perfil profesional.');
+    }
   }
 
   /** Valida que todos los IDs existan en el catálogo curado. */
@@ -241,7 +314,7 @@ export class ProfessionalsService {
   }
 
   private async replaceSpecialties(
-    client: ReturnType<SupabaseService['getClientForToken']>,
+    client: UserClient,
     userId: string,
     specialtyIds: string[],
   ): Promise<void> {
@@ -285,7 +358,9 @@ export class ProfessionalsService {
       lastName: row.last_name,
       licenseNumber: row.license_number,
       bio: row.bio,
-      photoUrl: row.photo_url,
+      photoUrl: row.photo_url
+        ? withPhotoVersion(row.photo_url, row.updated_at)
+        : null,
       consultationPrice:
         row.consultation_price === null ? null : Number(row.consultation_price),
       currency: row.currency,

@@ -17,16 +17,22 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UpdateProfessionalProfileDto } from './dto/update-professional-profile.dto';
 import { ProfessionalsService } from './professionals.service';
 
-/** Foto ya comprimida en el cliente; tope defensivo en el server. */
-const MAX_PHOTO_BYTES = 2 * 1024 * 1024;
+/**
+ * Tope DURO del interceptor, deliberadamente por encima del límite real de la foto
+ * (`MAX_PHOTO_BYTES` = 2 MB, que valida el service). Multer corta acá para que un
+ * archivo gigante no se bufferee en memoria, pero deja pasar la banda 2–8 MB para
+ * que el 400 lo dé el service, que puede explicar el límite. Cuando corta Multer,
+ * `@nestjs/platform-express` responde 413 y `PayloadTooLargeFilter` traduce el
+ * mensaje (antes salía el "File too large" crudo, en inglés).
+ */
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 /** Subconjunto de los campos que Multer adjunta al archivo subido. Evita
- *  depender de `@types/multer` (Express.Multer.File) solo por estos 4 campos. */
+ *  depender de `@types/multer` (Express.Multer.File) solo por estos 3 campos. */
 interface UploadedPhoto {
   buffer: Buffer;
   mimetype: string;
   size: number;
-  originalname: string;
 }
 
 /** JwtAuthGuard garantiza `user` y `accessToken`; este helper lo hace explícito
@@ -60,7 +66,7 @@ export class ProfessionalsController {
 
   @Post('me/photo')
   @UseInterceptors(
-    FileInterceptor('photo', { limits: { fileSize: MAX_PHOTO_BYTES } }),
+    FileInterceptor('photo', { limits: { fileSize: MAX_UPLOAD_BYTES } }),
   )
   uploadPhoto(
     @Req() req: Request,

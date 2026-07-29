@@ -20,6 +20,15 @@ export class UpdateProfessionalProfileDto {
   @MaxLength(500, { message: 'La bio no puede superar los 500 caracteres' })
   bio?: string;
 
+  /**
+   * Precio de la consulta en pesos argentinos.
+   *
+   * Tres estados distintos, y la diferencia importa: **omitirlo** es "no lo
+   * toques", mandarlo con un número lo fija, y mandarlo en **`null`** borra el
+   * precio publicado (el profesional deja de mostrar precio). `@IsOptional()`
+   * ignora los validadores tanto con `undefined` como con `null`, así que el null
+   * pasa la validación y llega al service, que lo escribe.
+   */
   @IsOptional()
   @IsNumber(
     { maxDecimalPlaces: 2 },
@@ -27,7 +36,7 @@ export class UpdateProfessionalProfileDto {
   )
   @Min(0, { message: 'El precio no puede ser negativo' })
   @Max(99_999_999, { message: 'El precio supera el máximo permitido' })
-  consultationPrice?: number;
+  consultationPrice?: number | null;
 
   @IsOptional()
   @IsArray()
