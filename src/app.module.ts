@@ -13,6 +13,7 @@ import { AuthModule } from './auth/auth.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
+import { PatientsModule } from './patients/patients.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProfessionalsModule } from './professionals/professionals.module';
 import { SupabaseModule } from './supabase/supabase.module';
@@ -32,6 +33,7 @@ import { UserModule } from './user/user.module';
     UserModule,
     HealthModule,
     ProfessionalsModule,
+    PatientsModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
