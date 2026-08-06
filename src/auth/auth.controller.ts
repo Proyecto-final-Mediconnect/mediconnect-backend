@@ -1,14 +1,12 @@
 import {
   Body,
   Controller,
-  Get,
   HttpCode,
   HttpStatus,
   Post,
   Req,
   Res,
   UnauthorizedException,
-  UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
@@ -16,7 +14,6 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterPatientDto } from './dto/register-patient.dto';
 import { RegisterProfessionalDto } from './dto/register-professional.dto';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 const ACCESS_TOKEN_COOKIE = 'sb-access-token';
 const REFRESH_TOKEN_COOKIE = 'sb-refresh-token';
@@ -72,6 +69,9 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  // ENG-44: 5 intentos por IP por minuto. Frena el fuerza bruta de contraseñas
+  // sin depender solo del rate limit de Supabase (que es por proyecto, no por IP).
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async login(
     @Body() dto: LoginDto,
     @Res({ passthrough: true }) res: Response,
@@ -134,11 +134,5 @@ export class AuthController {
     this.clearSessionCookies(res);
 
     return { message: 'Sesión cerrada.' };
-  }
-
-  @Get('me')
-  @UseGuards(JwtAuthGuard)
-  me(@Req() req: Request) {
-    return req.user;
   }
 }

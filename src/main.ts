@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
+import { PayloadTooLargeFilter } from './common/filters/payload-too-large.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -23,6 +24,10 @@ async function bootstrap() {
       transform: true,
     }),
   );
+  // Un archivo por encima del límite del FileInterceptor sale como 413 con el
+  // mensaje crudo de Multer ("File too large"). El resto de la API contesta en
+  // español; esto lo normaliza.
+  app.useGlobalFilters(new PayloadTooLargeFilter());
   await app.listen(process.env.PORT ?? 3000);
 }
 void bootstrap();

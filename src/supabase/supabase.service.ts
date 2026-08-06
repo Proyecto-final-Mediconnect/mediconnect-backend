@@ -3,10 +3,30 @@ import { ConfigService } from '@nestjs/config';
 import { createClient } from '@supabase/supabase-js';
 import { createRemoteJWKSet, type JWTVerifyGetKey } from 'jose';
 
-// Tipo del cliente tal como lo infiere `createClient`. Declarar el campo con
-// este tipo (en vez de `SupabaseClient` con genéricos por defecto) evita el
-// `no-unsafe-assignment` por desajuste de parámetros genéricos de la librería.
-type SupabaseAnonClient = ReturnType<typeof createClient>;
+// supabase-js infiere Insert/Update como `never` cuando no se le pasa un tipo de
+// Database (empuja a generar tipos con `supabase gen types typescript`). Hasta
+// que exista ese archivo generado, usamos un esquema laxo que permite escribir;
+// la forma real de cada fila la tipan las interfaces *Row en cada service.
+// TODO(ENG-48): reemplazar por los tipos generados de Supabase.
+type LooseTable = {
+  Row: Record<string, unknown>;
+  Insert: Record<string, unknown>;
+  Update: Record<string, unknown>;
+  Relationships: [];
+};
+interface LooseDatabase {
+  public: {
+    Tables: Record<string, LooseTable>;
+    Views: Record<string, never>;
+    Functions: Record<string, never>;
+    Enums: Record<string, never>;
+    CompositeTypes: Record<string, never>;
+  };
+}
+
+// Tipo del cliente ya parametrizado con el esquema laxo. Declarar el campo con
+// este tipo evita el `no-unsafe-assignment` por desajuste de genéricos.
+type SupabaseAnonClient = ReturnType<typeof createClient<LooseDatabase>>;
 
 /**
  * Provee un cliente de Supabase configurado con la anon key, y el JWKS del
@@ -28,7 +48,7 @@ export class SupabaseService implements OnModuleInit {
     const url = this.config.getOrThrow<string>('SUPABASE_URL');
     const anonKey = this.config.getOrThrow<string>('SUPABASE_ANON_KEY');
 
-    this.client = createClient(url, anonKey, {
+    this.client = createClient<LooseDatabase>(url, anonKey, {
       auth: {
         // El backend no persiste sesión: cada request es stateless.
         persistSession: false,
@@ -46,6 +66,23 @@ export class SupabaseService implements OnModuleInit {
 
   getClient(): SupabaseAnonClient {
     return this.client;
+  }
+
+  /**
+   * Cliente de Supabase que actúa EN NOMBRE del usuario: adjunta su access
+   * token en el header Authorization, de modo que las políticas RLS evalúen
+   * `auth.uid()` como el `profiles.id` del usuario (ver ENG-37). Se usa para
+   * lecturas/escrituras de datos propios (ej. el profesional editando su
+   * perfil) sin necesidad de la service_role key.
+   */
+  getClientForToken(accessToken: string): SupabaseAnonClient {
+    const url = this.config.getOrThrow<string>('SUPABASE_URL');
+    const anonKey = this.config.getOrThrow<string>('SUPABASE_ANON_KEY');
+
+    return createClient<LooseDatabase>(url, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    });
   }
 
   getJWKS(): JWTVerifyGetKey {

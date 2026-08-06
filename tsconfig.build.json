@@ -1,11 +1,20 @@
 {
   "extends": "./tsconfig.json",
+  // `prisma/` y `scripts/` quedan fuera del build de la app: son utilidades que
+  // se ejecutan con tsx (`db:seed`, `verify:rls`), nunca desde `dist/`. Si se
+  // compilaran, el rootDir se ampliaría a la raíz del proyecto y la salida
+  // pasaría a `dist/src/main.js`, rompiendo `start:prod` (`node dist/main`) y la
+  // ruta relativa a `generated/prisma` del PrismaService.
+  // Sus tipos se siguen validando con `pnpm run typecheck` (tsconfig completo),
+  // que es lo que corre el CI.
   "exclude": [
     "node_modules",
     "test",
     "dist",
     "generated",
     "prisma.config.ts",
+    "prisma",
+    "scripts",
     "**/*spec.ts"
   ]
 }
