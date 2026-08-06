@@ -74,6 +74,10 @@ export class JwtAuthGuard implements CanActivate {
       role: payload.role as string | undefined,
     };
 
+    // Guardamos el token crudo (ya verificado) aparte de `user` para poder
+    // construir un cliente Supabase scopeado al usuario (RLS) en los handlers.
+    request.accessToken = token;
+
     return true;
   }
 }

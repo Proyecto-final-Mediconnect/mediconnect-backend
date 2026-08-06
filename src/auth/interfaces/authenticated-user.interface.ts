@@ -11,6 +11,10 @@ declare global {
   namespace Express {
     interface Request {
       user?: AuthenticatedUser;
+      /** Access token JWT crudo verificado por JwtAuthGuard. Se usa para
+       *  construir un cliente Supabase scopeado al usuario (RLS). Deliberadamente
+       *  separado de `user` para no filtrarlo en respuestas como GET /auth/me. */
+      accessToken?: string;
     }
   }
 }
