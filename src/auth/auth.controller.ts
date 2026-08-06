@@ -69,6 +69,9 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  // ENG-44: 5 intentos por IP por minuto. Frena el fuerza bruta de contraseñas
+  // sin depender solo del rate limit de Supabase (que es por proyecto, no por IP).
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async login(
     @Body() dto: LoginDto,
     @Res({ passthrough: true }) res: Response,
