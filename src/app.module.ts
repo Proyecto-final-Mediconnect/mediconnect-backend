@@ -4,8 +4,9 @@ import {
   NestModule,
   RequestMethod,
 } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
+import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -19,6 +20,9 @@ import { UserModule } from './user/user.module';
 
 @Module({
   imports: [
+    // Primero en la lista: registra el contexto de Sentry para el resto de los
+    // módulos. Sin `SENTRY_DSN` el SDK está inactivo y esto es un no-op.
+    SentryModule.forRoot(),
     ConfigModule.forRoot({ isGlobal: true, validate }),
     // Límite laxo por default (no molesta el uso normal); rutas puntuales
     // como POST /auth/refresh lo endurecen con @Throttle — ver
@@ -32,7 +36,13 @@ import { UserModule } from './user/user.module';
     HealthModule,
   ],
   controllers: [AppController],
-  providers: [AppService, { provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [
+    AppService,
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Captura las excepciones que atraviesan el ciclo de vida de Nest. Sin este
+    // filtro solo se reportarían los errores que escapan del framework.
+    { provide: APP_FILTER, useClass: SentryGlobalFilter },
+  ],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

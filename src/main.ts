@@ -1,3 +1,6 @@
+// Debe ir primero: instrumenta los módulos antes de que se carguen (ver
+// `instrument.ts`). Mover este import más abajo rompe la captura en silencio.
+import './instrument';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';

@@ -43,4 +43,25 @@ describe('validate (env)', () => {
       /Configuración de entorno inválida/,
     );
   });
+
+  it('acepta que falten las variables de Sentry (SDK inactivo en local y CI)', () => {
+    expect(() => validate({ ...validConfig })).not.toThrow();
+  });
+
+  it('acepta un SENTRY_DSN válido', () => {
+    const dsn = 'https://abc123def456@o4507.ingest.us.sentry.io/4507890';
+
+    const result = validate({ ...validConfig, SENTRY_DSN: dsn });
+
+    expect(result.SENTRY_DSN).toBe(dsn);
+  });
+
+  it('rechaza un SENTRY_DSN mal formado en vez de dejar de reportar en silencio', () => {
+    expect(() =>
+      validate({
+        ...validConfig,
+        SENTRY_DSN: 'o4507.ingest.us.sentry.io/4507890',
+      }),
+    ).toThrow(/Configuración de entorno inválida/);
+  });
 });
