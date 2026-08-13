@@ -54,7 +54,13 @@ describe('Cadena de hash SHA-256 (integration)', () => {
   beforeAll(async () => {
     // `prisma db push` sincroniza schema.prisma pero no ejecuta SQL suelto, así
     // que la tabla del spike se crea acá.
-    for (const statement of readFileSync(SPIKE_SQL, 'utf8').split('--;;')) {
+    //
+    // El separador tiene que estar SOLO en su línea: el encabezado del .sql lo
+    // menciona dentro de un comentario y un split por texto plano cortaba ahí,
+    // dejando un fragmento que arrancaba en backtick (error 42601 en CI).
+    for (const statement of readFileSync(SPIKE_SQL, 'utf8').split(
+      /^--;;[ \t]*\r?$/m,
+    )) {
       const sql = statement.trim();
       if (sql.length > 0) await prisma.$executeRawUnsafe(sql);
     }
