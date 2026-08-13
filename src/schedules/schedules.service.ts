@@ -323,9 +323,25 @@ export class SchedulesService {
   }
 }
 
-/** Fecha de hoy en `YYYY-MM-DD`, para filtrar bloqueos vencidos. */
+/**
+ * Fecha de hoy en `YYYY-MM-DD`, para filtrar bloqueos vencidos.
+ *
+ * En hora de Argentina, NO en UTC: `toISOString()` daría la fecha UTC y el
+ * backend corre en Render (UTC). Entre las 21:00 y la medianoche de acá, la
+ * fecha UTC ya es la de mañana, así que los bloqueos del día en curso
+ * desaparecerían de la lista tres horas antes de que el día termine.
+ *
+ * `en-CA` se usa porque formatea como `YYYY-MM-DD`, que es justo lo que espera
+ * la columna `date`. La zona está fija porque el MVP es solo Argentina (misma
+ * premisa que `currency = 'ARS'`); cuando haya profesionales en otra zona, esto
+ * pasa a salir del perfil.
+ */
+const AR_TIMEZONE = 'America/Argentina/Buenos_Aires';
+
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: AR_TIMEZONE,
+  }).format(new Date());
 }
 
 function capitalize(word: string): string {

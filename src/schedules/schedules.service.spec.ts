@@ -133,6 +133,25 @@ describe('SchedulesService (ENG-53)', () => {
 
       expect(schedule).toEqual({ rules: [], blocks: [] });
     });
+
+    it('filtra los bloqueos vencidos por la fecha de Argentina, no la de UTC', async () => {
+      // 02:00 UTC del 14 = 23:00 del 13 en Argentina. El backend corre en UTC
+      // (Render), así que con `toISOString()` el corte daría 2026-08-14 y los
+      // bloqueos de HOY desaparecerían de la lista tres horas antes de tiempo.
+      jest.useFakeTimers().setSystemTime(new Date('2026-08-14T02:00:00Z'));
+
+      const { service, calls } = makeService([
+        { data: [], error: null },
+        { data: [], error: null },
+      ]);
+
+      await service.getMySchedule('token', 'user-1');
+
+      const gte = calls.find((c) => c.method === 'gte');
+      expect(gte?.args).toEqual(['block_date', '2026-08-13']);
+
+      jest.useRealTimers();
+    });
   });
 
   describe('saveMyRules — validaciones previas a tocar la base', () => {
