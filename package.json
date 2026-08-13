@@ -29,7 +29,8 @@
     "db:test:up": "docker compose up -d --wait postgres-test",
     "db:test:down": "docker compose down",
     "db:test:reset": "docker compose down -v",
-    "test:integration": "bash scripts/test-integration.sh"
+    "test:integration": "bash scripts/test-integration.sh",
+    "metrics:catalog": "bash scripts/catalog-metrics.sh"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
