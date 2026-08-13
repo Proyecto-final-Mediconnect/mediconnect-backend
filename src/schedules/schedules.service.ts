@@ -338,10 +338,25 @@ export class SchedulesService {
  */
 const AR_TIMEZONE = 'America/Argentina/Buenos_Aires';
 
+/**
+ * Se arma con `formatToParts` en vez de confiar en que un locale imprima
+ * `YYYY-MM-DD`: si Node se compila sin ICU completo, `en-CA` cae a `en-US` y
+ * pasa a devolver `MM/DD/YYYY`. El filtro de bloqueos seguiría corriendo, pero
+ * comparando basura contra una columna `date` — el tipo de falla que no se ve
+ * hasta que alguien nota que los bloqueos no aparecen.
+ */
+const AR_DATE_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: AR_TIMEZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
 function today(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: AR_TIMEZONE,
-  }).format(new Date());
+  const parts = Object.fromEntries(
+    AR_DATE_PARTS.formatToParts(new Date()).map((p) => [p.type, p.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 function capitalize(word: string): string {
