@@ -15,6 +15,8 @@ import {
   appendEntry,
   computeContentHash,
   GENESIS_HASH,
+  NON_HASHED_COLUMNS,
+  PREIMAGE_COLUMNS,
   verifyChain,
   type ChainEntry,
   type ChainEntryInput,
@@ -28,13 +30,18 @@ const SPIKE_SQL = join(
   'eng45_hash_chain.sql',
 );
 
+/** Profesional que firma los asientos de los tests. Sintético. */
+const PROFESSIONAL_ID = '22222222-2222-4222-8222-222222222222';
+
 interface ChainRow {
   id: string;
   patient_id: string;
+  professional_id: string;
   sequence_number: bigint;
   entry_type: string;
   fhir_resource_type: string;
   content: unknown;
+  consultation_id: string | null;
   corrects_entry_id: string | null;
   content_hash: string;
   previous_hash: string;
@@ -80,6 +87,7 @@ describe('Cadena de hash SHA-256 (integration)', () => {
   ): ChainEntryInput {
     return {
       patientId,
+      professionalId: PROFESSIONAL_ID,
       sequenceNumber,
       entryType: 'CONSULTA',
       fhirResourceType: 'Observation',
@@ -100,15 +108,18 @@ describe('Cadena de hash SHA-256 (integration)', () => {
   function insert(entry: ChainEntry & { id?: string }) {
     return prisma.$executeRaw`
       insert into spike_hash_chain_entries (
-        id, patient_id, sequence_number, entry_type, fhir_resource_type,
-        content, corrects_entry_id, content_hash, previous_hash, created_at
+        id, patient_id, professional_id, sequence_number, entry_type,
+        fhir_resource_type, content, consultation_id, corrects_entry_id,
+        content_hash, previous_hash, created_at
       ) values (
         ${entry.id ?? randomUUID()}::uuid,
         ${entry.patientId}::uuid,
+        ${entry.professionalId}::uuid,
         ${entry.sequenceNumber}::bigint,
         ${entry.entryType},
         ${entry.fhirResourceType},
         ${JSON.stringify(entry.content)}::jsonb,
+        ${entry.consultationId ?? null}::uuid,
         ${entry.correctsEntryId ?? null}::uuid,
         ${entry.contentHash},
         ${entry.previousHash},
@@ -137,18 +148,21 @@ describe('Cadena de hash SHA-256 (integration)', () => {
 
   async function readChain(patientId: string): Promise<ChainEntry[]> {
     const rows = await prisma.$queryRaw<ChainRow[]>`
-      select id, patient_id, sequence_number, entry_type, fhir_resource_type,
-             content, corrects_entry_id, content_hash, previous_hash, created_at
+      select id, patient_id, professional_id, sequence_number, entry_type,
+             fhir_resource_type, content, consultation_id, corrects_entry_id,
+             content_hash, previous_hash, created_at
         from spike_hash_chain_entries
        where patient_id = ${patientId}::uuid
        order by sequence_number`;
 
     return rows.map((row) => ({
       patientId: row.patient_id,
+      professionalId: row.professional_id,
       sequenceNumber: Number(row.sequence_number),
       entryType: row.entry_type,
       fhirResourceType: row.fhir_resource_type,
       content: row.content,
+      consultationId: row.consultation_id,
       correctsEntryId: row.corrects_entry_id,
       createdAt: row.created_at,
       contentHash: row.content_hash,
@@ -219,7 +233,44 @@ describe('Cadena de hash SHA-256 (integration)', () => {
     });
   });
 
+  describe('cobertura de la preimagen', () => {
+    // Guarda contra la deriva: si ENG-57 agrega una columna a la tabla y no
+    // decide si entra al hash, este test falla. Un campo fuera de la preimagen
+    // es un campo modificable sin romper la cadena, y no hay nada más que avise.
+    it('la preimagen cubre todas las columnas de la tabla', async () => {
+      const rows = await prisma.$queryRaw<{ column_name: string }[]>`
+        select column_name from information_schema.columns
+         where table_name = 'spike_hash_chain_entries'`;
+
+      const enLaTabla = rows.map((r) => r.column_name).sort();
+      const contabilizadas = [
+        ...PREIMAGE_COLUMNS,
+        ...NON_HASHED_COLUMNS,
+      ].sort();
+
+      expect(enLaTabla).toEqual(contabilizadas);
+    });
+  });
+
   describe('detección de manipulación', () => {
+    it('detecta la reasignación del profesional que firmó la entrada', async () => {
+      // El ataque más barato: no hace falta falsificar el diagnóstico si
+      // alcanza con cambiar quién lo firmó (Ley 26.529 art. 15).
+      const { patientId } = await seedChain(3);
+      await tamper(
+        `update spike_hash_chain_entries
+            set professional_id = '33333333-3333-4333-8333-333333333333'
+          where patient_id = '${patientId}' and sequence_number = 2`,
+      );
+
+      const result = verifyChain(await readChain(patientId));
+
+      expect(result.valid).toBe(false);
+      expect(result).toMatchObject({
+        failure: { sequenceNumber: 2, reason: 'CONTENT_TAMPERED' },
+      });
+    });
+
     it('detecta contenido reescrito por SQL directo', async () => {
       const { patientId } = await seedChain(4);
       await tamper(
@@ -264,6 +315,29 @@ describe('Cadena de hash SHA-256 (integration)', () => {
         entries: 5n,
         first_bad_sequence: null,
       });
+    });
+  });
+
+  describe('límites conocidos', () => {
+    // Este test afirma que la cadena NO detecta algo. Está acá a propósito:
+    // deja el límite por escrito y ejecutable, para que nadie asuma que la
+    // cadena sola alcanza. La mitigación es ENG-85 persistiendo la cabeza
+    // (hash + sequence_number) de cada corrida, más el anclaje externo.
+    it('NO detecta el truncado de la cola: hay que anclar la cabeza aparte', async () => {
+      const { patientId } = await seedChain(6);
+      await tamper(
+        `delete from spike_hash_chain_entries
+          where patient_id = '${patientId}' and sequence_number > 4`,
+      );
+
+      const chain = await readChain(patientId);
+      const [sqlCheck] = await prisma.$queryRaw<VerifyRow[]>`
+        select * from spike_hash_chain_verify(${patientId}::uuid)`;
+
+      // Las 4 que quedan siguen contiguas, enlazadas y arrancando en el génesis.
+      expect(chain).toHaveLength(4);
+      expect(verifyChain(chain).valid).toBe(true);
+      expect(sqlCheck.ok).toBe(true);
     });
   });
 

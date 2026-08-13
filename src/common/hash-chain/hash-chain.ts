@@ -22,11 +22,20 @@ export const GENESIS_HASH = '0'.repeat(64);
 /** Campos que entran al hash. Todo lo que no esté acá NO está protegido. */
 export interface ChainEntryInput {
   patientId: string;
+  /**
+   * Autoría del asiento clínico. Entra al hash porque la Ley 26.529 art. 15
+   * exige que el registro identifique al profesional actuante: si quedara
+   * afuera se podría reasignar quién firmó una entrada sin romper la cadena,
+   * que es más barato para un atacante que falsificar el contenido.
+   */
+  professionalId: string;
   sequenceNumber: number;
   entryType: string;
   fhirResourceType: string;
   /** Recurso FHIR R5. Solo datos sintéticos en tests. */
   content: unknown;
+  /** Consulta que originó la entrada, si viene de una. */
+  consultationId?: string | null;
   /** Entrada que esta corrige, si es una corrección. */
   correctsEntryId?: string | null;
   /**
@@ -105,7 +114,40 @@ export function canonicalJson(value: unknown): string {
 }
 
 /**
+ * Columnas de la tabla que ENTRAN a la preimagen, en el mismo orden.
+ *
+ * Es la lista congelada del diseño: cambiarla obliga a rehashear todo lo ya
+ * escrito, y en una tabla append-only eso significa migrar la cadena entera.
+ * El test `la preimagen cubre todas las columnas de la tabla` la compara contra
+ * el esquema real y falla si aparece una columna nueva sin decidir qué hacer.
+ */
+export const PREIMAGE_COLUMNS = [
+  'patient_id',
+  'professional_id',
+  'sequence_number',
+  'entry_type',
+  'fhir_resource_type',
+  'content',
+  'consultation_id',
+  'corrects_entry_id',
+  'created_at',
+  'previous_hash',
+] as const;
+
+/**
+ * Columnas que quedan afuera de la preimagen A PROPÓSITO.
+ *
+ * `id` lo genera la base y no aporta (la identidad de la entrada ya está dada
+ * por `patient_id` + `sequence_number`); `content_hash` es el resultado, no
+ * puede ser su propia entrada.
+ */
+export const NON_HASHED_COLUMNS = ['id', 'content_hash'] as const;
+
+/**
  * Texto exacto sobre el que se calcula el SHA-256.
+ *
+ * El orden es el de `PREIMAGE_COLUMNS` y es parte del diseño: cambiarlo produce
+ * hashes distintos sobre los mismos datos.
  *
  * El separador es `\n` y es seguro: el único campo de forma libre es `content`,
  * y al pasar por `canonicalJson` cualquier salto de línea real queda escapado
@@ -117,10 +159,12 @@ export function buildPreimage(
 ): string {
   return [
     entry.patientId,
+    entry.professionalId,
     String(entry.sequenceNumber),
     entry.entryType,
     entry.fhirResourceType,
     canonicalJson(entry.content),
+    entry.consultationId ?? '',
     entry.correctsEntryId ?? '',
     entry.createdAt.toISOString(),
     previousHash,

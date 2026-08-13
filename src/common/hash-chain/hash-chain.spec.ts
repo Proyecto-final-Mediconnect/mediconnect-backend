@@ -18,6 +18,7 @@ import {
 } from './hash-chain';
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
+const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
 
 function observation(value: number): Record<string, unknown> {
   return {
@@ -31,6 +32,7 @@ function observation(value: number): Record<string, unknown> {
 function input(sequenceNumber: number, value = 70): ChainEntryInput {
   return {
     patientId: PATIENT,
+    professionalId: PROFESSIONAL,
     sequenceNumber,
     entryType: 'CONSULTA',
     fhirResourceType: 'Observation',
@@ -98,6 +100,28 @@ describe('computeContentHash', () => {
     expect(computeContentHash(input(1), GENESIS_HASH)).not.toBe(
       computeContentHash(input(1), 'a'.repeat(64)),
     );
+  });
+
+  it('cambia si se reasigna el profesional que firmó la entrada', () => {
+    const base = input(1);
+
+    expect(
+      computeContentHash(
+        { ...base, professionalId: '33333333-3333-4333-8333-333333333333' },
+        GENESIS_HASH,
+      ),
+    ).not.toBe(computeContentHash(base, GENESIS_HASH));
+  });
+
+  it('cambia si cambia la consulta de origen', () => {
+    const base = input(1);
+
+    expect(
+      computeContentHash(
+        { ...base, consultationId: '44444444-4444-4444-8444-444444444444' },
+        GENESIS_HASH,
+      ),
+    ).not.toBe(computeContentHash(base, GENESIS_HASH));
   });
 
   it('es insensible al orden de las claves del recurso FHIR', () => {

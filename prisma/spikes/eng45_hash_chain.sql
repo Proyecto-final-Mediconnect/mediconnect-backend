@@ -25,13 +25,20 @@ drop table if exists spike_hash_chain_entries cascade
 -- milisegundos. Los microsegundos se pierden en el round-trip, el hash
 -- recalculado no coincide y la cadena da por manipulada una entrada sana.
 -- Ver el informe del spike antes de definir el tipo en ENG-57.
+-- Las columnas espejan a `clinical_record_entries`. `professional_id` y
+-- `consultation_id` están acá porque también entran a la preimagen: la autoría
+-- del asiento clínico tiene que estar protegida por la cadena (Ley 26.529
+-- art. 15). Ver PREIMAGE_COLUMNS en src/common/hash-chain/hash-chain.ts — el
+-- test de integración compara esta tabla contra esa lista y falla si divergen.
 create table spike_hash_chain_entries (
   id                 uuid primary key default gen_random_uuid(),
   patient_id         uuid          not null,
+  professional_id    uuid          not null,
   sequence_number    bigint        not null,
   entry_type         text          not null,
   fhir_resource_type text          not null,
   content            jsonb         not null,
+  consultation_id    uuid,
   corrects_entry_id  uuid          references spike_hash_chain_entries (id),
   content_hash       char(64)      not null,
   previous_hash      char(64)      not null,
