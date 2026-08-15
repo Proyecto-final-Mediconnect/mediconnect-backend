@@ -261,7 +261,10 @@ model ReviewResponse {
 // EP-03 — Agenda y Turnos
 // ===========================================================================
 
-/// Disponibilidad semanal recurrente del profesional.
+/// Disponibilidad semanal recurrente del profesional. Una fila por franja: un
+/// mismo `weekday` puede tener varias (turno mañana y turno tarde), por eso no
+/// hay unique sobre (professional_id, weekday). El solape entre franjas del mismo
+/// día lo valida el service (ENG-53).
 model ScheduleRule {
   id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   professional_id       String   @db.Uuid
@@ -274,19 +277,30 @@ model ScheduleRule {
 
   professional Professional @relation(fields: [professional_id], references: [profile_id], onDelete: Cascade)
 
+  @@index([professional_id])
   @@map("schedule_rules")
 }
 
-/// Bloqueos puntuales / feriados.
+/// Bloqueos puntuales / feriados. `start_time`/`end_time` en null significan el
+/// día completo; con valor, solo esa franja de ese día (ENG-53).
 model ScheduleBlock {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  professional_id String   @db.Uuid
-  block_date      DateTime @db.Date
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  professional_id String    @db.Uuid
+  block_date      DateTime  @db.Date
+  start_time      DateTime? @db.Time(6)
+  end_time        DateTime? @db.Time(6)
   reason          String?
-  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
 
   professional Professional @relation(fields: [professional_id], references: [profile_id], onDelete: Cascade)
 
+  // El índice real se crea en la migración de ENG-53 con `nulls not distinct`
+  // (PG 15+), modificador que Prisma todavía no sabe expresar. Se declara acá
+  // igual, con el mismo nombre, para que Prisma no lo vea como drift y proponga
+  // borrarlo. Sin ese modificador el índice no serviría para el caso "día
+  // completo" (start_time null), porque NULL != NULL.
+  @@unique([professional_id, block_date, start_time], map: "schedule_blocks_professional_date_start_key")
+  @@index([professional_id, block_date])
   @@map("schedule_blocks")
 }
 

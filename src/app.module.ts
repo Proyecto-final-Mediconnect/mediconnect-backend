@@ -17,6 +17,7 @@ import { HealthModule } from './health/health.module';
 import { PatientsModule } from './patients/patients.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProfessionalsModule } from './professionals/professionals.module';
+import { SchedulesModule } from './schedules/schedules.module';
 import { SupabaseModule } from './supabase/supabase.module';
 import { UserModule } from './user/user.module';
 import { VideoModule } from './video/video.module';
@@ -40,6 +41,7 @@ import { VideoModule } from './video/video.module';
     ProfessionalsModule,
     PatientsModule,
     VideoModule,
+    SchedulesModule,
   ],
   controllers: [AppController],
   providers: [
