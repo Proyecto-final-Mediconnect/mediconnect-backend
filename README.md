@@ -175,24 +175,71 @@ El deploy lo dispara [`deploy-production.yml`](./.github/workflows/deploy-produc
 cuando el workflow **CI** pasa sobre `main`, llamamos al deploy hook de Render
 (Auto-Deploy = No, para que el gate lo controle CI).
 
-**El esquema y los datos base van en el pre-deploy de Render**, no en el
-workflow: el runner de GitHub no tiene por qué ver la connection string de
-producción, y el pre-deploy corre una sola vez por release, antes de levantar la
-nueva instancia.
+**El esquema y los datos base se aplican en el propio workflow**, con
+`pnpm run db:setup` (`prisma migrate deploy && pnpm run db:seed`), justo antes de
+llamar al hook. Si eso falla, el hook no se dispara: la versión vieja sigue
+arriba y no queda una release corriendo contra un esquema a medio migrar.
 
-```
-# Render → Settings → Pre-Deploy Command
-pnpm run db:setup     # prisma migrate deploy && pnpm run db:seed
+> **El Pre-Deploy Command de Render tiene que quedar VACÍO.** Si se configura, el
+> esquema se aplica desde dos lados.
+
+Va `db:setup` (migraciones **+ seed**) y no solo `db:migrate` por ENG-96: el seed
+corría solo en local y el catálogo de especialidades quedó vacío en Supabase por
+meses. Las dos partes son idempotentes (`migrate deploy` no hace nada si no hay
+pendientes; el seed hace `upsert` por nombre), así que correrlas en cada release
+no tiene costo.
+
+### Por qué no va en el pre-deploy de Render (ENG-122)
+
+Hasta agosto de 2026 esto vivía en el Pre-Deploy Command de Render, con el
+argumento de que el runner de GitHub no tuviera que ver la connection string de
+producción. **No estaba corriendo.** Al mergear ENG-85 el deploy salió en verde y
+`chain_head_snapshots` no existía en Supabase; hubo que migrar a mano.
+
+Es la segunda vez que pasa lo mismo — ENG-96 fue el mismo incidente con el seed.
+Dos veces alcanza para ver que el problema no es la configuración sino dónde
+vive: en un dashboard, fuera del repo, sin log en Actions y sin que ningún PR la
+muestre. Un paso que no corre y no avisa es peor que no tenerlo.
+
+El costo es tener `DATABASE_URL` de producción como secret del repo. Ese límite ya
+se había cruzado en ENG-85 (el job de integridad tiene que leer la base real) y
+Actions enmascara los secrets en los logs.
+
+### Cuidado al escribir una migración
+
+El esquema se aplica **antes** de que Render levante el código nuevo, así que
+durante unos minutos la versión vieja corre contra el esquema nuevo. Las
+migraciones tienen que ser compatibles hacia atrás (expand/contract): agregar
+tablas y columnas es seguro; borrar o renombrar algo que el código vigente usa
+rompe producción en esa ventana y hay que partirlo en dos releases.
+
+### Si una migración falla en el deploy
+
+Queda marcada como fallida en `_prisma_migrations` y **bloquea los deploys
+siguientes** hasta que se resuelva. Para intervenir a mano, con la connection
+string del Session pooler:
+
+```bash
+read -rsp "password: " PGPASS && echo
+export DATABASE_URL="postgresql://postgres.<project-ref>:${PGPASS}@aws-1-sa-east-1.pooler.supabase.com:5432/postgres?schema=public"
+
+pnpm exec prisma migrate status      # qué quedó pendiente o fallida
+pnpm run db:migrate                  # reintentar
 ```
 
-Va `db:setup` (migraciones **+ seed**) y no solo `db:migrate` justamente por
-ENG-96: el seed corría solo en local y el catálogo de especialidades quedó vacío
-en Supabase por meses. Como el seed es idempotente, incluirlo en cada release no
-tiene costo y evita que los datos base vuelvan a quedar desfasados del esquema.
+Si la migración fallida quedó a medias hay que decidir explícitamente qué pasó
+con ella antes de reintentar:
+
+```bash
+# se aplicó de verdad pero Prisma no lo registró
+pnpm exec prisma migrate resolve --applied <nombre_migracion>
+
+# no llegó a aplicar nada: se descarta para poder reintentar
+pnpm exec prisma migrate resolve --rolled-back <nombre_migracion>
+```
 
 `db:seed` usa `--env-file-if-exists=.env`, así que funciona igual en local (lee
-tu `.env`) y en Render (no hay archivo; `DATABASE_URL` viene de las env vars del
-servicio).
+tu `.env`) y en el runner (no hay archivo; `DATABASE_URL` viene del secret).
 
 ## Modelo de datos
 
