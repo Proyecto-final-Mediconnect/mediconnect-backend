@@ -21,6 +21,7 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "verify:rls": "node --env-file=.env --import tsx scripts/verify-rls.ts",
+    "spike:eng52": "node --env-file=.env --import tsx scripts/spike-eng52-realtime.ts",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "node --env-file=.env --import tsx prisma/seed.ts",
     "db:setup": "prisma migrate deploy && pnpm run db:seed",
