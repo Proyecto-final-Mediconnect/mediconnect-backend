@@ -10,6 +10,7 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
+import { CatalogModule } from './catalog/catalog.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
@@ -30,6 +31,7 @@ import { UserModule } from './user/user.module';
     PrismaModule,
     SupabaseModule,
     AuthModule,
+    CatalogModule,
     UserModule,
     HealthModule,
     ProfessionalsModule,

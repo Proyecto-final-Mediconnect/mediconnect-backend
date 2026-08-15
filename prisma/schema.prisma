@@ -176,6 +176,12 @@ model Professional {
   validated_summaries     ConsultationSummary[]
 
   @@index([status])
+  // Catálogo público (ENG-49): el listado siempre filtra por status = VALIDADO
+  // y ordena por apellido/nombre; el índice cubre el ORDER BY del scroll
+  // infinito para que las páginas altas no cuesten un sort de la tabla entera.
+  @@index([status, last_name, first_name, profile_id])
+  // Filtro por rango de precio dentro de los validados.
+  @@index([status, consultation_price])
   @@map("professionals")
 }
 
@@ -203,6 +209,9 @@ model ProfessionalSpecialty {
   specialty    Specialty    @relation(fields: [specialty_id], references: [id], onDelete: Restrict)
 
   @@id([professional_id, specialty_id])
+  // La PK solo sirve para buscar "las especialidades de X". El filtro del
+  // catálogo va al revés (los profesionales de una especialidad) — ENG-49.
+  @@index([specialty_id])
   @@map("professional_specialties")
 }
 
