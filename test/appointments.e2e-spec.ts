@@ -59,6 +59,14 @@ describe('Turnos (e2e)', () => {
     status: 'RESERVADO_SIN_PAGAR',
   };
 
+  /** Fila que devuelve Prisma tras cancelar: `Date` y `Decimal`, no strings. */
+  const CANCELLED_ROW = {
+    ...APPOINTMENT_ROW,
+    scheduled_at: new Date(APPOINTMENT_ROW.scheduled_at),
+    price: { toString: () => '15000.00' },
+    status: 'CANCELADO',
+  };
+
   function makeSupabaseMock() {
     const builder: unknown = new Proxy(
       {},
@@ -101,7 +109,10 @@ describe('Turnos (e2e)', () => {
       },
       scheduleRule: { findMany: jest.fn().mockResolvedValue([RULE_ROW]) },
       scheduleBlock: { findMany: jest.fn().mockResolvedValue([]) },
-      appointment: { findMany: jest.fn().mockResolvedValue([]) },
+      appointment: {
+        findMany: jest.fn().mockResolvedValue([]),
+        update: jest.fn().mockResolvedValue(CANCELLED_ROW),
+      },
       profile: { findUnique: jest.fn() },
     };
   }
@@ -353,6 +364,68 @@ describe('Turnos (e2e)', () => {
         .expect(200);
 
       expect(res.body).toEqual([]);
+    });
+  });
+
+  describe('PATCH /appointments/:id/cancel', () => {
+    const path = `/appointments/${APPOINTMENT_ROW.id}/cancel`;
+
+    it('sin token devuelve 401', async () => {
+      await request(app.getHttpServer()).patch(path).expect(401);
+    });
+
+    it('rechaza un id que no es UUID', async () => {
+      await request(app.getHttpServer())
+        .patch('/appointments/no-soy-uuid/cancel')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(400);
+    });
+
+    it('cancela el turno y lo devuelve en CANCELADO', async () => {
+      results = [{ data: APPOINTMENT_ROW, error: null }];
+
+      const res = await request(app.getHttpServer())
+        .patch(path)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(200);
+
+      expect(res.body).toMatchObject({
+        id: APPOINTMENT_ROW.id,
+        status: 'CANCELADO',
+        date: MONDAY,
+        startTime: '10:00',
+      });
+    });
+
+    it('un turno que no es del usuario da 404', async () => {
+      results = [{ data: null, error: null }];
+
+      await request(app.getHttpServer())
+        .patch(path)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(404);
+
+      expect(prisma.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('el profesional del turno recibe 403', async () => {
+      results = [{ data: APPOINTMENT_ROW, error: null }];
+
+      await request(app.getHttpServer())
+        .patch(path)
+        .set('Authorization', `Bearer ${await signToken(PRO_ID)}`)
+        .expect(403);
+    });
+
+    it('un turno ya cancelado da 409', async () => {
+      results = [
+        { data: { ...APPOINTMENT_ROW, status: 'CANCELADO' }, error: null },
+      ];
+
+      await request(app.getHttpServer())
+        .patch(path)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(409);
     });
   });
 });

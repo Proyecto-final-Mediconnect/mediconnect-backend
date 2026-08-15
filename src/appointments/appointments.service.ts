@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -70,6 +71,9 @@ const ACTIVE_STATUSES = ['RESERVADO_SIN_PAGAR', 'CONFIRMADO'] as const;
 
 /** `23505 unique_violation` de Postgres, que PostgREST propaga tal cual. */
 const UNIQUE_VIOLATION = '23505';
+
+/** `P2025` de Prisma: el `where` del update no encontró ninguna fila. */
+const PRISMA_RECORD_NOT_FOUND = 'P2025';
 
 /** Datos del profesional que ve el paciente en la pantalla de reserva. */
 export interface BookableProfessional {
@@ -300,6 +304,121 @@ export class AppointmentsService {
     }
 
     return this.toViews((data ?? []) as unknown as AppointmentRow[]);
+  }
+
+  /**
+   * Cancela un turno futuro del paciente (ENG-55).
+   *
+   * **Sin reembolso.** No hay pagos todavía —son Release 2—, así que hoy no hay
+   * nada que devolver: cancelar es exactamente la transición de estado. La
+   * política de reembolso (`cancellation_policies`) la agrega ENG-65 encima de
+   * este mismo camino.
+   *
+   * Se lee por PostgREST y se escribe por Prisma, y la asimetría es a propósito:
+   *
+   * - La **lectura** es la autorización. `appointments_select_own` decide si el
+   *   usuario participa del turno; si no, no hay fila y la respuesta es 404 sin
+   *   que este service tenga que confiar en su propia comparación de ids.
+   * - La **escritura** va por el owner porque la migración de ENG-54 no concede
+   *   UPDATE a `authenticated`, y no conviene concederlo: una policy no puede
+   *   limitar QUÉ columna se toca, así que el mismo UPDATE que permite cancelar
+   *   dejaría al paciente moverse el `scheduled_at`, bajarse el `price` o
+   *   ponerse el turno en CONFIRMADO sin haber pagado. La transición acotada
+   *   vive acá.
+   *
+   * Las tres condiciones se revalidan en el `where` del update y no solo en los
+   * `if` de arriba: entre la lectura y la escritura el turno puede haber
+   * cambiado (el profesional lo completó, el job de ENG-101 lo liberó, un
+   * segundo click ya lo canceló). Si el `where` no matchea, Prisma tira P2025 y
+   * sale como 409 en vez de pisar un estado que ya no era el que se validó.
+   */
+  async cancel(
+    accessToken: string,
+    userId: string,
+    appointmentId: string,
+    now: Date = new Date(),
+  ): Promise<AppointmentView> {
+    const client = this.supabase.getClientForToken(accessToken);
+
+    const { data, error } = await client
+      .from('appointments')
+      .select(APPOINTMENT_SELECT)
+      .eq('id', appointmentId)
+      .maybeSingle();
+
+    if (error) {
+      throw new InternalServerErrorException(
+        'No pudimos cancelar el turno. Probá de nuevo en unos minutos.',
+      );
+    }
+    // También cae acá el turno de otra persona: RLS no lo devuelve, así que para
+    // este usuario no existe. Un 403 confirmaría que el id es real.
+    if (!data) {
+      throw new NotFoundException('Ese turno no existe.');
+    }
+
+    const row = data as unknown as AppointmentRow;
+
+    // El profesional SÍ ve el turno (la policy de select cubre los dos roles),
+    // pero el criterio de aceptación dice "el paciente puede cancelar". Que el
+    // profesional cancele es otra historia, con otro aviso al paciente.
+    if (row.patient_id !== userId) {
+      throw new ForbiddenException(
+        'Solo el paciente puede cancelar el turno desde acá.',
+      );
+    }
+
+    if (new Date(row.scheduled_at) <= now) {
+      throw new BadRequestException('Ese turno ya pasó: no se puede cancelar.');
+    }
+
+    if (
+      !ACTIVE_STATUSES.includes(row.status as (typeof ACTIVE_STATUSES)[number])
+    ) {
+      throw new ConflictException('Ese turno ya no está activo.');
+    }
+
+    try {
+      const updated = await this.prisma.appointment.update({
+        where: {
+          id: appointmentId,
+          patient_id: userId,
+          status: { in: [...ACTIVE_STATUSES] },
+          scheduled_at: { gt: now },
+        },
+        data: {
+          status: 'CANCELADO',
+          cancelled_at: now,
+          // La columna tiene DEFAULT now() pero no `@updatedAt`: Prisma no la
+          // toca sola y quedaría con la fecha de la reserva.
+          updated_at: now,
+        },
+      });
+
+      const [view] = await this.toViews([
+        {
+          id: updated.id,
+          patient_id: updated.patient_id,
+          professional_id: updated.professional_id,
+          scheduled_at: updated.scheduled_at.toISOString(),
+          duration_minutes: updated.duration_minutes,
+          // `Decimal` no es `string | number`; `toString()` conserva los
+          // decimales que un `Number` intermedio podría redondear.
+          price: updated.price.toString(),
+          status: updated.status,
+        },
+      ]);
+      return view;
+    } catch (err) {
+      if ((err as { code?: string }).code === PRISMA_RECORD_NOT_FOUND) {
+        throw new ConflictException(
+          'El turno cambió de estado mientras lo cancelabas. Actualizá la lista.',
+        );
+      }
+      throw new InternalServerErrorException(
+        'No pudimos cancelar el turno. Probá de nuevo en unos minutos.',
+      );
+    }
   }
 
   /** Valida el rango pedido: coherente, acotado y dentro del horizonte. */
