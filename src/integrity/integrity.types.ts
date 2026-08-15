@@ -1,4 +1,5 @@
 /** ENG-85 — Tipos compartidos entre el servicio de verificación y el alertador. */
+import type { ChainAnchor } from './chain-anchor';
 import type { IntegrityFailure } from './chain-audit';
 
 /**
@@ -18,4 +19,16 @@ export interface IntegrityRunResult {
   durationMs: number;
   /** Vacío cuando `status === 'OK'`. */
   failures: IntegrityFailure[];
+  /**
+   * Ancla de esta corrida (ENG-123). `null` cuando la corrida encontró
+   * inconsistencias: anclar una cadena manipulada la convertiría en la nueva
+   * referencia y blanquearía la manipulación, igual que pasaría al pisar el
+   * snapshot.
+   */
+  anchor: ChainAnchor | null;
+  /**
+   * `true` si la raíz cambió sin que la HC haya crecido. Es la señal que
+   * sobrevive aunque el atacante haya reescrito la cadena y el snapshot juntos.
+   */
+  anchorRegression: boolean;
 }
