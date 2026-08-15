@@ -3,7 +3,7 @@
 -- NO es una migración de Prisma, y está fuera de prisma/migrations a propósito:
 -- crea TABLAS DE PRUEBA (`spike_realtime_*`), no toca `conversations` ni
 -- `messages` reales y no debe correr en producción como parte de un deploy.
--- ENG-56 se lleva de acá el diseño ya validado, no este archivo.
+-- ENG-70 se lleva de acá el diseño ya validado, no este archivo.
 --
 -- Se pega y ejecuta a mano en el SQL editor del proyecto de Supabase, porque
 -- necesita un proyecto real: Realtime no existe en el Postgres del docker-compose.
@@ -50,7 +50,7 @@ create index spike_realtime_messages_conversation_created
 -- detalle que documenta la migración de ENG-48.
 --
 -- Solo `select`: en el prototipo los mensajes los inserta la service_role desde
--- el script. Quién puede ESCRIBIR es una decisión de ENG-56 y no cambia lo que
+-- el script. Quién puede ESCRIBIR es una decisión de ENG-70 y no cambia lo que
 -- este spike valida, que es quién puede LEER.
 
 grant select on spike_realtime_conversations to authenticated;

@@ -308,7 +308,7 @@ async function main(): Promise<void> {
     );
 
     if (fallos.length > 0) {
-      console.error('\n❌ El aislamiento NO se sostiene. No avanzar con ENG-56.');
+      console.error('\n❌ El aislamiento NO se sostiene. No avanzar con ENG-70.');
       process.exitCode = 1;
     } else {
       console.log(
