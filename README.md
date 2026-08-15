@@ -191,15 +191,21 @@ no tiene costo.
 
 ### Por qué no va en el pre-deploy de Render (ENG-122)
 
-Hasta agosto de 2026 esto vivía en el Pre-Deploy Command de Render, con el
-argumento de que el runner de GitHub no tuviera que ver la connection string de
-producción. **No estaba corriendo.** Al mergear ENG-85 el deploy salió en verde y
-`chain_head_snapshots` no existía en Supabase; hubo que migrar a mano.
+Hasta agosto de 2026 esto vivía —en el papel— en el Pre-Deploy Command de Render,
+con el argumento de que el runner de GitHub no tuviera que ver la connection
+string de producción. **Nunca corrió, y no podía correr: el Pre-Deploy Command es
+una función de los planes pagos y el servicio está en el tier gratuito.** El campo
+estuvo vacío desde siempre.
 
-Es la segunda vez que pasa lo mismo — ENG-96 fue el mismo incidente con el seed.
-Dos veces alcanza para ver que el problema no es la configuración sino dónde
-vive: en un dashboard, fuera del repo, sin log en Actions y sin que ningún PR la
-muestre. Un paso que no corre y no avisa es peor que no tenerlo.
+O sea que durante meses el README describió un mecanismo que no existía, y todo
+lo que llegó al esquema de producción se aplicó a mano sin que quedara registro.
+Se descubrió al mergear ENG-85: el deploy salió en verde y `chain_head_snapshots`
+no existía en Supabase. Antes había pasado lo mismo con el seed en ENG-96, y el
+catálogo de especialidades quedó vacío por meses.
+
+La lección no es "configurarlo bien". Es que un paso del que se depende no puede
+vivir en un dashboard, fuera del repo, sin log y sin nada que avise cuando no
+corre — ahí ni siquiera se puede notar que no existe.
 
 El costo es tener `DATABASE_URL` de producción como secret del repo. Ese límite ya
 se había cruzado en ENG-85 (el job de integridad tiene que leer la base real) y
