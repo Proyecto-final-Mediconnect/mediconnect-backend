@@ -10,6 +10,7 @@ import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { AppointmentsModule } from './appointments/appointments.module';
 import { AuthModule } from './auth/auth.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { validate } from './config/env.validation';
@@ -40,6 +41,7 @@ import { UserModule } from './user/user.module';
     ProfessionalsModule,
     PatientsModule,
     SchedulesModule,
+    AppointmentsModule,
   ],
   controllers: [AppController],
   providers: [
