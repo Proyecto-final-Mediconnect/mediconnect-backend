@@ -29,6 +29,26 @@ class EnvironmentVariables {
   @IsOptional()
   @IsIn(['development', 'test', 'production'])
   NODE_ENV?: string;
+
+  // Monitoreo de errores (ENG-83). Opcional a propósito: sin DSN el SDK queda
+  // inactivo, y así local y CI corren sin configuración extra ni eventos de
+  // desarrollo ensuciando el dashboard. Se valida como URL para que un DSN mal
+  // pegado falle al bootear en vez de dejar de reportar en silencio.
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  SENTRY_DSN?: string;
+
+  // Separa producción de staging en el dashboard. Si falta, `instrument.ts` cae
+  // a NODE_ENV.
+  @IsOptional()
+  @IsString()
+  SENTRY_ENVIRONMENT?: string;
+
+  // Versión desplegada (ej. el SHA del commit), para distinguir errores nuevos
+  // de los que ya venían.
+  @IsOptional()
+  @IsString()
+  SENTRY_RELEASE?: string;
 }
 
 /** Falla rápido al bootear si falta o está mal formada una env var requerida,
