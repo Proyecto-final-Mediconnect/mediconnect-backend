@@ -19,6 +19,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { ProfessionalsModule } from './professionals/professionals.module';
 import { SupabaseModule } from './supabase/supabase.module';
 import { UserModule } from './user/user.module';
+import { VideoModule } from './video/video.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { UserModule } from './user/user.module';
     HealthModule,
     ProfessionalsModule,
     PatientsModule,
+    VideoModule,
   ],
   controllers: [AppController],
   providers: [
