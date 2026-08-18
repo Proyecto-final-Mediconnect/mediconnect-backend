@@ -7,29 +7,14 @@ import {
   Param,
   Post,
   Req,
-  UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { requireAuth } from '../common/http/require-auth';
 import { DailyService } from './daily.service';
 import { SpikeRoomNamePipe } from './dto/spike-room-name.pipe';
-
-/**
- * `JwtAuthGuard` garantiza `user`; esto lo hace explícito para TypeScript sin
- * repartir `!` por los handlers. Es la misma función que
- * `professionals.controller.ts` define localmente; ENG-53 la está extrayendo a
- * `common/http/require-auth.ts` y este módulo va a pasar a importarla de ahí
- * cuando esa rama mergee. Duplicar el helper acá evita que dos PRs en revisión
- * peleen por el mismo archivo nuevo.
- */
-function requireUserId(req: Request): string {
-  if (!req.user?.id) {
-    throw new UnauthorizedException('No se encontró un token de sesión.');
-  }
-  return req.user.id;
-}
 
 /**
  * Endpoints del spike de Daily.co (ENG-51).
@@ -58,7 +43,7 @@ export class VideoController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
   createRoom(@Req() req: Request) {
-    const userId = requireUserId(req);
+    const { userId } = requireAuth(req);
     // El nombre visible dentro de la sala es el id de sesión recortado y no el
     // email: el Prebuilt lo muestra a los demás participantes, y en una prueba
     // de videoconsulta no hace falta filtrar la identidad de nadie.
