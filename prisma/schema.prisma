@@ -319,6 +319,14 @@ model CancellationPolicy {
 }
 
 /// Turno reservado. La relación profesional↔paciente se deriva de esta tabla.
+///
+/// La migración de ENG-54 agrega `appointments_professional_active_slot_key`: un
+/// unique PARCIAL sobre (professional_id, scheduled_at) limitado a los estados que
+/// ocupan el horario (RESERVADO_SIN_PAGAR, CONFIRMADO). Es lo que impide que dos
+/// pacientes reserven el mismo turno a la vez, y no se puede declarar acá: Prisma
+/// no sabe expresar la cláusula `where` de un índice parcial. Un `@@unique` sin
+/// esa cláusula NO es equivalente — impediría revender un turno cancelado — así
+/// que el índice vive solo en el SQL de la migración.
 model Appointment {
   id                  String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   patient_id          String             @db.Uuid
