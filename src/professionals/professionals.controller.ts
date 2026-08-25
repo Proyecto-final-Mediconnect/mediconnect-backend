@@ -6,7 +6,6 @@ import {
   Patch,
   Post,
   Req,
-  UnauthorizedException,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -14,6 +13,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { requireAuth } from '../common/http/require-auth';
 import { UpdateProfessionalProfileDto } from './dto/update-professional-profile.dto';
 import { ProfessionalsService } from './professionals.service';
 
@@ -33,15 +33,6 @@ interface UploadedPhoto {
   buffer: Buffer;
   mimetype: string;
   size: number;
-}
-
-/** JwtAuthGuard garantiza `user` y `accessToken`; este helper lo hace explícito
- *  para TypeScript sin `!` repartidos por los handlers. */
-function requireAuth(req: Request): { userId: string; accessToken: string } {
-  if (!req.user?.id || !req.accessToken) {
-    throw new UnauthorizedException('No se encontró un token de sesión.');
-  }
-  return { userId: req.user.id, accessToken: req.accessToken };
 }
 
 @Controller('professionals')
