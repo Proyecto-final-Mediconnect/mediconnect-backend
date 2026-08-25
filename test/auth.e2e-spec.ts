@@ -139,6 +139,80 @@ describe('Auth registro (e2e)', () => {
       });
   });
 
+  /**
+   * Los atributos de la cookie son lo único que separa una sesión que funciona
+   * de una que el navegador descarta en silencio, y el caso que importa
+   * —producción— no se puede reproducir en desarrollo: la web y la API son
+   * hosts distintos bajo `onrender.com`, que está en la Public Suffix List, así
+   * que el request es cross-site. Con `SameSite=Lax` el browser tira la cookie,
+   * el login devuelve 200 igual y el `GET /me` siguiente responde 401.
+   *
+   * Se falsea `NODE_ENV` porque `sessionCookieOptions()` lo lee en cada request,
+   * no al arrancar el módulo.
+   */
+  describe('atributos de la cookie de sesión', () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+
+    afterEach(() => {
+      process.env.NODE_ENV = originalNodeEnv;
+    });
+
+    function loginOk() {
+      signInWithPassword.mockResolvedValue({
+        data: {
+          session: { access_token: 'acc', refresh_token: 'ref' },
+          user: { id: 'uid', email: creds.email },
+        },
+        error: null,
+      });
+      return request(app.getHttpServer()).post('/auth/login').send(creds);
+    }
+
+    it('en producción usa SameSite=None con Secure, para que sobreviva cross-site', async () => {
+      process.env.NODE_ENV = 'production';
+
+      const res = await loginOk().expect(200);
+      const cookies = res.headers['set-cookie'] as unknown as string[];
+
+      for (const name of ['sb-access-token', 'sb-refresh-token']) {
+        const cookie = cookies.find((c) => c.startsWith(`${name}=`));
+        expect(cookie).toBeDefined();
+        expect(cookie).toMatch(/SameSite=None/i);
+        // `None` sin `Secure` lo rechaza el navegador: van siempre juntos.
+        expect(cookie).toMatch(/Secure/i);
+        expect(cookie).toMatch(/HttpOnly/i);
+      }
+    });
+
+    it('en desarrollo se queda en SameSite=Lax y sin Secure', async () => {
+      process.env.NODE_ENV = 'development';
+
+      const res = await loginOk().expect(200);
+      const cookies = res.headers['set-cookie'] as unknown as string[];
+      const cookie = cookies.find((c) => c.startsWith('sb-access-token='));
+
+      // localhost:5173 -> localhost:3000 es same-site: `None` no aportaría nada
+      // y `Secure` haría que el browser descarte la cookie sobre http.
+      expect(cookie).toMatch(/SameSite=Lax/i);
+      expect(cookie).not.toMatch(/Secure/i);
+    });
+
+    it('el logout limpia con los mismos atributos que el login', async () => {
+      process.env.NODE_ENV = 'production';
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/logout')
+        .expect(200);
+      const cookies = res.headers['set-cookie'] as unknown as string[];
+      const cookie = cookies.find((c) => c.startsWith('sb-access-token='));
+
+      // `clearCookie` solo borra si los atributos coinciden con los del `Set-Cookie`
+      // original; si divergen, la sesión queda viva en el navegador.
+      expect(cookie).toMatch(/SameSite=None/i);
+      expect(cookie).toMatch(/Secure/i);
+    });
+  });
+
   it('401 login con credenciales inválidas', () => {
     signInWithPassword.mockResolvedValue({
       data: {},
