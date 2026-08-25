@@ -4,6 +4,9 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Patch,
   Post,
   Req,
   UseGuards,
@@ -44,5 +47,25 @@ export class AppointmentsController {
   listMine(@Req() req: Request) {
     const { userId, accessToken } = requireAuth(req);
     return this.appointments.listMine(accessToken, userId);
+  }
+
+  /**
+   * Cancela un turno futuro propio (ENG-55).
+   *
+   * `PATCH` y no `DELETE`: el turno no se borra. Queda en CANCELADO, con su
+   * `cancelled_at`, porque el profesional tiene que poder ver que le cancelaron
+   * y porque de esa fila cuelgan el pago (ENG-63) y el reembolso (ENG-65).
+   *
+   * Sin body: lo único que se puede pedir es la cancelación. El motivo
+   * (`appointments.cancellation_reason`) no se expone todavía — el criterio de
+   * aceptación no lo pide y con `forbidNonWhitelisted` mandarlo daría 400.
+   */
+  @Patch(':id/cancel')
+  cancel(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.appointments.cancel(accessToken, userId, id);
   }
 }

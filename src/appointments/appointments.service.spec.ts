@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
@@ -46,6 +47,19 @@ const INSERTED_ROW = {
   status: 'RESERVADO_SIN_PAGAR',
 };
 
+/**
+ * Lo que devuelve `prisma.appointment.update` al cancelar. Ojo con las formas:
+ * Prisma entrega `scheduled_at` como `Date` y `price` como `Decimal`, no como los
+ * strings que manda PostgREST. `cancel` tiene que convertirlos, y este mock es lo
+ * que verifica que lo haga.
+ */
+const CANCELLED_PRISMA_ROW = {
+  ...INSERTED_ROW,
+  scheduled_at: new Date(INSERTED_ROW.scheduled_at),
+  price: { toString: () => '15000.00' },
+  status: 'CANCELADO',
+};
+
 describe('AppointmentsService', () => {
   let service: AppointmentsService;
   let prisma: {
@@ -53,7 +67,7 @@ describe('AppointmentsService', () => {
     patient: { findMany: jest.Mock };
     scheduleRule: { findMany: jest.Mock };
     scheduleBlock: { findMany: jest.Mock };
-    appointment: { findMany: jest.Mock };
+    appointment: { findMany: jest.Mock; update: jest.Mock };
   };
   /** Cola de respuestas del cliente PostgREST mockeado, en orden de consumo. */
   let results: { data: unknown; error: unknown }[];
@@ -105,7 +119,10 @@ describe('AppointmentsService', () => {
       },
       scheduleRule: { findMany: jest.fn().mockResolvedValue([RULE_ROW]) },
       scheduleBlock: { findMany: jest.fn().mockResolvedValue([]) },
-      appointment: { findMany: jest.fn().mockResolvedValue([]) },
+      appointment: {
+        findMany: jest.fn().mockResolvedValue([]),
+        update: jest.fn().mockResolvedValue(CANCELLED_PRISMA_ROW),
+      },
     };
 
     service = new AppointmentsService(
@@ -443,6 +460,120 @@ describe('AppointmentsService', () => {
       results = [{ data: null, error: { code: '42501' } }];
 
       await expect(service.listMine(TOKEN, PATIENT_ID)).rejects.toBeInstanceOf(
+        InternalServerErrorException,
+      );
+    });
+  });
+
+  describe('cancel', () => {
+    const APPOINTMENT_ID = INSERTED_ROW.id;
+    /** Lectura previa: el turno existe, es del paciente y todavía no pasó. */
+    const READ_OK = { data: INSERTED_ROW, error: null };
+
+    const cancel = (userId = PATIENT_ID) =>
+      service.cancel(TOKEN, userId, APPOINTMENT_ID, NOW);
+
+    it('cancela un turno futuro propio', async () => {
+      results = [READ_OK];
+
+      const view = await cancel();
+
+      expect(view).toMatchObject({
+        id: APPOINTMENT_ID,
+        status: 'CANCELADO',
+        date: MONDAY,
+        startTime: '10:00',
+        price: 15000,
+      });
+    });
+
+    it('revalida las tres condiciones en el where del update', async () => {
+      results = [READ_OK];
+
+      await cancel();
+
+      // Sin esto la validación viviría solo en los `if` de arriba y la ventana
+      // entre la lectura y la escritura quedaría abierta.
+      expect(prisma.appointment.update).toHaveBeenCalledWith({
+        where: {
+          id: APPOINTMENT_ID,
+          patient_id: PATIENT_ID,
+          status: { in: ['RESERVADO_SIN_PAGAR', 'CONFIRMADO'] },
+          scheduled_at: { gt: NOW },
+        },
+        data: {
+          status: 'CANCELADO',
+          cancelled_at: NOW,
+          updated_at: NOW,
+        },
+      });
+    });
+
+    it('un turno que RLS no devuelve es un 404, no un 403', async () => {
+      results = [{ data: null, error: null }];
+
+      await expect(cancel()).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('el profesional ve el turno pero no puede cancelarlo', async () => {
+      results = [READ_OK];
+
+      await expect(cancel(PRO_ID)).rejects.toBeInstanceOf(ForbiddenException);
+      expect(prisma.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('no se puede cancelar un turno que ya pasó', async () => {
+      results = [
+        {
+          data: { ...INSERTED_ROW, scheduled_at: '2026-08-17T10:00:00.000Z' },
+          error: null,
+        },
+      ];
+
+      await expect(cancel()).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('no se puede cancelar dos veces', async () => {
+      results = [
+        { data: { ...INSERTED_ROW, status: 'CANCELADO' }, error: null },
+      ];
+
+      await expect(cancel()).rejects.toBeInstanceOf(ConflictException);
+      expect(prisma.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('un turno completado tampoco se cancela', async () => {
+      results = [
+        { data: { ...INSERTED_ROW, status: 'COMPLETADO' }, error: null },
+      ];
+
+      await expect(cancel()).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('si el estado cambia entre la lectura y el update, sale 409', async () => {
+      results = [READ_OK];
+      // P2025: el `where` no matcheó. Es la carrera real —doble click, o el job
+      // de ENG-101 liberando el turno en el medio.
+      prisma.appointment.update.mockRejectedValue({ code: 'P2025' });
+
+      await expect(cancel()).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('un fallo de la lectura sale como 500', async () => {
+      results = [{ data: null, error: { code: '42501' } }];
+
+      await expect(cancel()).rejects.toBeInstanceOf(
+        InternalServerErrorException,
+      );
+    });
+
+    it('un fallo inesperado del update sale como 500, no como 409', async () => {
+      results = [READ_OK];
+      prisma.appointment.update.mockRejectedValue(new Error('connection lost'));
+
+      await expect(cancel()).rejects.toBeInstanceOf(
         InternalServerErrorException,
       );
     });
