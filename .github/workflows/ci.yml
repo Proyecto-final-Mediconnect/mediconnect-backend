@@ -5,35 +5,45 @@ name: CI
 # PR/merge a release/** y main. La protección de rama exige ambos checks en verde
 # antes de mergear, así que juntos forman el "pipeline completo" del doc.
 #
-#   push a cualquier rama        -> lint + type-check + unit
 #   PR (contra cualquier base)   -> lint + type-check + unit + e2e + build
 #   push a release/** · main     -> lint + type-check + unit + e2e + build
 #
-# Los filtros de rama que había acá no matcheaban ninguna rama real: el equipo
-# nombra las ramas como las genera Linear (`<usuario>/eng-NN-titulo`), y
-# `feature/**` / `bugfix/**` quedaron de las dos ramas previas a esa convención.
-# Resultado: el trigger de `push` no se disparaba nunca, y un PR apilado sobre
-# otra rama de feature —como ENG-55 sobre ENG-54— no recibía ningún check,
-# aunque la protección de rama los exige para mergear.
+# Los filtros que había en `pull_request` (`release/**` y `main`) dejaban sin
+# ningún check a los PR apilados sobre otra rama de feature —como ENG-55 sobre
+# ENG-54—, aunque la protección de rama los exige para mergear. Se saca el filtro
+# en vez de sumar prefijos: cualquier PR tiene que estar gateado, sin importar la
+# base, y una lista de prefijos se vuelve a romper cuando cambie la convención de
+# ramas.
+#
+# `types` incluye `edited` justamente por ese caso: al mergear el PR de abajo,
+# GitHub reapunta el de arriba y emite `pull_request: edited`, que NO está en los
+# types por defecto (`opened`, `synchronize`, `reopened`). Sin él, los checks
+# calculados contra la base vieja seguirían pegados al head SHA y alcanzarían
+# para mergear contra una base que nunca se probó.
+#
+# `push` NO se amplía a todas las ramas. Sería tentador para tener feedback al
+# pushear, pero `e2e y build` no son jobs aparte: son steps del job `quality`,
+# cuyo `name` es el contexto que exige el ruleset. Un push a una rama con PR
+# abierto publicaría un segundo check run HOMÓNIMO que saltea esos steps, y ante
+# un fallo de e2e + build uno quedaría rojo y el otro verde sobre el mismo SHA, sin
+# garantía de cuál decide el gate.
 on:
   push:
     branches:
-      - '**'
+      - 'release/**'
+      - 'main'
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 # Cancela runs obsoletos del mismo ref: si pusheás dos veces seguidas, el primero
 # se descarta en vez de encolarse. Ahorra minutos de runner.
 #
-# Se agrupa por `github.ref`, que para un `push` es `refs/heads/<rama>` y para un
-# `pull_request` es `refs/pull/N/merge`. O sea: una rama con PR abierto corre DOS
-# veces por push, y eso queda a propósito.
-#
-# Unificar los grupos (`head_ref || ref_name`) los haría cancelarse entre sí,
-# pero los dos eventos disparan casi a la vez y `cancel-in-progress` mata al que
-# arrancó primero, sin determinismo sobre cuál. Si sobrevive el de `push`, queda
-# un check verde con el nombre que exige la protección de rama que NO corrió e2e
-# ni build —esos steps están condicionados a `event_name == 'pull_request'`— y el
-# gate se debilita en silencio. El run de más cuesta ~40s; eso, no.
+# Se agrupa por `github.ref` y NO por `head_ref || ref_name`. Unificarlos haría
+# que el run de `push` y el de `pull_request` se cancelen entre sí, y como los dos
+# disparan casi a la vez, `cancel-in-progress` mataría al que arrancó primero sin
+# determinismo sobre cuál. Con `push` limitado a `release/**` y `main` los dos
+# runs corren la suite completa, así que el solape no debilita nada: son ~40s de
+# más en las ramas de release y ninguno en las de feature.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
