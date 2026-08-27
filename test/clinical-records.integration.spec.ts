@@ -28,6 +28,20 @@ import {
  * crea esas dos piezas (las mismas que `db/bootstrap/00_supabase_local.sql` arma
  * para el Postgres de desarrollo) y recién después carga la migración.
  *
+ * **Se limpia solo.** El `afterAll` deshace los triggers, la política y la RLS
+ * que aplicó el `beforeAll`, y borra sus filas. No es prolijidad: los specs de
+ * integración comparten la misma base y `test/integrity-check.integration.spec.ts`
+ * (ENG-85) hace `deleteMany` y `UPDATE` sobre `clinical_record_entries` para
+ * simular manipulación. Con el trigger append-only puesto, esas simulaciones
+ * fallarían.
+ *
+ * Eso deja un pendiente real que no se resuelve acá: **el día que el entorno de
+ * tests aplique las migraciones de verdad** —en vez de `prisma db push`— el spec
+ * de ENG-85 va a tener que envolver sus mutaciones en
+ * `alter table ... disable trigger`, como hacía el del spike ENG-45. Es un cambio
+ * en un archivo que ENG-123 tiene abierto en review, así que se deja anotado en
+ * vez de hacerlo desde este PR.
+ *
  * Todos los recursos FHIR son sintéticos.
  */
 
@@ -42,10 +56,31 @@ const MIGRATION = join(
 
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
 
+/** Pacientes creados por el spec, para poder borrarlos al terminar. */
+const createdPatients: string[] = [];
+
 describe('Historia clínica con cadena de hash (integration)', () => {
   const prisma = new PrismaClient();
 
   beforeAll(async () => {
+    // `clinical_record_entries.patient_id` y `.professional_id` son FKs contra
+    // `patients` / `professionals`, así que las filas no se pueden inventar.
+    await prisma.profile.create({
+      data: {
+        id: PROFESSIONAL,
+        email: `pro-${PROFESSIONAL}@test.local`,
+        role: 'PROFESIONAL',
+      },
+    });
+    await prisma.professional.create({
+      data: {
+        profile_id: PROFESSIONAL,
+        first_name: 'Test',
+        last_name: 'Profesional',
+        license_number: `MP-${PROFESSIONAL.slice(0, 8)}`,
+      },
+    });
+
     // Piezas que en producción trae Supabase y que este Postgres no tiene.
     // `auth.uid()` lee el mismo claim que en Supabase, así que la política de la
     // migración se evalúa exactamente igual acá que allá.
@@ -74,8 +109,46 @@ describe('Historia clínica con cadena de hash (integration)', () => {
   }, 60_000);
 
   afterAll(async () => {
+    // Se revierte en orden inverso al que se aplicó: primero los triggers (si no,
+    // no se pueden borrar las filas), después las filas, y al final la RLS.
+    for (const sql of [
+      'drop trigger if exists clinical_record_entries_no_mutation on public.clinical_record_entries',
+      'drop trigger if exists clinical_record_entries_link on public.clinical_record_entries',
+      'drop policy if exists clinical_record_entries_select_own_patient on public.clinical_record_entries',
+      'alter table public.clinical_record_entries no force row level security',
+      'alter table public.clinical_record_entries disable row level security',
+    ]) {
+      await prisma.$executeRawUnsafe(sql);
+    }
+
+    await prisma.clinicalRecordEntry.deleteMany({
+      where: { patient_id: { in: createdPatients } },
+    });
+    await prisma.patient.deleteMany({
+      where: { profile_id: { in: createdPatients } },
+    });
+    await prisma.profile.deleteMany({
+      where: { id: { in: [...createdPatients, PROFESSIONAL] } },
+    });
+    await prisma.professional.deleteMany({
+      where: { profile_id: PROFESSIONAL },
+    });
+
     await prisma.$disconnect();
   });
+
+  /** Crea el perfil y la fila de paciente que exigen las FKs. */
+  async function createPatient(): Promise<string> {
+    const id = randomUUID();
+    await prisma.profile.create({
+      data: { id, email: `paciente-${id}@test.local`, role: 'PACIENTE' },
+    });
+    await prisma.patient.create({
+      data: { profile_id: id, first_name: 'Test', last_name: 'Paciente' },
+    });
+    createdPatients.push(id);
+    return id;
+  }
 
   function entryInput(
     patientId: string,
@@ -122,7 +195,7 @@ describe('Historia clínica con cadena de hash (integration)', () => {
 
   /** Siembra `n` entradas selladas para un paciente nuevo. */
   async function seedChain(n: number) {
-    const patientId = randomUUID();
+    const patientId = await createPatient();
     let previousHash = GENESIS_HASH;
 
     for (let i = 1; i <= n; i++) {
@@ -171,13 +244,21 @@ describe('Historia clínica con cadena de hash (integration)', () => {
 
   describe('encadenamiento verificado en el INSERT', () => {
     it('rechaza una primera entrada que no arranca en el génesis', async () => {
-      const entry = appendEntry(entryInput(randomUUID(), 1), 'a'.repeat(64));
+      // Paciente real: con un UUID inventado el que rechazaria seria el FK, y
+      // el test pasaria por el motivo equivocado.
+      const entry = appendEntry(
+        entryInput(await createPatient(), 1),
+        'a'.repeat(64),
+      );
 
       await expect(insert(entry)).rejects.toThrow(/hash génesis/);
     });
 
     it('rechaza una primera entrada con sequence_number distinto de 1', async () => {
-      const entry = appendEntry(entryInput(randomUUID(), 5), GENESIS_HASH);
+      const entry = appendEntry(
+        entryInput(await createPatient(), 5),
+        GENESIS_HASH,
+      );
 
       await expect(insert(entry)).rejects.toThrow(/sequence_number 1/);
     });
@@ -208,7 +289,10 @@ describe('Historia clínica con cadena de hash (integration)', () => {
   describe('formato de los hashes', () => {
     it('rechaza un hash que no es hexadecimal de 64', async () => {
       // `char(64)` acota el largo pero no el alfabeto: 64 espacios entrarían.
-      const entry = appendEntry(entryInput(randomUUID(), 1), GENESIS_HASH);
+      const entry = appendEntry(
+        entryInput(await createPatient(), 1),
+        GENESIS_HASH,
+      );
 
       await expect(
         insert({ ...entry, contentHash: ' '.repeat(64) }),
@@ -298,7 +382,7 @@ describe('Historia clínica con cadena de hash (integration)', () => {
 
     it('authenticated no puede insertar aunque la cadena cierre', async () => {
       // No hay GRANT de INSERT: el sellado lo hace el backend como owner.
-      const patientId = randomUUID();
+      const patientId = await createPatient();
       const entry = appendEntry(entryInput(patientId, 1), GENESIS_HASH);
 
       await expect(
