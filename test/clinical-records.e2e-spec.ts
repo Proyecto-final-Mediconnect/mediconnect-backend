@@ -43,17 +43,21 @@ describe('Historia clínica (e2e)', () => {
     listRows = [];
 
     prisma = {
-      appointment: { findFirst: jest.fn().mockResolvedValue({ id: 'turno-1' }) },
+      appointment: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'turno-1' }),
+      },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),
         findMany: jest.fn().mockResolvedValue([]),
         create: jest
           .fn()
-          .mockImplementation(({ data }: { data: Record<string, unknown> }) => ({
-            id: 'entry-1',
-            ...data,
-            sequence_number: BigInt(data.sequence_number as number),
-          })),
+          .mockImplementation(
+            ({ data }: { data: Record<string, unknown> }) => ({
+              id: 'entry-1',
+              ...data,
+              sequence_number: BigInt(data.sequence_number as number),
+            }),
+          ),
       },
     };
 
@@ -140,7 +144,10 @@ describe('Historia clínica (e2e)', () => {
       await request(app.getHttpServer())
         .post(url())
         .set('Authorization', `Bearer ${await signToken()}`)
-        .send({ ...body, professionalId: '33333333-3333-4333-8333-333333333333' })
+        .send({
+          ...body,
+          professionalId: '33333333-3333-4333-8333-333333333333',
+        })
         .expect(400);
 
       expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
