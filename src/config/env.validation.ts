@@ -49,6 +49,30 @@ class EnvironmentVariables {
   @IsOptional()
   @IsString()
   SENTRY_RELEASE?: string;
+
+  // Daily.co (ENG-51). Opcional por el mismo motivo que SENTRY_DSN: sin ella el
+  // backend tiene que bootear igual en CI y en local, donde no hay credenciales
+  // de terceros. Los endpoints de video contestan 503 explicando que falta, en
+  // vez de tumbar toda la app por una feature que la mayoría de los tickets no
+  // toca.
+  @IsOptional()
+  @IsString()
+  DAILY_API_KEY?: string;
+
+  // Solo para apuntar a un mock de la API de Daily en pruebas manuales. Si no se
+  // declara, `DailyService` usa el endpoint real (`DAILY_API_URL` de daily.config).
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  DAILY_API_URL?: string;
+
+  // Grabación de audio de la videoconsulta (ENG-56). `cloud-audio-only` la
+  // prende; cualquier otra cosa —incluida la ausencia— la deja apagada. El
+  // default apagado no es cautela genérica: grabar una consulta necesita
+  // consentimiento y base legal (Ley 25.326) y un plan pago de Daily. Ver
+  // consultation.config.ts.
+  @IsOptional()
+  @IsIn(['off', 'cloud-audio-only'])
+  VIDEO_RECORDING_MODE?: string;
 }
 
 /** Falla rápido al bootear si falta o está mal formada una env var requerida,

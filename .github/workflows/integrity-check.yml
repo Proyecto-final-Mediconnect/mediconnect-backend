@@ -1,0 +1,96 @@
+name: Integrity Check
+
+# ENG-85 (TT-03) — Verificación semanal de la cadena de hash de la Historia Clínica.
+#
+# Recorre la cadena de todos los pacientes recalculando cada SHA-256, la compara
+# contra la cabeza que dejó la corrida anterior, registra el resultado en
+# `integrity_checks` y avisa por Slack si algo no cierra.
+#
+# Secrets que necesita (Settings → Secrets and variables → Actions):
+#   - DATABASE_URL       connection string de producción (Supabase).
+#   - SLACK_WEBHOOK_URL  Incoming Webhook del canal del equipo.
+#
+# Si falta SLACK_WEBHOOK_URL el job igual verifica y registra: solo no alerta, y
+# lo deja dicho en el log.
+
+on:
+  schedule:
+    # Lunes 06:00 UTC = 03:00 ART. Temprano y en día hábil: si hay una alerta,
+    # alguien la ve el mismo día. Ojo con el cron de GitHub: se puede demorar en
+    # horas de mucha carga y se deshabilita solo tras 60 días sin actividad en el
+    # repo, así que si el repo se enfría hay que reactivarlo a mano.
+    - cron: '0 6 * * 1'
+  # Para correrlo a demanda después de un incidente o de una migración.
+  workflow_dispatch:
+
+# Nunca dos verificaciones a la vez: escriben las mismas filas de
+# `chain_head_snapshots` y se pisarían.
+concurrency:
+  group: integrity-check
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verificar cadena de hash
+    runs-on: ubuntu-latest
+    # Una cadena grande es lineal y barata (el spike midió ~42 ms cada 1.000
+    # entradas), pero el tope evita que un job colgado consuma el runner.
+    timeout-minutes: 15
+
+    permissions:
+      # Solo lectura del repo: el job no escribe nada en GitHub más allá del
+      # resumen de la corrida.
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pnpm exec prisma generate
+
+      - name: Verificar integridad de la cadena de hash
+        id: verify
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: pnpm run verify:integrity
+
+      - name: Avisar que el job falló antes de poder verificar
+        # El script ya alerta cuando encuentra inconsistencias y cuando la
+        # verificación se cae por su cuenta. Este paso cubre el hueco que le
+        # queda afuera: que el job muera ANTES de llegar a él (install roto,
+        # runner sin red, timeout). Sin esto, la única señal sería un check rojo
+        # en una pestaña que nadie mira los lunes a la madrugada.
+        #
+        # `outcome != 'failure'` es lo que evita el aviso doble: si el paso de
+        # verificación llegó a correr y falló, el script ya mandó su alerta —con
+        # el detalle— y esta sería ruido encima.
+        if: failure() && steps.verify.outcome != 'failure'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL}" ]; then
+            echo "SLACK_WEBHOOK_URL no configurado: no se envía la alerta."
+            exit 0
+          fi
+          curl -sS -X POST -H 'content-type: application/json' \
+            --data "{\"text\":\"⚠️ Integridad de la HC: el job semanal (ENG-85) falló antes de verificar la cadena. La integridad NO quedó verificada. Corrida: ${RUN_URL}\"}" \
+            "${SLACK_WEBHOOK_URL}"
