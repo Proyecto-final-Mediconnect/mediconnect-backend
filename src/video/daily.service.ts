@@ -7,6 +7,11 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  CONSULTATION_ROOM_PREFIX,
+  consultationRoomProperties,
+  type RecordingMode,
+} from './consultation.config';
+import {
   DAILY_API_URL,
   ROOM_PROPERTIES,
   ROOM_TTL_SECONDS,
@@ -45,6 +50,14 @@ export interface SpikeRoom {
   professionalUrl: string;
   patientUrl: string;
   maxParticipants: number;
+}
+
+/** Sala de una videoconsulta real (ENG-56). Sin tokens: se emiten por ingreso. */
+export interface ConsultationRoom {
+  /** Nombre de la sala en Daily. Se persiste en `video_sessions`. */
+  name: string;
+  /** URL base de la sala, sin token. */
+  url: string;
 }
 
 /** Resumen de una sesión ya terminada, para las métricas del criterio 3. */
@@ -147,6 +160,71 @@ export class DailyService {
       patientUrl: `${room.url}?t=${patientToken}`,
       maxParticipants: ROOM_PROPERTIES.max_participants,
     };
+  }
+
+  /**
+   * Crea la sala de una videoconsulta (ENG-56) y devuelve su nombre y su URL.
+   *
+   * A diferencia de `createSpikeRoom`, **no emite tokens**: los emite
+   * `createConsultationToken` en cada ingreso. La diferencia es de diseño, no de
+   * comodidad. Una sala de consulta se crea una vez y se usa dos veces (entra el
+   * paciente, entra el profesional), a veces con minutos de diferencia y a veces
+   * después de que alguien recargó la página. Guardar los tokens junto con la
+   * sala obligaría a persistir credenciales de acceso a una consulta médica en
+   * la base y a lidiar con su vencimiento; emitirlos al vuelo no.
+   *
+   * `expiresAtUnix` sale del turno: la sala muere cuando termina la consulta.
+   */
+  async createConsultationRoom(
+    expiresAtUnix: number,
+    recording: RecordingMode,
+  ): Promise<ConsultationRoom> {
+    this.assertConfigured();
+
+    const room = await this.request<DailyRoomResponse>('POST', '/rooms', {
+      name: `${CONSULTATION_ROOM_PREFIX}-${crypto.randomUUID().slice(0, 12)}`,
+      privacy: 'private',
+      properties: consultationRoomProperties(expiresAtUnix, recording),
+    });
+
+    return { name: room.name, url: room.url };
+  }
+
+  /**
+   * Emite un meeting token para entrar a la sala de una consulta.
+   *
+   * El token es la credencial: la sala es privada, así que la URL sola no sirve.
+   * Lleva el `room_name` adentro y firmado, de modo que un token de una consulta
+   * no abre la de otra aunque se filtre.
+   *
+   * `isOwner` es `true` solo para el profesional: habilita los controles de
+   * moderación del Prebuilt. El paciente no debería poder expulsar ni silenciar
+   * al profesional en su propia consulta.
+   *
+   * `startRecording` arranca la grabación automáticamente cuando entra quien
+   * tiene el token, sin que nadie toque un botón. Va únicamente en el token del
+   * profesional: es quien responde por el tratamiento de los datos, y así el
+   * paciente no puede iniciar una grabación por su cuenta. Solo tiene efecto si
+   * la sala se creó con `enable_recording` distinto de `off`.
+   */
+  createConsultationToken(params: {
+    roomName: string;
+    userName: string;
+    isOwner: boolean;
+    expiresAtUnix: number;
+    startRecording?: boolean;
+  }): Promise<string> {
+    this.assertConfigured();
+
+    return this.request<DailyTokenResponse>('POST', '/meeting-tokens', {
+      properties: {
+        room_name: params.roomName,
+        user_name: params.userName,
+        is_owner: params.isOwner,
+        exp: params.expiresAtUnix,
+        ...(params.startRecording === true && { start_cloud_recording: true }),
+      },
+    }).then((response) => response.token);
   }
 
   /**

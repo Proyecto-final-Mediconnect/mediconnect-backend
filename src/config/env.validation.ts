@@ -64,6 +64,15 @@ class EnvironmentVariables {
   @IsOptional()
   @IsUrl({ require_tld: false, require_protocol: true })
   DAILY_API_URL?: string;
+
+  // Grabación de audio de la videoconsulta (ENG-56). `cloud-audio-only` la
+  // prende; cualquier otra cosa —incluida la ausencia— la deja apagada. El
+  // default apagado no es cautela genérica: grabar una consulta necesita
+  // consentimiento y base legal (Ley 25.326) y un plan pago de Daily. Ver
+  // consultation.config.ts.
+  @IsOptional()
+  @IsIn(['off', 'cloud-audio-only'])
+  VIDEO_RECORDING_MODE?: string;
 }
 
 /** Falla rápido al bootear si falta o está mal formada una env var requerida,
