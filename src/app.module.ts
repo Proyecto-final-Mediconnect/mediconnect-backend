@@ -12,6 +12,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AppointmentsModule } from './appointments/appointments.module';
 import { AuthModule } from './auth/auth.module';
+import { CatalogModule } from './catalog/catalog.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
@@ -37,6 +38,7 @@ import { VideoModule } from './video/video.module';
     PrismaModule,
     SupabaseModule,
     AuthModule,
+    CatalogModule,
     UserModule,
     HealthModule,
     ProfessionalsModule,

@@ -8,6 +8,15 @@ build/
 .next/
 out/
 
+# Artefactos de compilar scripts TS en el lugar (seed.ts, verify-rls.ts, etc.)
+# El fuente versionado es el .ts; estos se regeneran con tsc/ts-node.
+prisma/*.js
+prisma/*.d.ts
+prisma/*.js.map
+scripts/*.js
+scripts/*.d.ts
+scripts/*.js.map
+
 # Variables de entorno 
 .env
 .env.local

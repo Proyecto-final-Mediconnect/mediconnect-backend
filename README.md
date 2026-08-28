@@ -69,6 +69,50 @@ pnpm run db:seed      # (si cambió el catálogo)
   (marcar como aplicadas las migraciones cuyas tablas ya creó `db push`):
   `prisma migrate resolve --applied <migración>`.
 
+### Conexión: usar el Session pooler, no la conexión directa
+
+La connection string **directa** (`db.<project-ref>.supabase.co:5432`) resuelve
+**solo a IPv6**. Desde una red o un runner sin IPv6 la conexión falla con
+`ENETUNREACH` / timeout, aunque las credenciales sean correctas. Hay que usar el
+**Session pooler**, que sí tiene registros A (IPv4):
+
+```
+postgresql://postgres.<project-ref>:<password>@aws-1-sa-east-1.pooler.supabase.com:5432/postgres?schema=public
+```
+
+Dos diferencias respecto de la directa, fáciles de pasar por alto:
+
+- el **usuario** es `postgres.<project-ref>` (no `postgres`);
+- el **host** es el del pooler de la región del proyecto (`sa-east-1`), no el del
+  proyecto.
+
+Se usa el puerto **5432** (session mode: conexión por sesión, soporta prepared
+statements) y no el 6543 (transaction mode), porque Prisma los necesita.
+
+Para verificar qué tenés: `getent ahosts db.<project-ref>.supabase.co` devuelve
+solo direcciones `2600:...` (IPv6); el host del pooler devuelve IPv4.
+
+### Cargar el catálogo base (seed) en Supabase
+
+`prisma migrate deploy` crea las tablas pero **no** carga datos: el catálogo de
+especialidades (`public.specialties`, fuente única del selector del perfil
+profesional y del filtro del catálogo público) viene del seed y hay que correrlo
+explícitamente también contra Supabase. Si no, la tabla queda en 0 filas y ambas
+features se ven vacías aunque el código esté correcto — y los tests locales no lo
+detectan, porque en local la tabla sí está poblada (ENG-96).
+
+Las variables del entorno del proceso **tienen precedencia** sobre el `.env`, así
+que se puede apuntar el seed a Supabase sin tocar tu `.env` local:
+
+```bash
+$ DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-1-sa-east-1.pooler.supabase.com:5432/postgres?schema=public" \
+    pnpm run db:seed
+✅ Seed listo: 17 especialidades en el catálogo.
+```
+
+El seed es **idempotente** (`upsert` por `name`): correrlo de nuevo no duplica
+filas ni falla. Verificación: `select count(*) from public.specialties` → `17`.
+
 ## Tests de integración (PostgreSQL 15 via Docker)
 
 La suite de integración corre contra un PostgreSQL 15 real (base **separada** de la
@@ -126,6 +170,76 @@ configurar nada. Para sobreescribirlos, poné en tu `.env` (ver
 Postgres 15 corre como contenedor `services:` y `DATABASE_URL` apunta a él.
 
 ## Deployment
+
+El deploy lo dispara [`deploy-production.yml`](./.github/workflows/deploy-production.yml):
+cuando el workflow **CI** pasa sobre `main`, llamamos al deploy hook de Render
+(Auto-Deploy = No, para que el gate lo controle CI).
+
+**El esquema y los datos base se aplican en el propio workflow**, con
+`pnpm run db:setup` (`prisma migrate deploy && pnpm run db:seed`), justo antes de
+llamar al hook. Si eso falla, el hook no se dispara: la versión vieja sigue
+arriba y no queda una release corriendo contra un esquema a medio migrar.
+
+> **El Pre-Deploy Command de Render tiene que quedar VACÍO.** Si se configura, el
+> esquema se aplica desde dos lados.
+
+Va `db:setup` (migraciones **+ seed**) y no solo `db:migrate` por ENG-96: el seed
+corría solo en local y el catálogo de especialidades quedó vacío en Supabase por
+meses. Las dos partes son idempotentes (`migrate deploy` no hace nada si no hay
+pendientes; el seed hace `upsert` por nombre), así que correrlas en cada release
+no tiene costo.
+
+### Por qué no va en el pre-deploy de Render (ENG-122)
+
+Hasta agosto de 2026 esto vivía en el Pre-Deploy Command de Render, con el
+argumento de que el runner de GitHub no tuviera que ver la connection string de
+producción. **No estaba corriendo.** Al mergear ENG-85 el deploy salió en verde y
+`chain_head_snapshots` no existía en Supabase; hubo que migrar a mano.
+
+Es la segunda vez que pasa lo mismo — ENG-96 fue el mismo incidente con el seed.
+Dos veces alcanza para ver que el problema no es la configuración sino dónde
+vive: en un dashboard, fuera del repo, sin log en Actions y sin que ningún PR la
+muestre. Un paso que no corre y no avisa es peor que no tenerlo.
+
+El costo es tener `DATABASE_URL` de producción como secret del repo. Ese límite ya
+se había cruzado en ENG-85 (el job de integridad tiene que leer la base real) y
+Actions enmascara los secrets en los logs.
+
+### Cuidado al escribir una migración
+
+El esquema se aplica **antes** de que Render levante el código nuevo, así que
+durante unos minutos la versión vieja corre contra el esquema nuevo. Las
+migraciones tienen que ser compatibles hacia atrás (expand/contract): agregar
+tablas y columnas es seguro; borrar o renombrar algo que el código vigente usa
+rompe producción en esa ventana y hay que partirlo en dos releases.
+
+### Si una migración falla en el deploy
+
+Queda marcada como fallida en `_prisma_migrations` y **bloquea los deploys
+siguientes** hasta que se resuelva. Para intervenir a mano, con la connection
+string del Session pooler:
+
+```bash
+read -rsp "password: " PGPASS && echo
+export DATABASE_URL="postgresql://postgres.<project-ref>:${PGPASS}@aws-1-sa-east-1.pooler.supabase.com:5432/postgres?schema=public"
+
+pnpm exec prisma migrate status      # qué quedó pendiente o fallida
+pnpm run db:migrate                  # reintentar
+```
+
+Si la migración fallida quedó a medias hay que decidir explícitamente qué pasó
+con ella antes de reintentar:
+
+```bash
+# se aplicó de verdad pero Prisma no lo registró
+pnpm exec prisma migrate resolve --applied <nombre_migracion>
+
+# no llegó a aplicar nada: se descarta para poder reintentar
+pnpm exec prisma migrate resolve --rolled-back <nombre_migracion>
+```
+
+`db:seed` usa `--env-file-if-exists=.env`, así que funciona igual en local (lee
+tu `.env`) y en el runner (no hay archivo; `DATABASE_URL` viene del secret).
 
 ## Modelo de datos
 

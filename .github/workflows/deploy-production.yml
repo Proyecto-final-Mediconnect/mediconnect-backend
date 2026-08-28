@@ -1,8 +1,8 @@
 name: Deploy Production
 
-# Dispara el deploy en Render SOLO después de que el workflow "CI" haya pasado
-# sobre main (workflow_run + conclusion == success). Render tiene Auto-Deploy = No
-# para que el deploy lo controle este workflow.
+# Aplica las migraciones pendientes y después dispara el deploy en Render, SOLO
+# si el workflow "CI" pasó sobre main (workflow_run + conclusion == success).
+# Render tiene Auto-Deploy = No para que el deploy lo controle este workflow.
 #
 # Gate de integración: la protección de rama de `main` (Sprint 0 §2.6) exige como
 # required checks tanto "CI" como "Integration Tests". Por eso ningún código con
@@ -10,17 +10,122 @@ name: Deploy Production
 #
 # Nota: workflow_run usa la definición del archivo en la rama por defecto (main),
 # así que este gate recién queda activo cuando ci.yml + este archivo estén en main.
+#
+# ---------------------------------------------------------------------------
+# Por qué el schema se aplica ACÁ y no en el Pre-Deploy de Render (ENG-122)
+# ---------------------------------------------------------------------------
+# Esto revierte una decisión previa, así que conviene dejar escrito el porqué.
+#
+# El README decía que el schema iba en el Pre-Deploy de Render, con un argumento
+# razonable: que el runner de GitHub no tenga que ver la connection string de
+# producción. El problema es que no estaba corriendo. Al mergear ENG-85 el deploy
+# salió en verde y `chain_head_snapshots` no existía en Supabase; hubo que correr
+# `prisma migrate deploy` a mano desde una notebook.
+#
+# Y es la segunda vez que pasa lo mismo: ENG-96 descubrió que el seed tampoco
+# corría y el catálogo de especialidades estuvo vacío en Supabase por meses. Dos
+# incidentes del mismo tipo alcanzan para concluir que el problema no es la
+# configuración sino dónde vive: en el dashboard de Render, fuera del repo, sin
+# log en Actions y sin que ningún PR la muestre. Un paso que no corre y no avisa
+# es peor que no tenerlo, porque se confía en él.
+#
+# El costo que se paga: `DATABASE_URL` de producción como secret del repo. Ese
+# límite ya se había cruzado en ENG-85 —el job de integridad tiene que leer la
+# base real— y Actions enmascara los secrets en los logs. Entre visible y
+# confiable, o escondido y roto en silencio, gana lo primero.
+#
+# **El Pre-Deploy Command de Render tiene que quedar VACÍO.** Si alguien lo
+# configura, el schema se aplica desde dos lados.
 on:
   workflow_run:
     workflows: ['CI']
     types: [completed]
     branches: [main]
 
+# Dos deploys encimados no pueden migrar en paralelo. Prisma toma un advisory
+# lock, así que el segundo esperaría en vez de corromper nada, pero serializar
+# acá evita que queden dos jobs peleando por el mismo lock y que el hook de
+# Render se dispare en un orden distinto al de los merges.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # El commit exacto que pasó CI, no la punta de main. Sin esto, un merge
+          # que entra mientras este job corre haría que se apliquen migraciones
+          # que todavía no validó nadie.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        # `db:setup` corre `migrate deploy` Y `db:seed`. A `migrate` no le hace
+        # falta el cliente, pero al seed sí: `prisma/seed.ts` importa desde
+        # `../generated/prisma`, una ruta custom (`output` del generator en
+        # `schema.prisma`) que solo existe después de generar.
+        #
+        # Y no alcanza con `pnpm install`: pnpm 10 no corre los scripts de
+        # postinstall de las dependencias salvo que estén habilitados, así que
+        # el `generate` que Prisma haría solo nunca se ejecuta.
+        #
+        # `ci.yml` ya tenía este paso; a este workflow le faltaba, y por eso el
+        # deploy venía fallando en el seed desde el 15/08 — con las migraciones
+        # ya aplicadas y el hook de Render sin disparar, o sea el esquema nuevo
+        # contra el código viejo.
+        #
+        # `DATABASE_URL` va acá porque `prisma.config.ts` la exige para poder
+        # cargar (`datasource.url: env('DATABASE_URL')`), no porque generate se
+        # conecte: no abre ninguna conexión, solo lee el schema. En `ci.yml` el
+        # mismo paso corre con un valor dummy por esa misma razón.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pnpm exec prisma generate
+
+      - name: Aplicar migraciones y datos base
+        # `db:setup` = `prisma migrate deploy && pnpm run db:seed`, lo mismo que
+        # el README pedía poner en el Pre-Deploy de Render. Las dos partes son
+        # idempotentes: sin migraciones pendientes imprime "No pending
+        # migrations to apply", y el seed hace `upsert` por nombre.
+        #
+        # OJO al escribir una migración: acá se aplica ANTES de que Render
+        # levante el código nuevo, así que durante unos minutos la versión vieja
+        # corre contra el schema nuevo. Las migraciones tienen que ser
+        # compatibles hacia atrás (expand/contract): agregar columnas y tablas
+        # es seguro; borrar o renombrar algo que el código vigente todavía usa
+        # rompe producción en esa ventana, y hay que partirlo en dos deploys.
+        #
+        # Si esto falla, el job corta acá y el hook de Render NO se dispara: el
+        # código viejo sigue arriba. Una migración que falla queda marcada en
+        # `_prisma_migrations` y hay que resolverla a mano
+        # (`prisma migrate resolve`) antes del próximo deploy — ver el README.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pnpm run db:setup
+
       - name: Trigger Render deploy
         # --max-time/--retry: un hook colgado no debe dejar el job pendiente
         # hasta el timeout global del runner.

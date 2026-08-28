@@ -18,14 +18,32 @@ import { RegisterProfessionalDto } from './dto/register-professional.dto';
 const ACCESS_TOKEN_COOKIE = 'sb-access-token';
 const REFRESH_TOKEN_COOKIE = 'sb-refresh-token';
 
-/** Opciones de cookie compartidas por login/refresh/logout (deben coincidir
- *  para que `res.clearCookie` efectivamente las borre del browser). */
+/**
+ * Opciones de cookie compartidas por login/refresh/logout (deben coincidir
+ * para que `res.clearCookie` efectivamente las borre del browser).
+ *
+ * `sameSite` NO puede ser fijo. En producción la web y la API viven en hosts
+ * distintos —`mediconnect-web-*.onrender.com` y `mediconnect-backend-*.onrender.com`—
+ * y `onrender.com` está en la Public Suffix List, así que para el navegador no
+ * son dos subdominios de un mismo sitio: son **sitios distintos**. Con `Lax`, el
+ * navegador descarta la cookie que llega en una respuesta cross-site, y el login
+ * queda roto de una forma engañosa: `POST /auth/login` devuelve 200 con su
+ * `Set-Cookie`, pero la sesión no se guarda y el `GET /me` siguiente responde 401.
+ *
+ * En desarrollo se mantiene `Lax`: `localhost:5173` y `localhost:3000` son el
+ * mismo sitio, así que `None` no aportaría nada y además exige `Secure`, que
+ * sobre http no se puede usar. Por eso este bug es invisible en local — el mismo
+ * patrón de ENG-96, ENG-122 y ENG-124.
+ *
+ * `SameSite=None` requiere `Secure`, que ya viene de `isProd`. Los dos tienen que
+ * seguir atados a la misma condición: `None` sin `Secure` lo rechaza el browser.
+ */
 function sessionCookieOptions() {
   const isProd = process.env.NODE_ENV === 'production';
   return {
     httpOnly: true,
     secure: isProd,
-    sameSite: 'lax' as const,
+    sameSite: isProd ? ('none' as const) : ('lax' as const),
     path: '/',
   };
 }

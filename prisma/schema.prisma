@@ -136,6 +136,7 @@ model Patient {
   appointments            Appointment[]
   reviews                 Review[]
   clinical_record_entries ClinicalRecordEntry[]
+  chain_head_snapshot     ChainHeadSnapshot?
   conversations           Conversation[]
   medipass_codes          MediPassCode[]
   medipass_sessions       MediPassSession[]
@@ -176,6 +177,12 @@ model Professional {
   validated_summaries     ConsultationSummary[]
 
   @@index([status])
+  // Catálogo público (ENG-49): el listado siempre filtra por status = VALIDADO
+  // y ordena por apellido/nombre; el índice cubre el ORDER BY del scroll
+  // infinito para que las páginas altas no cuesten un sort de la tabla entera.
+  @@index([status, last_name, first_name, profile_id])
+  // Filtro por rango de precio dentro de los validados.
+  @@index([status, consultation_price])
   @@map("professionals")
 }
 
@@ -203,6 +210,9 @@ model ProfessionalSpecialty {
   specialty    Specialty    @relation(fields: [specialty_id], references: [id], onDelete: Restrict)
 
   @@id([professional_id, specialty_id])
+  // La PK solo sirve para buscar "las especialidades de X". El filtro del
+  // catálogo va al revés (los profesionales de una especialidad) — ENG-49.
+  @@index([specialty_id])
   @@map("professional_specialties")
 }
 
@@ -464,7 +474,19 @@ model ClinicalRecordEntry {
   sequence_number    BigInt
   content_hash       String     @db.Char(64)
   previous_hash      String     @db.Char(64)
-  created_at         DateTime   @default(now()) @db.Timestamptz(6)
+  /// Timestamptz(3) y SIN `default now()`, las dos cosas a propósito (hallazgo
+  /// bloqueante del spike ENG-45, aplicado en ENG-85 porque es lo que hace
+  /// verificable la cadena):
+  ///
+  ///   - Con `timestamptz(6)` Postgres guarda microsegundos y el `Date` de JS
+  ///     solo tiene milisegundos. Como `created_at` entra a la preimagen del
+  ///     hash, al releer la entrada para verificarla se pierden los micros, el
+  ///     hash recalculado no coincide y el job reporta CONTENT_TAMPERED sobre
+  ///     una fila que nadie tocó.
+  ///   - El valor lo genera la APLICACIÓN: para sellar la entrada hay que tener
+  ///     el timestamp exacto en memoria en el momento de calcular el hash, y con
+  ///     `default now()` lo elige la base después.
+  created_at         DateTime   @db.Timestamptz(3)
 
   patient      Patient               @relation(fields: [patient_id], references: [profile_id])
   professional Professional          @relation(fields: [professional_id], references: [profile_id])
@@ -644,6 +666,16 @@ model AuditLog {
 }
 
 /// Resultado del job semanal de verificación de la cadena de hash (TT-03 / ENG-85).
+///
+/// `status`: `OK` | `INCONSISTENT` | `ERROR`. El tercero no está en esquema.md a
+/// propósito del documento: lo agrega ENG-85 porque una corrida que no pudo
+/// terminar (base caída, credencial vencida) NO es lo mismo que una corrida que
+/// verificó y no encontró nada. Sin distinguirlas, un job que falla en silencio
+/// deja una racha de "OK" que nadie mira.
+///
+/// `details` lleva el resumen de la corrida y las inconsistencias (paciente,
+/// `sequence_number`, motivo). NUNCA lleva `content`: el contenido clínico no
+/// sale de `clinical_record_entries`.
 model IntegrityCheck {
   id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   status                String
@@ -651,5 +683,41 @@ model IntegrityCheck {
   details               Json?    @db.JsonB
   run_at                DateTime @default(now()) @db.Timestamptz(6)
 
+  @@index([run_at])
   @@map("integrity_checks")
+}
+
+/// Cabeza de la cadena de HC de cada paciente al cierre de la última corrida sana
+/// del job de ENG-85.
+///
+/// Existe por el segundo agujero que documenta el spike ENG-45: **una cadena de
+/// hash no conoce su propia longitud**. Si se borran las últimas N entradas de un
+/// paciente, las que quedan siguen contiguas, enlazadas y arrancando en el
+/// génesis — `verifyChain` devuelve `valid: true` y el truncado pasa invisible.
+/// Clínicamente es el ataque más plausible: para ocultar un diagnóstico reciente
+/// es más simple borrarlo que falsificarlo.
+///
+/// Guardando la cabeza de la corrida anterior, la siguiente puede afirmar dos
+/// cosas que la cadena sola no puede: que la cadena no se acortó, y que la
+/// entrada que era cabeza sigue teniendo el mismo hash (o sea que la historia no
+/// se reescribió por debajo de las entradas nuevas).
+///
+/// Límite conocido: la tabla vive en la misma base que protege, así que un
+/// atacante con acceso de escritura puede reescribirla junto con la cadena. La
+/// mitigación real es el anclaje externo, que es otra tarea técnica; esto sube el
+/// costo del ataque y detecta todo lo que no sea un atacante con ese nivel de
+/// acceso.
+model ChainHeadSnapshot {
+  patient_id      String   @id @db.Uuid
+  /// `content_hash` de la última entrada vista.
+  head_hash       String   @db.Char(64)
+  /// `sequence_number` de esa entrada. Con la cadena validada, es también la
+  /// cantidad de entradas (la secuencia arranca en 1 y es contigua).
+  sequence_number BigInt
+  first_seen_at   DateTime @default(now()) @db.Timestamptz(3)
+  updated_at      DateTime @default(now()) @db.Timestamptz(3)
+
+  patient Patient @relation(fields: [patient_id], references: [profile_id])
+
+  @@map("chain_head_snapshots")
 }
