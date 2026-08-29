@@ -84,13 +84,34 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Generate Prisma Client
+        # `db:setup` corre `migrate deploy` Y `db:seed`. A `migrate` no le hace
+        # falta el cliente, pero al seed sí: `prisma/seed.ts` importa desde
+        # `../generated/prisma`, una ruta custom (`output` del generator en
+        # `schema.prisma`) que solo existe después de generar.
+        #
+        # Y no alcanza con `pnpm install`: pnpm 10 no corre los scripts de
+        # postinstall de las dependencias salvo que estén habilitados, así que
+        # el `generate` que Prisma haría solo nunca se ejecuta.
+        #
+        # `ci.yml` ya tenía este paso; a este workflow le faltaba, y por eso el
+        # deploy venía fallando en el seed desde el 15/08 — con las migraciones
+        # ya aplicadas y el hook de Render sin disparar, o sea el esquema nuevo
+        # contra el código viejo.
+        #
+        # `DATABASE_URL` va acá porque `prisma.config.ts` la exige para poder
+        # cargar (`datasource.url: env('DATABASE_URL')`), no porque generate se
+        # conecte: no abre ninguna conexión, solo lee el schema. En `ci.yml` el
+        # mismo paso corre con un valor dummy por esa misma razón.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pnpm exec prisma generate
+
       - name: Aplicar migraciones y datos base
         # `db:setup` = `prisma migrate deploy && pnpm run db:seed`, lo mismo que
         # el README pedía poner en el Pre-Deploy de Render. Las dos partes son
         # idempotentes: sin migraciones pendientes imprime "No pending
-        # migrations to apply", y el seed hace `upsert` por nombre. No necesita
-        # `prisma generate` — migrate lee el schema y la carpeta de
-        # migraciones, no el cliente.
+        # migrations to apply", y el seed hace `upsert` por nombre.
         #
         # OJO al escribir una migración: acá se aplica ANTES de que Render
         # levante el código nuevo, así que durante unos minutos la versión vieja
