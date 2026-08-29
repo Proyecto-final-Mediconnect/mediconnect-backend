@@ -1,18 +1,25 @@
 /**
- * ENG-45 — Prototipo de cadena de hash SHA-256 para la Historia Clínica (EP-06).
+ * Cadena de hash SHA-256 de la Historia Clínica (EP-06).
  *
  * Cada entrada de HC encadena su hash con el de la anterior del mismo paciente:
  * alterar una entrada vieja invalida todas las que le siguen. Es el mecanismo que
  * sostiene el requisito de inalterabilidad de la Ley 26.529 (ADR-014/015).
  *
- * Este módulo es DELIBERADAMENTE puro: no depende de Nest ni de Prisma, no se
- * registra en AppModule y no toca `clinical_record_entries`. Es el entregable del
- * spike; ENG-57 lo promueve a módulo real cuando el diseño esté validado.
+ * Nació como el prototipo del spike **ENG-45** y quedó tal cual: el diseño se
+ * validó contra Postgres real y no hizo falta reescribir nada. Hoy lo usan
+ * `IntegrityService` (ENG-85, verificación semanal) y `ClinicalRecordsService`
+ * (ENG-57, escritura de entradas) sobre la tabla real.
+ *
+ * Sigue siendo DELIBERADAMENTE puro: sin Nest, sin Prisma, sin I/O. Eso es lo que
+ * permite testear los bordes del hash sin base y —más importante— lo que hace que
+ * una entrada de HC se pueda verificar fuera de este backend, que es la premisa
+ * del pasaporte médico portable.
  *
  * Decisión de diseño: el hash se calcula en la APLICACIÓN, no en un trigger de
- * Postgres. La base solo verifica el encadenamiento (ver
- * prisma/spikes/eng45_hash_chain.sql). El porqué y el límite de esa decisión
- * están en mediconnect-docs/documentacion-tecnica/spikes/ENG-45-hash-chain.md.
+ * Postgres. La base solo verifica el encadenamiento (ver la migración
+ * `20260826120000_eng57_clinical_record_chain`). El porqué y el límite de esa
+ * decisión están en
+ * mediconnect-docs/documentacion-tecnica/spikes/ENG-45-hash-chain.md.
  */
 import { createHash } from 'node:crypto';
 
@@ -251,4 +258,55 @@ export function verifyChain(entries: ChainEntry[]): ChainVerification {
   }
 
   return { valid: true, entries: entries.length, headHash: previousHash };
+}
+
+/**
+ * Fila de `clinical_record_entries` tal como sale de Prisma.
+ *
+ * `sequence_number` viaja como `bigint` por el tipo de la columna.
+ */
+export interface ChainEntryRow {
+  patient_id: string;
+  professional_id: string;
+  sequence_number: bigint | number;
+  entry_type: string;
+  fhir_resource_type: string;
+  content: unknown;
+  consultation_id: string | null;
+  corrects_entry_id: string | null;
+  created_at: Date;
+  content_hash: string;
+  previous_hash: string;
+}
+
+/**
+ * Convierte una fila de la base en la entrada que entiende la cadena.
+ *
+ * Vive acá y no en el módulo que la usa porque el mapeo es parte del contrato del
+ * hash: si una columna se tradujera mal —o se olvidara— el hash recalculado no
+ * coincidiría y la entrada saldría reportada como manipulada estando intacta. La
+ * lista de campos tiene que seguir a `PREIMAGE_COLUMNS`.
+ *
+ * `sequence_number` se convierte a `number` porque es como se hasheó al sellar
+ * (la preimagen lo serializa en decimal). Recién con `Number.MAX_SAFE_INTEGER`
+ * entradas para un mismo paciente el problema sería otro.
+ *
+ * NOTA: `IntegrityService` (ENG-85) tiene hoy su propia copia privada de esta
+ * función. Conviene que adopte esta y borre la suya, pero no se hace acá para no
+ * tocar un archivo que ENG-123 tiene abierto en review.
+ */
+export function chainEntryFromRow(row: ChainEntryRow): ChainEntry {
+  return {
+    patientId: row.patient_id,
+    professionalId: row.professional_id,
+    sequenceNumber: Number(row.sequence_number),
+    entryType: row.entry_type,
+    fhirResourceType: row.fhir_resource_type,
+    content: row.content,
+    consultationId: row.consultation_id,
+    correctsEntryId: row.corrects_entry_id,
+    createdAt: row.created_at,
+    contentHash: row.content_hash,
+    previousHash: row.previous_hash,
+  };
 }
