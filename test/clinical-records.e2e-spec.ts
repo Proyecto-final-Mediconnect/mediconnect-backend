@@ -27,6 +27,7 @@ describe('Historia clínica (e2e)', () => {
   let publicKey: CryptoKey;
   let prisma: {
     appointment: { findFirst: jest.Mock };
+    auditLog: { create: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
       findMany: jest.Mock;
@@ -46,6 +47,10 @@ describe('Historia clínica (e2e)', () => {
       appointment: {
         findFirst: jest.fn().mockResolvedValue({ id: 'turno-1' }),
       },
+      // ENG-60 audita cada lectura de una HC. Sin este mock, el `create` seria
+      // undefined y el GET contestaria 500, que es justamente el fallo cerrado
+      // que el service tiene por diseno.
+      auditLog: { create: jest.fn().mockResolvedValue({ id: 'audit-1' }) },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),
         findMany: jest.fn().mockResolvedValue([]),
@@ -243,15 +248,106 @@ describe('Historia clínica (e2e)', () => {
       expect(res.body[0]).toMatchObject({ sequenceNumber: 1 });
     });
 
-    it('una HC que el usuario no puede ver es [] y no 403', async () => {
-      // Distinguir "vacía" de "no te la puedo mostrar" confirmaría que ese
-      // paciente tiene historia clínica.
+    /**
+     * ENG-60 invirtió acá la decisión de ENG-58.
+     *
+     * Este endpoint devolvía `[]` a quien no podía ver la HC, para no confirmarle
+     * a un tercero que ese paciente tiene historia clínica. El criterio de
+     * aceptación de ENG-60 pide 403 sin relación vigente, y esa es la decisión
+     * que se tomó: al profesional que se equivoca de paciente, una HC vacía le
+     * parece un paciente sin historia, que es peor que un error claro.
+     *
+     * Lo que se pierde es real y queda anotado: un 403 confirma que ese UUID es
+     * un paciente. Como es un UUID v4 no adivinable, la superficie es acotada.
+     */
+    it('un profesional sin turno con el paciente recibe 403', async () => {
+      prisma.appointment.findFirst.mockResolvedValue(null);
+
+      await request(app.getHttpServer())
+        .get(url())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(403);
+    });
+
+    it('no audita ni consulta la HC cuando corta con 403', async () => {
+      // El 403 sale antes de tocar la historia: no hay lectura que auditar.
+      prisma.appointment.findFirst.mockResolvedValue(null);
+
+      await request(app.getHttpServer())
+        .get(url())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(403);
+
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('una HC vacía sigue siendo [] con 200, no 403', async () => {
+      // Con relación vigente, "no tiene entradas" es una respuesta legítima. El
+      // 403 es sobre la relación, no sobre el contenido.
       const res = await request(app.getHttpServer())
         .get(url())
         .set('Authorization', `Bearer ${await signToken()}`)
         .expect(200);
 
       expect(res.body).toEqual([]);
+    });
+
+    it('el paciente lee la suya sin turno de por medio', async () => {
+      // `patientId` es el mismo valor que el `sub` del JWT: no hay relación que
+      // validar, y exigirle un turno al dueño de la historia sería absurdo.
+      prisma.appointment.findFirst.mockResolvedValue(null);
+
+      await request(app.getHttpServer())
+        .get(url(PATIENT))
+        .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+        .expect(200);
+
+      expect(prisma.appointment.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('deja registrado en audit_logs quién abrió la historia', async () => {
+      // Ley 26.529: el paciente tiene derecho a saber quién miró su HC. Es lo que
+      // alimenta el "Historial de accesos" que el diseño le muestra.
+      await request(app.getHttpServer())
+        .get(url())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(200);
+
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          actor_id: PROFESSIONAL,
+          action: 'CLINICAL_RECORD_READ',
+          resource_type: 'clinical_record_entries',
+          resource_id: PATIENT,
+          metadata: expect.objectContaining({ role: 'PROFESIONAL' }),
+        }),
+      });
+    });
+
+    it('distingue al paciente leyendo lo suyo', async () => {
+      await request(app.getHttpServer())
+        .get(url(PATIENT))
+        .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+        .expect(200);
+
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          actor_id: PATIENT,
+          metadata: expect.objectContaining({ role: 'PACIENTE' }),
+        }),
+      });
+    });
+
+    it('si no se puede auditar, no devuelve la historia', async () => {
+      // Falla cerrado a propósito: un acceso sin registro es lo que la ley no
+      // permite. El costo —una caída de la auditoría bloquea la lectura— está
+      // asumido y documentado en el service.
+      prisma.auditLog.create.mockRejectedValue(new Error('audit caído'));
+
+      await request(app.getHttpServer())
+        .get(url())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(500);
     });
   });
 });

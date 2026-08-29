@@ -302,10 +302,14 @@ export class ClinicalRecordsService {
   /**
    * Historia clínica de un paciente, de la entrada más vieja a la más nueva.
    *
-   * Se lee con el JWT de quien pregunta: **RLS es la autorización**. Hoy la única
-   * política de SELECT es `clinical_record_entries_select_own_patient`, así que
-   * un profesional recibe una lista vacía aunque el paciente sea suyo — eso lo
-   * habilita ENG-60 agregando su política, sin tocar este método.
+   * Se lee con el JWT de quien pregunta: **RLS es la autorización**. Tres
+   * políticas de SELECT se suman sobre esta tabla: el paciente ve lo suyo
+   * (ENG-57), el profesional ve lo que firmó (ENG-58) y el profesional con un
+   * turno no cancelado ve la HC completa de ese paciente (ENG-60).
+   *
+   * Este método NO decide quién puede leer: devuelve lo que RLS deje pasar. El
+   * 403 y la auditoría los pone `readPatientRecord`, que es el camino que usa el
+   * controller. Llamar a este método directo saltea el registro de acceso.
    *
    * El orden es por `sequence_number` y no por `created_at`: la secuencia es la
    * que define la cadena, y dos entradas pueden compartir el milisegundo.
@@ -331,6 +335,137 @@ export class ClinicalRecordsService {
     return ((data ?? []) as unknown as (ChainEntryRow & { id: string })[]).map(
       toView,
     );
+  }
+
+  /**
+   * Lee la HC de un paciente dejando registro de quién la abrió (ENG-60).
+   *
+   * Es el camino que usa el controller. Hace tres cosas que `listForPatient` no
+   * hace, y que son el contenido de esta historia:
+   *
+   * 1. **Corta con 403** a quien no tiene relación con el paciente, en vez de
+   *    devolverle una lista vacía.
+   * 2. **Registra el acceso** en `audit_logs`.
+   * 3. Distingue al paciente leyendo lo suyo del profesional leyendo lo ajeno.
+   *
+   * Sobre el 403: ENG-58 devolvía `[]` a propósito, para no confirmarle a un
+   * tercero que ese paciente tiene historia clínica. El criterio de aceptación de
+   * ENG-60 pide 403 explícito y esa es la decisión que se tomó, asumiendo el
+   * costo: un 403 revela que el `patientId` corresponde a un paciente real. Se
+   * mitiga en parte con el mensaje, que no dice nada de la HC en sí. Como el
+   * `patientId` es un UUID v4 no adivinable, la superficie es acotada.
+   */
+  async readPatientRecord(
+    viewerId: string,
+    accessToken: string,
+    patientId: string,
+  ): Promise<ClinicalEntryView[]> {
+    // `patientId` es el `profile_id` del paciente, el mismo valor que el `sub`
+    // del JWT: si coinciden, es el paciente leyendo su propia historia y no hay
+    // relación que validar.
+    const asPatient = viewerId === patientId;
+
+    if (!asPatient) {
+      await this.assertCanReadFor(viewerId, patientId);
+    }
+
+    const entries = await this.listForPatient(accessToken, patientId);
+
+    await this.recordAccess(viewerId, patientId, asPatient, entries.length);
+
+    return entries;
+  }
+
+  /**
+   * Exige una relación profesional-paciente para leer la HC.
+   *
+   * **Relación = un turno que no esté cancelado.** Desde que el paciente reserva
+   * ya es su paciente, así que valen `RESERVADO_SIN_PAGAR`, `CONFIRMADO` y
+   * `COMPLETADO`; `CANCELADO` no, porque un turno dado de baja nunca constituyó
+   * una atención.
+   *
+   * Espeja la condición de la política de RLS a propósito. La política es la
+   * autoridad —es la que protege la lectura por PostgREST—, pero sola solo puede
+   * devolver cero filas, y de una HC vacía no se distingue. Esta consulta es la
+   * que permite contestar 403.
+   *
+   * Es más amplia que `assertCanWriteFor` (ENG-58), que acepta cualquier turno
+   * sin mirar el estado. La diferencia es deliberada: leer de más es un problema
+   * de privacidad y escribir de más es un problema de integridad de la HC, así
+   * que el filtro por estado va del lado de la lectura. Unificar los dos criterios
+   * merece su propio ticket.
+   */
+  private async assertCanReadFor(
+    professionalId: string,
+    patientId: string,
+  ): Promise<void> {
+    const appointment = await this.prisma.appointment.findFirst({
+      where: {
+        professional_id: professionalId,
+        patient_id: patientId,
+        status: { not: 'CANCELADO' },
+      },
+      select: { id: true },
+    });
+
+    if (!appointment) {
+      throw new ForbiddenException(
+        'Solo podés ver la historia clínica de un paciente con el que tenés un turno.',
+      );
+    }
+  }
+
+  /**
+   * Deja constancia de un acceso a la HC en `audit_logs`.
+   *
+   * Es un requisito de la Ley 26.529 (el paciente tiene derecho a saber quién
+   * miró su historia) y es lo que alimenta el "Historial de accesos" que el
+   * diseño le muestra al paciente.
+   *
+   * **Falla cerrado a propósito**: si no se puede registrar el acceso, no se
+   * entrega la HC. Un acceso sin registro es exactamente lo que la ley no
+   * permite, y tragarse el error dejaría un hueco invisible en la bitácora. El
+   * costo es real —una caída de la escritura de auditoría bloquea la lectura
+   * clínica— y es el tradeoff que se eligió; si en operación resulta demasiado
+   * caro, la salida es hacer durable la escritura (cola/outbox), no volverla
+   * best-effort.
+   *
+   * Escribe por Prisma (owner) y no por PostgREST: `audit_logs` no tiene GRANT de
+   * INSERT para `authenticated`, y no debe tenerlo — si el cliente pudiera
+   * escribir su propia bitácora, podría no escribirla.
+   */
+  private async recordAccess(
+    actorId: string,
+    patientId: string,
+    asPatient: boolean,
+    entryCount: number,
+  ): Promise<void> {
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actor_id: actorId,
+          action: 'CLINICAL_RECORD_READ',
+          resource_type: 'clinical_record_entries',
+          // El recurso auditado es la HC, y la HC es del paciente: por eso va el
+          // paciente y no cada entrada. Una lectura es un evento, no N.
+          resource_id: patientId,
+          metadata: {
+            // Permite separar "el paciente miró lo suyo" de "un profesional miró
+            // la HC de un paciente", que es lo único que el paciente quiere ver
+            // en su historial de accesos.
+            role: asPatient ? 'PACIENTE' : 'PROFESIONAL',
+            entryCount,
+          },
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `No se pudo auditar el acceso de ${actorId} a la HC de ${patientId}: ${String(error)}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos registrar el acceso a la historia clínica, así que no la mostramos. Probá de nuevo en unos minutos.',
+      );
+    }
   }
 
   /**
