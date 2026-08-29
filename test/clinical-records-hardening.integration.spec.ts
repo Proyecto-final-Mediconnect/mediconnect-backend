@@ -40,7 +40,9 @@ const createdPatients: string[] = [];
 
 /** Carga un archivo de migración statement por statement (separador `--;;`). */
 async function applyMigration(prisma: PrismaClient, path: string) {
-  for (const statement of readFileSync(path, 'utf8').split(/^--;;[ \t]*\r?$/m)) {
+  for (const statement of readFileSync(path, 'utf8').split(
+    /^--;;[ \t]*\r?$/m,
+  )) {
     const sql = statement.trim();
     if (sql.length > 0) await prisma.$executeRawUnsafe(sql);
   }
@@ -186,7 +188,9 @@ describe('Endurecimiento del modelo de HC (integration)', () => {
       await seedFirstEntry(patient);
 
       await expect(
-        prisma.$executeRawUnsafe('truncate table public.clinical_record_entries cascade'),
+        prisma.$executeRawUnsafe(
+          'truncate table public.clinical_record_entries cascade',
+        ),
       ).rejects.toThrow(/append-only/i);
     });
 
@@ -282,7 +286,9 @@ describe('Endurecimiento del modelo de HC (integration)', () => {
       await seedFirstEntry(patient);
 
       await expect(
-        prisma.$executeRawUnsafe('truncate table public.clinical_record_entries cascade'),
+        prisma.$executeRawUnsafe(
+          'truncate table public.clinical_record_entries cascade',
+        ),
       ).rejects.toThrow(/append-only/i);
     });
   });
