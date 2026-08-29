@@ -34,6 +34,11 @@ jobs:
     env:
       SKIP_DOCKER: 'true'
       DATABASE_URL: 'postgresql://mediconnect:mediconnect@localhost:5432/mediconnect_test?schema=public'
+      # Las exige SupabaseService.onModuleInit() con getOrThrow(): sin ellas el
+      # bundle del smoke test no llega a levantar. `createClient` no hace red al
+      # construirse, así que valores dummy alcanzan.
+      SUPABASE_URL: https://placeholder.supabase.co
+      SUPABASE_ANON_KEY: placeholder-anon-key
 
     steps:
       - name: Checkout
@@ -56,3 +61,34 @@ jobs:
 
       - name: Run integration tests
         run: pnpm run test:integration
+
+      # ENG-95: un build verde no garantiza que el bundle levante. El caso real
+      # fue tsconfig.build.json emitiendo a dist/src/, con lo que `node dist/main`
+      # no existía y start:prod no arrancaba: lint, tests y build seguían en verde.
+      #
+      # Este smoke test vive acá y no en ci.yml a propósito: PrismaService
+      # .onModuleInit() hace $connect(), y el job de ci.yml no tiene Postgres (sus
+      # e2e overridean PrismaService justamente por eso). Contra la DATABASE_URL
+      # dummy de ci.yml el bundle muere con P1001 antes de escuchar. Acá hay un
+      # Postgres real, y alcanza con que responda: /health no consulta la base.
+      - name: Generate Prisma Client
+        run: pnpm exec prisma generate
+
+      - name: Build (producción)
+        run: pnpm run build
+
+      - name: Smoke test (el bundle arranca)
+        run: |
+          node dist/main &
+          SERVER_PID=$!
+          for i in $(seq 1 15); do
+            if curl -fsS --max-time 5 http://localhost:3000/health > /dev/null 2>&1; then
+              echo "El bundle levantó y /health respondió 200."
+              kill "$SERVER_PID" 2>/dev/null || true
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::El bundle no respondió en /health tras 30s."
+          kill "$SERVER_PID" 2>/dev/null || true
+          exit 1
