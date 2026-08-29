@@ -35,14 +35,23 @@ export class ClinicalRecordsController {
    * Entradas de la HC del paciente, de la más vieja a la más nueva.
    *
    * Un solo endpoint para los dos roles: **RLS decide qué devuelve**. El paciente
-   * ve su historia completa (`..._select_own_patient`, ENG-57) y el profesional ve
-   * las entradas que él firmó (`..._select_own_authored`, ENG-58). Si ENG-60
-   * decide ampliar el acceso del profesional, agrega su política y este endpoint
-   * empieza a devolver más sin cambiar una línea.
+   * ve su historia completa (`..._select_own_patient`, ENG-57), el profesional ve
+   * lo que firmó (`..._select_own_authored`, ENG-58) y, desde ENG-60, el
+   * profesional con un turno no cancelado con ese paciente ve la HC **completa**,
+   * incluidas las entradas de otros profesionales.
    *
-   * Devuelve `[]` —no 403— cuando el usuario no puede ver nada de esa HC: para él
-   * esas filas no existen, y distinguir "vacía" de "no te la puedo mostrar"
-   * confirmaría que ese paciente tiene historia clínica.
+   * **ENG-60 cambió el 404-por-omisión de ENG-58 por un 403 explícito.** Este
+   * endpoint devolvía `[]` a quien no podía ver nada, para no confirmarle a un
+   * tercero que ese paciente tiene historia clínica. El criterio de aceptación de
+   * ENG-60 pide 403 sin relación vigente y esa es la decisión que se tomó: el
+   * profesional que se equivoca de paciente merece un error claro, no una HC
+   * vacía que parece un paciente sin historia. Se asume el costo de revelar que
+   * el UUID corresponde a un paciente real.
+   *
+   * Una HC realmente vacía sigue devolviendo `[]` con 200.
+   *
+   * Cada lectura deja registro en `audit_logs` (Ley 26.529): quién, de quién y
+   * cuándo. Si no se puede registrar, no se devuelve la historia.
    */
   @Get()
   list(
@@ -50,8 +59,8 @@ export class ClinicalRecordsController {
     @Param('patientId', new ParseUUIDPipe({ version: '4' }))
     patientId: string,
   ) {
-    const { accessToken } = requireAuth(req);
-    return this.records.listForPatient(accessToken, patientId);
+    const { userId, accessToken } = requireAuth(req);
+    return this.records.readPatientRecord(userId, accessToken, patientId);
   }
 
   /**

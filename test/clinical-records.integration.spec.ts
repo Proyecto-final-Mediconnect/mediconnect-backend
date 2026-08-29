@@ -50,19 +50,23 @@ function migration(name: string): string {
 }
 
 /**
- * Las dos migraciones de la HC, en orden. ENG-58 agrega una politica de SELECT
- * sobre la tabla que cierra ENG-57, asi que la segunda no tiene sentido sin la
- * primera.
+ * Las migraciones de la HC, en orden. Cada una agrega una politica de SELECT
+ * sobre la tabla que cierra ENG-57, asi que ninguna tiene sentido sin la primera.
+ * ENG-60 ademas necesita `appointments`, que ya existe desde ENG-54.
  */
 const MIGRATIONS = [
   migration('20260826120000_eng57_clinical_record_chain'),
   migration('20260826140000_eng58_professional_authored_entries'),
+  migration('20260829000000_eng60_professional_reads_patient_record'),
 ];
 
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
 
 /** Pacientes creados por el spec, para poder borrarlos al terminar. */
 const createdPatients: string[] = [];
+
+/** Profesionales extra que crea ENG-60, ademas del PROFESSIONAL fijo. */
+const createdProfessionals: string[] = [];
 
 describe('Historia clínica con cadena de hash (integration)', () => {
   const prisma = new PrismaClient();
@@ -105,6 +109,30 @@ describe('Historia clínica con cadena de hash (integration)', () => {
       'grant usage on schema public to authenticated',
     );
 
+    // Lo que en produccion trae la migracion de ENG-54, y del que depende la
+    // politica de ENG-60: su `exists` sobre `appointments` se evalua con los
+    // privilegios de quien consulta, asi que sin el GRANT toda lectura de
+    // `authenticated` sobre la HC muere con "permission denied for table
+    // appointments" — incluida la del propio paciente.
+    //
+    // La RLS de `appointments` va tambien, y no solo el GRANT: dentro del
+    // `exists` esa politica se aplica igual. Si dejara al profesional sin ver su
+    // propio turno, ENG-60 devolveria vacio en silencio en vez de fallar, y un
+    // harness que solo copiara el GRANT no lo detectaria.
+    await prisma.$executeRawUnsafe(
+      'grant select, insert on public.appointments to authenticated',
+    );
+    await prisma.$executeRawUnsafe(
+      'alter table public.appointments enable row level security',
+    );
+    await prisma.$executeRawUnsafe(
+      'drop policy if exists appointments_select_own on public.appointments',
+    );
+    await prisma.$executeRawUnsafe(`
+      create policy appointments_select_own on public.appointments
+        for select to authenticated
+        using (patient_id = auth.uid() or professional_id = auth.uid())`);
+
     for (const file of MIGRATIONS) {
       for (const statement of readFileSync(file, 'utf8').split(
         /^--;;[ \t]*\r?$/m,
@@ -123,12 +151,19 @@ describe('Historia clínica con cadena de hash (integration)', () => {
       'drop trigger if exists clinical_record_entries_link on public.clinical_record_entries',
       'drop policy if exists clinical_record_entries_select_own_patient on public.clinical_record_entries',
       'drop policy if exists clinical_record_entries_select_own_authored on public.clinical_record_entries',
+      'drop policy if exists clinical_record_entries_select_assigned_professional on public.clinical_record_entries',
+      'drop index if exists appointments_patient_professional_idx',
+      'drop policy if exists appointments_select_own on public.appointments',
+      'alter table public.appointments disable row level security',
       'alter table public.clinical_record_entries no force row level security',
       'alter table public.clinical_record_entries disable row level security',
     ]) {
       await prisma.$executeRawUnsafe(sql);
     }
 
+    await prisma.appointment.deleteMany({
+      where: { patient_id: { in: createdPatients } },
+    });
     await prisma.clinicalRecordEntry.deleteMany({
       where: { patient_id: { in: createdPatients } },
     });
@@ -139,7 +174,10 @@ describe('Historia clínica con cadena de hash (integration)', () => {
       where: { id: { in: [...createdPatients, PROFESSIONAL] } },
     });
     await prisma.professional.deleteMany({
-      where: { profile_id: PROFESSIONAL },
+      where: { profile_id: { in: [PROFESSIONAL, ...createdProfessionals] } },
+    });
+    await prisma.profile.deleteMany({
+      where: { id: { in: createdProfessionals } },
     });
 
     await prisma.$disconnect();
@@ -156,6 +194,42 @@ describe('Historia clínica con cadena de hash (integration)', () => {
     });
     createdPatients.push(id);
     return id;
+  }
+
+  /** Crea el perfil y la fila de profesional que exigen las FKs (ENG-60). */
+  async function createProfessional(): Promise<string> {
+    const id = randomUUID();
+    await prisma.profile.create({
+      data: { id, email: `pro-${id}@test.local`, role: 'PROFESIONAL' },
+    });
+    await prisma.professional.create({
+      data: {
+        profile_id: id,
+        first_name: 'Otro',
+        last_name: 'Profesional',
+        license_number: `MP-${id.slice(0, 8)}`,
+      },
+    });
+    createdProfessionals.push(id);
+    return id;
+  }
+
+  /** Turno entre un profesional y un paciente, en el estado que se pida. */
+  function createAppointment(
+    patientId: string,
+    professionalId: string,
+    status: 'RESERVADO_SIN_PAGAR' | 'CONFIRMADO' | 'CANCELADO' | 'COMPLETADO',
+  ) {
+    return prisma.appointment.create({
+      data: {
+        patient_id: patientId,
+        professional_id: professionalId,
+        scheduled_at: new Date(Date.UTC(2026, 7, 28, 15, 0, 0)),
+        duration_minutes: 30,
+        price: 10000,
+        status,
+      },
+    });
   }
 
   function entryInput(
@@ -388,9 +462,10 @@ describe('Historia clínica con cadena de hash (integration)', () => {
       expect(Number(n)).toBe(2);
     });
 
-    it('otro profesional NO ve esas entradas', async () => {
-      // Lo que sigue abierto para ENG-60 es si un profesional ve las entradas de
-      // OTROS profesionales del mismo paciente. Hoy no, y este test lo fija.
+    it('un profesional sin relacion con el paciente NO ve nada', async () => {
+      // ENG-60 amplio lo que ve el profesional CON un turno, no abrio la tabla:
+      // sin relacion, la HC sigue siendo invisible. Este test es el que fija que
+      // la politica nueva no se paso de rosca.
       const { patientId } = await seedChain(2);
       const otroProfesional = randomUUID();
 
@@ -409,6 +484,103 @@ describe('Historia clínica con cadena de hash (integration)', () => {
       const [{ n }] = await asUser(patientId, (tx) => count(tx, patientId));
 
       expect(Number(n)).toBe(3);
+    });
+
+    /**
+     * ENG-60 — el profesional con un turno ve la HC COMPLETA del paciente.
+     *
+     * Es la decision de alcance que ENG-57 dejo abierta y que esta historia
+     * resolvio por el acceso amplio. Lo que estos tests fijan es que la relacion
+     * sea lo que la habilita, y que un turno cancelado no alcance.
+     *
+     * Todas las entradas las firma `PROFESSIONAL`, y quien mira es SIEMPRE otro
+     * profesional: si viera algo por `..._select_own_authored` (ENG-58) el test
+     * no probaria nada. Lo que se ve, se ve por la politica de ENG-60.
+     */
+    describe('ENG-60: el profesional con turno ve toda la HC', () => {
+      it('ve las entradas que firmo OTRO profesional', async () => {
+        const { patientId } = await seedChain(3);
+        const tratante = await createProfessional();
+        await createAppointment(patientId, tratante, 'CONFIRMADO');
+
+        const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
+
+        expect(Number(n)).toBe(3);
+      });
+
+      it('un turno RESERVADO_SIN_PAGAR ya habilita el acceso', async () => {
+        // Desde que el paciente reserva ya es su paciente: el pago pendiente no
+        // deberia bloquear al medico que lo va a atender.
+        const { patientId } = await seedChain(2);
+        const tratante = await createProfessional();
+        await createAppointment(patientId, tratante, 'RESERVADO_SIN_PAGAR');
+
+        const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
+
+        expect(Number(n)).toBe(2);
+      });
+
+      it('un turno COMPLETADO mantiene el acceso', async () => {
+        // La continuidad de la atencion es justamente lo que una HC longitudinal
+        // tiene que sostener: haber atendido no caduca.
+        const { patientId } = await seedChain(2);
+        const tratante = await createProfessional();
+        await createAppointment(patientId, tratante, 'COMPLETADO');
+
+        const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
+
+        expect(Number(n)).toBe(2);
+      });
+
+      it('un turno CANCELADO NO habilita el acceso', async () => {
+        // Es el filtro que evita que un turno dado de baja hace un anio le deje a
+        // ese profesional la HC completa del paciente para siempre.
+        const { patientId } = await seedChain(3);
+        const tratante = await createProfessional();
+        await createAppointment(patientId, tratante, 'CANCELADO');
+
+        const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
+
+        expect(Number(n)).toBe(0);
+      });
+
+      it('un turno cancelado no anula otro turno vigente', async () => {
+        // El `exists` corta en la primera fila que cumple: alcanza con que UN
+        // turno siga en pie, aunque haya otros cancelados.
+        const { patientId } = await seedChain(2);
+        const tratante = await createProfessional();
+        await createAppointment(patientId, tratante, 'CANCELADO');
+        await createAppointment(patientId, tratante, 'CONFIRMADO');
+
+        const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
+
+        expect(Number(n)).toBe(2);
+      });
+
+      it('el turno de OTRO paciente no da acceso a esta HC', async () => {
+        // La condicion cruza patient_id y professional_id: tener turnos no es
+        // tener acceso a cualquier HC.
+        const { patientId } = await seedChain(2);
+        const otroPaciente = await createPatient();
+        const tratante = await createProfessional();
+        await createAppointment(otroPaciente, tratante, 'CONFIRMADO');
+
+        const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
+
+        expect(Number(n)).toBe(0);
+      });
+
+      it('el paciente sigue viendo todo', async () => {
+        // Tercera policy sobre la misma tabla: en RLS se combinan con OR, asi que
+        // no puede haberle restado nada al dueno.
+        const { patientId } = await seedChain(3);
+        const tratante = await createProfessional();
+        await createAppointment(patientId, tratante, 'CONFIRMADO');
+
+        const [{ n }] = await asUser(patientId, (tx) => count(tx, patientId));
+
+        expect(Number(n)).toBe(3);
+      });
     });
 
     it('authenticated no puede insertar aunque la cadena cierre', async () => {
