@@ -1,16 +1,40 @@
 name: Integration Tests
 
+# `Integration Tests` es, junto con `CI`, uno de los dos required checks que la
+# protección de rama de `main` exige (Sprint 0 §2.6). Por eso su trigger tiene que
+# acompañar al de ci.yml: si uno de los dos no corre, el gate queda a medias.
+#
+# ENG-38 extendió estos triggers para sumar `main` (matriz 3.5.4 del Sprint 0).
+# Acá se saca el filtro de `branches` del `pull_request` por el mismo motivo que
+# en ci.yml: un PR apilado sobre otra rama de feature —como ENG-55 sobre ENG-54—
+# se quedaba sin este check aunque la protección de rama lo exige para mergear.
+#
+# `types` suma `edited`, que no está en los defaults (`opened`, `synchronize`,
+# `reopened`). Sin él, reapuntar la base deja pegado al head SHA el resultado
+# calculado contra la base vieja. No es teórico: al reapuntar este mismo PR de
+# `release/1.2.0` a `main` volvió a correr `CI` y este workflow no, y el PR quedó
+# mostrando un Integration Tests verde que nunca se había corrido contra `main`.
+#
+# `push` NO se amplía, igual que en ci.yml. Acá el motivo es distinto —este job no
+# tiene steps condicionados por evento, así que no habría check runs homónimos con
+# distinto alcance—, pero levantar un servicio postgres:15 en cada push a cada
+# rama no aporta nada que el run del PR no dé ya.
 on:
-  # ENG-38 extendió estos triggers para sumar `main`: la matriz 3.5.4 del Sprint 0
-  # pide la suite de integración también en el PR a main y en el merge a main.
   pull_request:
-    branches:
-      - 'release/**'
-      - 'main'
+    types: [opened, synchronize, reopened, edited]
   push:
     branches:
       - 'release/**'
       - 'main'
+
+# Sacar el filtro de `branches` multiplica los runs: cada `synchronize` de
+# cualquier PR abre uno nuevo, y cada uno levanta su propio postgres. Sin esto,
+# dos pushes seguidos dejan dos suites completas corriendo en paralelo sobre el
+# mismo PR. Se agrupa por `github.ref` igual que ci.yml, por la misma razón que
+# está documentada allá.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   integration:
