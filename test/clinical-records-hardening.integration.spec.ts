@@ -32,7 +32,7 @@ const migrationPath = (name: string) =>
   join(__dirname, '..', 'prisma', 'migrations', name, 'migration.sql');
 
 const ENG57 = migrationPath('20260826120000_eng57_clinical_record_chain');
-const ENG126 = migrationPath('20260829000000_eng126_clinical_record_hardening');
+const ENG126 = migrationPath('20260829210000_eng126_clinical_record_hardening');
 
 const PROFESSIONAL = '33333333-3333-4333-8333-333333333333';
 
