@@ -64,4 +64,43 @@ describe('validate (env)', () => {
       }),
     ).toThrow(/Configuración de entorno inválida/);
   });
+  // MercadoPago (ENG-61/ENG-64). El prefijo del token es lo ÚNICO que separa
+  // sandbox de producción: comparten host.
+  describe('MercadoPago', () => {
+    it('acepta un access token de sandbox', () => {
+      expect(() =>
+        validate({ ...validConfig, MERCADOPAGO_ACCESS_TOKEN: 'TEST-123456' }),
+      ).not.toThrow();
+    });
+
+    it('acepta un access token productivo', () => {
+      expect(() =>
+        validate({
+          ...validConfig,
+          MERCADOPAGO_ACCESS_TOKEN: 'APP_USR-123456',
+        }),
+      ).not.toThrow();
+    });
+
+    // El caso que justifica el @Matches: un token mal pegado tiene que romper al
+    // bootear, no cuando alguien ya cobró.
+    it('rechaza un access token sin prefijo de entorno', () => {
+      expect(() =>
+        validate({ ...validConfig, MERCADOPAGO_ACCESS_TOKEN: '123456' }),
+      ).toThrow(/TEST- \(sandbox\) o APP_USR- \(producción\)/);
+    });
+
+    it('acepta que no haya credenciales de MercadoPago (CI y local)', () => {
+      expect(() => validate({ ...validConfig })).not.toThrow();
+    });
+
+    it('rechaza una notification_url sin protocolo', () => {
+      expect(() =>
+        validate({
+          ...validConfig,
+          MERCADOPAGO_NOTIFICATION_URL: 'tunel.ngrok.app/webhooks',
+        }),
+      ).toThrow(/Configuración de entorno inválida/);
+    });
+  });
 });

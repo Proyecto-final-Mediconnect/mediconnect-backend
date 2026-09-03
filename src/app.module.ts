@@ -18,6 +18,7 @@ import { RequestLoggerMiddleware } from './common/middleware/request-logger.midd
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { PatientsModule } from './patients/patients.module';
+import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProfessionalsModule } from './professionals/professionals.module';
 import { SchedulesModule } from './schedules/schedules.module';
@@ -48,6 +49,7 @@ import { VideoModule } from './video/video.module';
     SchedulesModule,
     AppointmentsModule,
     ClinicalRecordsModule,
+    PaymentsModule,
   ],
   controllers: [AppController],
   providers: [
