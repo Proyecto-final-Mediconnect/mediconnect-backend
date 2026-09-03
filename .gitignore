@@ -47,3 +47,6 @@ Thumbs.db
 # Prisma (solo backend) - el cliente generado, se regenera, no se versiona
 # /src/generated/prisma
 /generated/prisma
+
+# TypeScript build incremental - se regenera en cada build
+*.tsbuildinfo
