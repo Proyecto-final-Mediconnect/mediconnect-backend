@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -15,6 +16,11 @@ import {
   type ChainEntryRow,
   type ChainVerification,
 } from '../common/hash-chain/hash-chain';
+import {
+  CLINICAL_ENTRY_RESOURCE_TYPE,
+  toClinicalImpression,
+} from './clinical-entry.fhir';
+import { CreateClinicalEntryDto } from './dto/create-clinical-entry.dto';
 
 /**
  * Escritura y lectura de la Historia Clínica (ENG-57).
@@ -200,6 +206,73 @@ export class ClinicalRecordsService {
     throw new ConflictException(
       'La historia clínica está recibiendo otra entrada en este momento. Probá de nuevo.',
     );
+  }
+
+  /**
+   * Agrega una entrada firmada por un profesional a la HC de un paciente
+   * (ENG-58).
+   *
+   * Es `append()` más las dos cosas que `append()` no puede saber: que quien
+   * firma tenga derecho a escribir en esa historia, y cómo se traduce el
+   * formulario a FHIR.
+   */
+  async addEntryAsProfessional(
+    professionalId: string,
+    patientId: string,
+    dto: CreateClinicalEntryDto,
+    now: Date = new Date(),
+  ): Promise<ClinicalEntryView> {
+    await this.assertCanWriteFor(professionalId, patientId);
+
+    // El mismo instante se usa para el recurso FHIR y para `created_at`, que
+    // entra a la preimagen del hash. Si se tomaran por separado, el `date` del
+    // recurso y la fecha de la fila diferirían por unos milisegundos y el asiento
+    // diría dos cosas distintas sobre cuándo se escribió.
+    const at = new Date(now.getTime());
+
+    return this.append(
+      {
+        patientId,
+        professionalId,
+        entryType: dto.entryType,
+        fhirResourceType: CLINICAL_ENTRY_RESOURCE_TYPE,
+        content: toClinicalImpression(dto, { patientId, professionalId }, at),
+        consultationId: dto.consultationId ?? null,
+      },
+      at,
+    );
+  }
+
+  /**
+   * Un profesional solo puede escribir en la HC de un paciente con el que tiene
+   * o tuvo un turno.
+   *
+   * Sin esto, cualquier profesional validado podría agregar un asiento a la
+   * historia de cualquier paciente del sistema con solo saber su UUID — y como la
+   * tabla es append-only, ese asiento **no se podría borrar nunca**. La regla es
+   * de negocio y cruza dos tablas, así que vive acá y no en una policy: RLS
+   * decide sobre la fila que se toca, no sobre la relación entre dos personas.
+   *
+   * Se aceptan turnos en **cualquier** estado, incluidos cancelados y pasados. El
+   * criterio de aceptación pide el formulario disponible "durante y después de la
+   * consulta", y un profesional que atendió a alguien hace un mes sigue teniendo
+   * que poder completar o ampliar ese registro. Lo que la regla frena es al
+   * profesional que nunca tuvo nada que ver con ese paciente.
+   */
+  private async assertCanWriteFor(
+    professionalId: string,
+    patientId: string,
+  ): Promise<void> {
+    const appointment = await this.prisma.appointment.findFirst({
+      where: { professional_id: professionalId, patient_id: patientId },
+      select: { id: true },
+    });
+
+    if (!appointment) {
+      throw new ForbiddenException(
+        'Solo podés escribir en la historia clínica de un paciente al que atendiste.',
+      );
+    }
   }
 
   /**

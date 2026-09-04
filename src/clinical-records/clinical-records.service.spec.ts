@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   InternalServerErrorException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
@@ -58,6 +59,7 @@ function rowFromCreate(args: CreateArgs) {
 describe('ClinicalRecordsService', () => {
   let service: ClinicalRecordsService;
   let prisma: {
+    appointment: { findFirst: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
       findMany: jest.Mock;
@@ -68,6 +70,9 @@ describe('ClinicalRecordsService', () => {
 
   beforeEach(() => {
     prisma = {
+      appointment: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'turno-1' }),
+      },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),
         findMany: jest.fn().mockResolvedValue([]),
@@ -244,6 +249,103 @@ describe('ClinicalRecordsService', () => {
 
     it('una HC vacía es una lista vacía, no un error', async () => {
       await expect(service.listForPatient('jwt', PATIENT)).resolves.toEqual([]);
+    });
+  });
+
+  describe('addEntryAsProfessional (ENG-58)', () => {
+    const form = {
+      entryType: 'CONSULTA' as const,
+      reason: 'Control de rutina',
+      diagnosis: 'Sin hallazgos',
+    };
+
+    it('sella la entrada con el profesional del JWT', async () => {
+      const view = await service.addEntryAsProfessional(
+        PROFESSIONAL,
+        PATIENT,
+        form,
+        NOW,
+      );
+
+      expect(view.professionalId).toBe(PROFESSIONAL);
+      expect(view.patientId).toBe(PATIENT);
+      expect(view.sequenceNumber).toBe(1);
+    });
+
+    it('guarda el contenido como recurso FHIR', async () => {
+      const view = await service.addEntryAsProfessional(
+        PROFESSIONAL,
+        PATIENT,
+        form,
+        NOW,
+      );
+
+      expect(view.fhirResourceType).toBe('ClinicalImpression');
+      expect(view.content).toMatchObject({
+        resourceType: 'ClinicalImpression',
+        description: 'Control de rutina',
+      });
+    });
+
+    it('el recurso y la fila comparten el instante exacto', async () => {
+      // Si se tomaran por separado, el `date` del recurso y el `created_at` de la
+      // fila dirían dos cosas distintas sobre cuándo se escribió el asiento.
+      const view = await service.addEntryAsProfessional(
+        PROFESSIONAL,
+        PATIENT,
+        form,
+        NOW,
+      );
+
+      expect((view.content as { date: string }).date).toBe(view.createdAt);
+    });
+
+    it('rechaza a un profesional que nunca atendió a ese paciente', async () => {
+      // La tabla es append-only: un asiento escrito por error NO se puede borrar.
+      prisma.appointment.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.addEntryAsProfessional(PROFESSIONAL, PATIENT, form, NOW),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('no escribe nada cuando rechaza por autorización', async () => {
+      prisma.appointment.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.addEntryAsProfessional(PROFESSIONAL, PATIENT, form, NOW),
+      ).rejects.toThrow(ForbiddenException);
+      expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('acepta un turno cancelado o pasado', async () => {
+      // "Durante y después de la consulta": quien atendió hace un mes sigue
+      // teniendo que poder ampliar el registro.
+      prisma.appointment.findFirst.mockResolvedValue({ id: 'turno-viejo' });
+
+      await expect(
+        service.addEntryAsProfessional(PROFESSIONAL, PATIENT, form, NOW),
+      ).resolves.toMatchObject({ sequenceNumber: 1 });
+      // El filtro no mira el estado del turno, solo la relación.
+      const where = prisma.appointment.findFirst.mock.calls[0][0].where;
+      expect(where).not.toHaveProperty('status');
+    });
+
+    it('encadena contra la cabeza existente de esa HC', async () => {
+      prisma.clinicalRecordEntry.findFirst.mockResolvedValue({
+        sequence_number: BigInt(3),
+        content_hash: 'e'.repeat(64),
+      });
+
+      const view = await service.addEntryAsProfessional(
+        PROFESSIONAL,
+        PATIENT,
+        form,
+        NOW,
+      );
+
+      expect(view.sequenceNumber).toBe(4);
+      expect(view.previousHash).toBe('e'.repeat(64));
     });
   });
 
