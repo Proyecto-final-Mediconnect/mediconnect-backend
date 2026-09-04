@@ -28,6 +28,14 @@ export interface IntegrityAlerter {
   inconsistencyDetected(result: IntegrityRunResult): Promise<boolean>;
   /** La corrida no pudo terminar. Un watchdog que falla en silencio no sirve. */
   runFailed(error: unknown): Promise<boolean>;
+  /**
+   * Publica el ancla de una corrida sana (ENG-123).
+   *
+   * A diferencia de las otras dos, este mensaje sale aunque no pase nada — es el
+   * punto: lo que protege es la **serie publicada** de raíces, fuera de la base.
+   * Un ancla que solo aparece cuando hay problemas no ancla nada.
+   */
+  anchorPublished(result: IntegrityRunResult): Promise<boolean>;
 }
 
 export class SlackIntegrityAlerter implements IntegrityAlerter {
@@ -69,6 +77,36 @@ export class SlackIntegrityAlerter implements IntegrityAlerter {
 
     return this.post(
       '🚨 Integridad de la Historia Clínica: inconsistencia detectada',
+      lines.join('\n'),
+    );
+  }
+
+  async anchorPublished(result: IntegrityRunResult): Promise<boolean> {
+    const { anchor } = result;
+    if (!anchor) return false;
+
+    // La raíz va COMPLETA y en bloque de código: es el valor que alguien va a
+    // comparar contra el de otra semana, así que tiene que poder copiarse tal
+    // cual. Truncarla para que quede lindo la volvería inútil.
+    // `null` para lo condicional: el `''` de arriba es un salto de línea
+    // deliberado y filtrarlo pegaría el bloque de código al párrafo.
+    const lines = [
+      `Pacientes: *${anchor.patients}* · Entradas: *${anchor.entries}*`,
+      '',
+      'Raíz SHA-256 de las cabezas de cadena:',
+      '```',
+      anchor.root,
+      '```',
+      result.anchorRegression
+        ? '⚠️ *La raíz cambió sin que la Historia Clínica haya crecido.* Las verificaciones por paciente dieron OK, así que esto apunta a una manipulación que también tocó la base de comparación. Ver el runbook.'
+        : 'Guardá este mensaje: es la copia fuera de la base que permite detectar una reescritura completa.',
+      this.runUrl ? `Corrida: ${this.runUrl}` : null,
+    ].filter((line): line is string => line !== null);
+
+    return this.post(
+      result.anchorRegression
+        ? '🚨 Ancla de integridad: la raíz se movió sin explicación'
+        : '🔒 Ancla de integridad de la Historia Clínica',
       lines.join('\n'),
     );
   }

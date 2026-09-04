@@ -31,6 +31,8 @@ function result(failures: IntegrityFailure[]): IntegrityRunResult {
     entriesChecked: 4800,
     durationMs: 210,
     failures,
+    anchor: null,
+    anchorRegression: false,
   };
 }
 
@@ -173,6 +175,70 @@ describe('SlackIntegrityAlerter', () => {
       // Un stack puede arrastrar la connection string al canal.
       expect(payload).not.toContain('postgresql://');
       expect(payload).not.toContain('at Connection');
+    });
+  });
+
+  describe('anchorPublished (ENG-123)', () => {
+    const conAncla = (regression = false): IntegrityRunResult => ({
+      ...result([]),
+      status: 'OK',
+      failures: [],
+      anchor: { root: 'c'.repeat(64), patients: 42, entries: 907 },
+      anchorRegression: regression,
+    });
+
+    it('publica la raíz COMPLETA, para poder compararla contra otra semana', async () => {
+      const alerter = new SlackIntegrityAlerter(WEBHOOK);
+
+      const delivered = await alerter.anchorPublished(conAncla());
+
+      expect(delivered).toBe(true);
+      const payload = JSON.stringify(sentBody(fetchMock));
+      // Truncar la raíz para que quede linda la volvería inútil.
+      expect(payload).toContain('c'.repeat(64));
+      expect(payload).toContain('42');
+      expect(payload).toContain('907');
+    });
+
+    it('sale aunque no haya pasado nada: lo que protege es la serie publicada', async () => {
+      const alerter = new SlackIntegrityAlerter(WEBHOOK);
+
+      await alerter.anchorPublished(conAncla());
+
+      const payload = JSON.stringify(sentBody(fetchMock));
+      expect(payload).toContain('Ancla de integridad');
+      expect(payload).not.toContain('🚨');
+    });
+
+    it('cambia el tono cuando la raíz se movió sin explicación', async () => {
+      const alerter = new SlackIntegrityAlerter(WEBHOOK);
+
+      await alerter.anchorPublished(conAncla(true));
+
+      const payload = JSON.stringify(sentBody(fetchMock));
+      expect(payload).toContain('🚨');
+      expect(payload).toContain('sin que la Historia Clínica haya crecido');
+    });
+
+    it('no manda nada si la corrida no produjo ancla', async () => {
+      const alerter = new SlackIntegrityAlerter(WEBHOOK);
+
+      const delivered = await alerter.anchorPublished(result([failure(1)]));
+
+      expect(delivered).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('el ancla no expone ningún dato de pacientes', async () => {
+      const alerter = new SlackIntegrityAlerter(WEBHOOK);
+
+      await alerter.anchorPublished(conAncla());
+
+      const payload = JSON.stringify(sentBody(fetchMock));
+      // La raíz es un hash y los contadores son números: ningún patient_id
+      // individual sale del backend en este mensaje.
+      expect(payload).not.toContain(failure(1).patientId);
+      expect(payload).not.toContain('aaaaaaaa');
     });
   });
 });

@@ -22,6 +22,7 @@ import {
   type ChainEntry,
   type ChainEntryInput,
 } from '../src/common/hash-chain/hash-chain';
+import { computeAnchor } from '../src/integrity/chain-anchor';
 import { IntegrityService } from '../src/integrity/integrity.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import type { IntegrityAlerter } from '../src/integrity/integrity-alerter';
@@ -33,6 +34,7 @@ const prisma = new PrismaClient();
 class RecordingAlerter implements IntegrityAlerter {
   readonly alerts: IntegrityRunResult[] = [];
   readonly failures: unknown[] = [];
+  readonly anchors: IntegrityRunResult[] = [];
 
   inconsistencyDetected(result: IntegrityRunResult): Promise<boolean> {
     this.alerts.push(result);
@@ -41,6 +43,11 @@ class RecordingAlerter implements IntegrityAlerter {
 
   runFailed(error: unknown): Promise<boolean> {
     this.failures.push(error);
+    return Promise.resolve(true);
+  }
+
+  anchorPublished(result: IntegrityRunResult): Promise<boolean> {
+    this.anchors.push(result);
     return Promise.resolve(true);
   }
 }
@@ -493,5 +500,155 @@ describe('Job de verificación de integridad (integration)', () => {
       expect(result.entriesChecked).toBe(1000);
       expect(result.durationMs).toBeLessThan(1000);
     }, 120_000);
+  });
+
+  describe('ancla externa (ENG-123)', () => {
+    it('ancla una corrida sana y publica la raíz', async () => {
+      const { patientId, entries } = await seedChain(4);
+
+      const result = await service.run();
+
+      expect(result.anchor).toMatchObject({ patients: 1, entries: 4 });
+      expect(result.anchor?.root).toMatch(/^[0-9a-f]{64}$/);
+      expect(alerter.anchors).toHaveLength(1);
+
+      // La raíz corresponde a la cabeza real de la cadena.
+      expect(result.anchor?.root).toBe(
+        computeAnchor([
+          {
+            patientId,
+            sequenceNumber: 4,
+            headHash: entries[3].contentHash,
+          },
+        ]).root,
+      );
+
+      const check = await prisma.integrityCheck.findUniqueOrThrow({
+        where: { id: result.checkId },
+      });
+      expect((check.details as { anchor: { root: string } }).anchor.root).toBe(
+        result.anchor?.root,
+      );
+    });
+
+    it('la raíz se mantiene estable entre corridas sin cambios', async () => {
+      await seedChain(3);
+
+      const primera = await service.run();
+      const segunda = await service.run();
+
+      expect(segunda.anchor?.root).toBe(primera.anchor?.root);
+      expect(segunda.anchorRegression).toBe(false);
+    });
+
+    it('la raíz cambia cuando la cadena crece, sin marcar regresión', async () => {
+      const { patientId, entries } = await seedChain(3);
+      const primera = await service.run();
+
+      let previousHash = entries[2].contentHash;
+      for (let i = 4; i <= 5; i++) {
+        const entry = appendEntry(
+          entryInput(patientId, i, 60 + i),
+          previousHash,
+        );
+        await insertEntry(entry);
+        previousHash = entry.contentHash;
+      }
+
+      const segunda = await service.run();
+
+      expect(segunda.anchor?.root).not.toBe(primera.anchor?.root);
+      expect(segunda.anchorRegression).toBe(false);
+      expect(segunda.status).toBe('OK');
+    });
+
+    it('agarra la reescritura que también falsea chain_head_snapshots', async () => {
+      // EL test que justifica este ticket. Se simula al atacante con acceso de
+      // escritura a la base: reescribe la HC y ajusta el snapshot para que las
+      // verificaciones por paciente de ENG-85 den en verde.
+      const { patientId } = await seedChain(4);
+      const primera = await service.run();
+      expect(primera.status).toBe('OK');
+
+      await prisma.$executeRaw`
+        delete from clinical_record_entries where patient_id = ${patientId}::uuid`;
+
+      let previousHash = GENESIS_HASH;
+      let head = '';
+      for (let i = 1; i <= 4; i++) {
+        const entry = appendEntry(
+          entryInput(patientId, i, i === 2 ? 999 : 60 + i),
+          previousHash,
+        );
+        await insertEntry(entry);
+        previousHash = entry.contentHash;
+        head = entry.contentHash;
+      }
+      // El atacante alinea el snapshot con su versión.
+      await prisma.$executeRaw`
+        update chain_head_snapshots
+           set head_hash = ${head}, sequence_number = 4
+         where patient_id = ${patientId}::uuid`;
+
+      const segunda = await service.run();
+
+      // ENG-85 no ve nada: la cadena es coherente y coincide con el snapshot.
+      expect(segunda.failures).toEqual([]);
+      expect(segunda.status).toBe('OK');
+
+      // El ancla sí: la raíz cambió y el total de entradas no subió.
+      expect(segunda.anchor?.root).not.toBe(primera.anchor?.root);
+      expect(segunda.anchor?.entries).toBe(primera.anchor?.entries);
+      expect(segunda.anchorRegression).toBe(true);
+    });
+
+    it('no ancla una corrida con inconsistencias', async () => {
+      const { patientId } = await seedChain(3);
+      await prisma.$executeRaw`
+        update clinical_record_entries
+           set content = '{"resourceType":"Observation","tampered":true}'::jsonb
+         where patient_id = ${patientId}::uuid and sequence_number = 2`;
+
+      const result = await service.run();
+
+      expect(result.status).toBe('INCONSISTENT');
+      expect(result.anchor).toBeNull();
+      expect(alerter.anchors).toEqual([]);
+    });
+
+    it('conserva el ancla de la última corrida sana como referencia tras un incidente', async () => {
+      const { patientId } = await seedChain(3);
+      const sana = await service.run();
+
+      // Corrida con inconsistencia: no ancla.
+      await prisma.$executeRaw`
+        update clinical_record_entries
+           set content = '{"resourceType":"Observation","tampered":true}'::jsonb
+         where patient_id = ${patientId}::uuid and sequence_number = 2`;
+      expect((await service.run()).anchor).toBeNull();
+
+      // Se restaura el contenido original y la cadena vuelve a verificar. La
+      // referencia tiene que seguir siendo la de la corrida sana, no el null de
+      // la corrida rota.
+      await prisma.$executeRaw`
+        delete from clinical_record_entries where patient_id = ${patientId}::uuid`;
+      await prisma.chainHeadSnapshot.deleteMany({
+        where: { patient_id: patientId },
+      });
+      let previousHash = GENESIS_HASH;
+      for (let i = 1; i <= 3; i++) {
+        const entry = appendEntry(
+          entryInput(patientId, i, 60 + i),
+          previousHash,
+        );
+        await insertEntry(entry);
+        previousHash = entry.contentHash;
+      }
+
+      const restaurada = await service.run();
+
+      expect(restaurada.anchor?.root).toBe(sana.anchor?.root);
+      expect(restaurada.anchorRegression).toBe(false);
+    });
   });
 });

@@ -18,16 +18,18 @@ name: Deploy Production
 #
 # El README decía que el schema iba en el Pre-Deploy de Render, con un argumento
 # razonable: que el runner de GitHub no tenga que ver la connection string de
-# producción. El problema es que no estaba corriendo. Al mergear ENG-85 el deploy
-# salió en verde y `chain_head_snapshots` no existía en Supabase; hubo que correr
-# `prisma migrate deploy` a mano desde una notebook.
+# producción. Nunca corrió, y NO PODÍA correr: el Pre-Deploy Command solo está
+# disponible en los planes pagos de Render y el servicio está en el gratuito. El
+# campo estuvo vacío desde siempre.
 #
-# Y es la segunda vez que pasa lo mismo: ENG-96 descubrió que el seed tampoco
-# corría y el catálogo de especialidades estuvo vacío en Supabase por meses. Dos
-# incidentes del mismo tipo alcanzan para concluir que el problema no es la
-# configuración sino dónde vive: en el dashboard de Render, fuera del repo, sin
-# log en Actions y sin que ningún PR la muestre. Un paso que no corre y no avisa
-# es peor que no tenerlo, porque se confía en él.
+# Se descubrió al mergear ENG-85: el deploy salió en verde y
+# `chain_head_snapshots` no existía en Supabase, y hubo que correr las
+# migraciones a mano. Antes había pasado lo mismo con el seed (ENG-96), con el
+# catálogo de especialidades vacío en producción por meses.
+#
+# La lección no es "configurarlo bien". Es que un paso del que se depende no
+# puede vivir en un dashboard, fuera del repo, sin log y sin nada que avise
+# cuando no corre — ahí ni siquiera se puede notar que no existe.
 #
 # El costo que se paga: `DATABASE_URL` de producción como secret del repo. Ese
 # límite ya se había cruzado en ENG-85 —el job de integridad tiene que leer la
