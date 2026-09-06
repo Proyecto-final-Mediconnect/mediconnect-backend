@@ -126,17 +126,40 @@ export class IntegrityService {
     }
 
     const durationMs = Date.now() - startedAt;
-    const status = failures.length === 0 ? 'OK' : 'INCONSISTENT';
 
-    // El ancla solo se emite si TODA la corrida verificó. Publicar la raíz de un
-    // conjunto que incluye una cadena manipulada la convertiría en la referencia
-    // buena de la semana siguiente — el mismo blanqueo que se evita al no pisar
-    // el snapshot.
-    const anchor = status === 'OK' ? computeAnchor(heads) : null;
+    // El ancla solo se emite si TODAS las cadenas verificaron. Publicar la raíz
+    // de un conjunto que incluye una cadena manipulada la convertiría en la
+    // referencia buena de la semana siguiente — el mismo blanqueo que se evita
+    // al no pisar el snapshot.
+    const anchor = failures.length === 0 ? computeAnchor(heads) : null;
     const previousAnchor = anchor ? await this.lastPublishedAnchor() : null;
     const anchorRegression = anchor
       ? anchorRegressed(anchor, previousAnchor)
       : false;
+
+    // La regresión del ancla es un estado PROPIO, no un `OK` con una bandera
+    // adentro. Las dos razones importan:
+    //
+    //   - `lastPublishedAnchor()` toma la última fila `OK`. Si esta corrida se
+    //     registrara como `OK`, la corrida siguiente adoptaría la raíz
+    //     manipulada como línea de base, la comparación cerraría y el job
+    //     volvería a reportar verde indefinidamente: la alarma sonaría una sola
+    //     vez y después se silenciaría sola. Es el mismo blanqueo que se evita
+    //     al no pisar el snapshot de una cadena que falló, por la vía del ancla.
+    //   - `INCONSISTENT` tampoco alcanza: no hay ninguna inconsistencia por
+    //     paciente que mostrar —`inconsistencies_found` es 0 y `failures` está
+    //     vacío—, así que mezclarlas volvería ilegible el historial y mandaría
+    //     una alerta que dice "0 inconsistencia(s)".
+    //
+    // Con el estado propio, la línea de base sigue siendo la última corrida
+    // realmente sana y la alerta se repite todas las semanas hasta que alguien
+    // resuelva el incidente a mano.
+    const status: IntegrityRunResult['status'] =
+      failures.length > 0
+        ? 'INCONSISTENT'
+        : anchorRegression
+          ? 'ANCHOR_REGRESSION'
+          : 'OK';
 
     if (anchorRegression) {
       this.logger.error(
@@ -195,22 +218,31 @@ export class IntegrityService {
       anchorRegression,
     };
 
-    if (status === 'INCONSISTENT') {
+    // El ruteo mira `failures`, no `status`: una regresión de ancla no tiene
+    // inconsistencias por paciente que listar, y su alerta es la del ancla.
+    if (failures.length > 0) {
       await this.alerter.inconsistencyDetected(result);
-    } else {
+    } else if (!anchorRegression) {
       this.logger.log(
         `Integridad OK · ${patientIds.length} paciente(s) · ${entriesChecked} entrada(s) · ${durationMs} ms · raíz ${anchor?.root.slice(0, 16)}…`,
       );
     }
 
-    // El ancla se publica SIEMPRE que la corrida verificó, aunque no haya pasado
-    // nada: un ancla que solo aparece cuando hay problemas no sirve como ancla,
-    // porque justamente lo que se necesita es la serie histórica publicada.
+    // El ancla se publica SIEMPRE que las cadenas verificaron, aunque no haya
+    // pasado nada: un ancla que solo aparece cuando hay problemas no sirve como
+    // ancla, porque justamente lo que se necesita es la serie histórica
+    // publicada.
     //
-    // La excepción es la base todavía sin Historia Clínica: hasta que ENG-57
-    // escriba la primera entrada, anclar el conjunto vacío sería un mensaje
-    // semanal sin información.
-    if (anchor && anchor.patients > 0) {
+    // La excepción es la base sin ninguna Historia Clínica todavía: anclar el
+    // conjunto vacío sería un mensaje semanal sin información.
+    //
+    // Salvo que el conjunto haya quedado vacío por una REGRESIÓN, y ahí el
+    // mensaje es justamente lo que hay que publicar: que la HC pase de N
+    // pacientes a cero —alguien borró `clinical_record_entries` y
+    // `chain_head_snapshots`— es el incidente que el ancla existe para contar.
+    // Callarlo dejaría un hueco en la serie publicada exactamente en la semana
+    // del incidente, y esa serie es lo único que vive fuera de la base.
+    if (anchor && (anchor.patients > 0 || anchorRegression)) {
       await this.alerter.anchorPublished(result);
     }
 
@@ -218,12 +250,18 @@ export class IntegrityService {
   }
 
   /**
-   * Ancla de la última corrida que la publicó.
+   * Ancla de la última corrida sana.
    *
-   * Se busca la última fila `OK` con ancla y no simplemente la última fila: una
-   * corrida `INCONSISTENT` o `ERROR` no publica ancla, y tomar su `null` como
-   * referencia haría perder el punto de comparación justo cuando más se lo
-   * necesita — después de un incidente.
+   * Se filtra por `OK` y no se toma simplemente la última fila: una corrida
+   * `INCONSISTENT` o `ERROR` no publica ancla, y tomar su `null` como referencia
+   * haría perder el punto de comparación justo cuando más se lo necesita —
+   * después de un incidente.
+   *
+   * El filtro deja afuera también a `ANCHOR_REGRESSION`, y ese es su segundo
+   * motivo: la raíz de una corrida con regresión es la raíz sospechada, y
+   * adoptarla como línea de base blanquearía la manipulación en la corrida
+   * siguiente. La referencia sigue siendo la última raíz sana hasta que alguien
+   * resuelva el incidente, así que la alerta se repite todas las semanas.
    */
   private async lastPublishedAnchor(): Promise<ChainAnchor | null> {
     const rows = await this.prisma.integrityCheck.findMany({

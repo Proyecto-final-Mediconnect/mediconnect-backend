@@ -412,9 +412,13 @@ describe('IntegrityService', () => {
 
       const result = await h.service.run();
 
-      // Hasta que ENG-57 escriba la primera entrada, anclar el conjunto vacío
-      // sería un mensaje semanal sin información.
+      // Anclar el conjunto vacío de una base que nunca tuvo HC sería un mensaje
+      // semanal sin información. Distinto del conjunto vacío que dejó un
+      // borrado, que sí se publica: ahí hay un ancla previa contra la que el
+      // vacío es una regresión.
       expect(result.anchor).toMatchObject({ patients: 0 });
+      expect(result.anchorRegression).toBe(false);
+      expect(result.status).toBe('OK');
       expect(h.alerter.anchorPublished).not.toHaveBeenCalled();
     });
 
@@ -433,12 +437,67 @@ describe('IntegrityService', () => {
 
       // Las verificaciones por paciente pasan: la cadena es coherente.
       expect(result.failures).toEqual([]);
-      expect(result.status).toBe('OK');
-      // Lo único que la delata es el ancla.
+      // Lo único que la delata es el ancla, y eso alcanza para que la corrida NO
+      // se registre como sana: `lastPublishedAnchor()` filtra por OK, así que una
+      // fila OK acá haría que la corrida siguiente adoptara la raíz manipulada
+      // como línea de base y el job diera verde para siempre.
       expect(result.anchorRegression).toBe(true);
-      expect(createdCheck(h).details).toMatchObject({
-        anchor_regression: true,
+      expect(result.status).toBe('ANCHOR_REGRESSION');
+      expect(createdCheck(h)).toMatchObject({
+        status: 'ANCHOR_REGRESSION',
+        // Sigue siendo 0: no hay ninguna inconsistencia por paciente que listar.
+        inconsistencies_found: 0,
+        details: expect.objectContaining({ anchor_regression: true }),
       });
+      // La alerta que corresponde es la del ancla, no la de inconsistencias:
+      // esa mandaría un mensaje que dice "0 inconsistencia(s)".
+      expect(h.alerter.inconsistencyDetected).not.toHaveBeenCalled();
+      expect(h.alerter.anchorPublished).toHaveBeenCalledTimes(1);
+    });
+
+    it('la corrida con regresión no queda como línea de base de la siguiente', async () => {
+      // La corrida siguiente busca su referencia con `status: 'OK'`. Si la fila
+      // de la regresión entrara en esa búsqueda, la raíz manipulada pasaría a ser
+      // el punto de comparación: la alarma sonaría una vez y se silenciaría sola.
+      const chain = buildChain(PACIENTE_A, 3);
+      const anclaPrevia = computeAnchor([
+        { patientId: PACIENTE_A, sequenceNumber: 3, headHash: 'f'.repeat(64) },
+      ]);
+      const h = harness({ [PACIENTE_A]: chain }, {}, [
+        { details: { anchor: anclaPrevia } },
+      ]);
+
+      await h.service.run();
+
+      const [args] = h.prisma.integrityCheck.findMany.mock.calls[0] as [
+        { where: { status: string } },
+      ];
+      expect(args.where).toEqual({ status: 'OK' });
+      expect(createdCheck(h).status).not.toBe('OK');
+    });
+
+    it('publica el ancla cuando el borrado total dejó el conjunto vacío', async () => {
+      // Alguien borra TODAS las filas de clinical_record_entries y de
+      // chain_head_snapshots: no queda nada que verificar, no hay failures y el
+      // conjunto anclado queda vacío. El mensaje semanal tiene que salir igual —
+      // es la única copia fuera de la base, y callarla dejaría un hueco en la
+      // serie publicada justo en la semana del incidente.
+      const anclaPrevia = computeAnchor([
+        {
+          patientId: PACIENTE_A,
+          sequenceNumber: 100,
+          headHash: 'f'.repeat(64),
+        },
+      ]);
+      const h = harness({}, {}, [{ details: { anchor: anclaPrevia } }]);
+
+      const result = await h.service.run();
+
+      expect(result.failures).toEqual([]);
+      expect(result.anchor).toMatchObject({ patients: 0, entries: 0 });
+      expect(result.anchorRegression).toBe(true);
+      expect(result.status).toBe('ANCHOR_REGRESSION');
+      expect(h.alerter.anchorPublished).toHaveBeenCalledTimes(1);
     });
 
     it('no marca regresión cuando la cadena simplemente creció', async () => {

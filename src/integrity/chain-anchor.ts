@@ -61,11 +61,17 @@ export interface ChainAnchor {
 }
 
 /**
- * Raíz de una corrida vacía: `sha256("")`.
+ * Raíz del conjunto vacío: `sha256("")`.
  *
- * Está nombrada en vez de quedar implícita porque es lo que va a publicar el job
- * hasta que ENG-57 escriba la primera entrada de HC, y conviene poder
- * reconocerla de un vistazo en el canal en vez de sospechar de ella.
+ * Está nombrada en vez de quedar implícita porque es un valor que se puede
+ * llegar a ver publicado y conviene reconocerlo de un vistazo. El job NO manda
+ * el mensaje semanal cuando la base todavía no tiene ninguna HC —anclar el
+ * conjunto vacío sería un mensaje sin información—, pero sí lo manda cuando el
+ * conjunto quedó vacío después de haber tenido pacientes: eso no es una base
+ * nueva, es un borrado, y es exactamente lo que el ancla existe para contar.
+ *
+ * O sea: esta raíz en el canal significa "no queda ninguna cadena", y hay que
+ * mirar si antes había alguna.
  */
 export const EMPTY_ANCHOR_ROOT = createHash('sha256').update('').digest('hex');
 

@@ -43,7 +43,11 @@ Y hay una alerta más, que no es de un paciente sino de toda la corrida:
 |---|---|
 | 🚨 *La raíz se movió sin explicación* | El ancla (ENG-123) cambió **sin que la HC haya crecido**, aunque todas las cadenas verificaron bien |
 
-Esa es la que agarra al atacante que tocó también la base de comparación. Ver
+Esa es la que agarra al atacante que tocó también la base de comparación. Queda
+registrada con `status = 'ANCHOR_REGRESSION'` e `inconsistencies_found = 0`: no
+hay ninguna inconsistencia por paciente que listar, y por eso no es
+`INCONSISTENT` — pero tampoco es `OK`, porque la búsqueda de la línea de base
+filtra por `OK` y adoptar la raíz sospechada blanquearía la manipulación. Ver
 [Cuando la raíz del ancla no coincide](#cuando-la-raíz-del-ancla-no-coincide).
 
 ## Qué hacer cuando suena la alerta
@@ -111,6 +115,18 @@ Un caso benigno posible antes de asumir lo peor: una **restauración de backup**
 puede dejar la base con menos entradas y una raíz distinta. Si hubo una, es la
 explicación; igual conviene dejarlo asentado.
 
+**La alerta se va a repetir todas las semanas**, igual que la de una cadena rota
+y por el mismo motivo: la línea de base sigue siendo la última raíz sana, no la
+sospechada, así que la corrida siguiente vuelve a marcar la diferencia. No se
+silencia sola. Para cerrarla hay que resolver el incidente y dejar registrada una
+corrida `OK`.
+
+Un caso extremo que entra por acá: **si alguien vacía `clinical_record_entries` y
+`chain_head_snapshots`**, no queda ninguna cadena que verificar y el job publica
+igual el ancla del conjunto vacío (`e3b0c442…`, el SHA-256 de la cadena vacía),
+marcada como regresión. Cero pacientes después de una serie de semanas con miles
+no es una base nueva: es un borrado.
+
 ## Si la alerta es `⚠️ la verificación no pudo correr`
 
 La integridad **no quedó verificada** esa semana. Suele ser el secret
@@ -127,9 +143,9 @@ pnpm run verify:integrity
 DATABASE_URL="postgresql://..." pnpm run verify:integrity
 ```
 
-Sale con código `0` si todo verificó y `1` si hay inconsistencias **o** si la
-corrida no pudo terminar. Sin `SLACK_WEBHOOK_URL` verifica y registra igual, solo
-que no alerta.
+Sale con código `0` si todo verificó y `1` si hay inconsistencias, si la raíz del
+ancla regresó **o** si la corrida no pudo terminar. Sin `SLACK_WEBHOOK_URL`
+verifica y registra igual, solo que no alerta.
 
 ## Secrets que necesita el workflow
 

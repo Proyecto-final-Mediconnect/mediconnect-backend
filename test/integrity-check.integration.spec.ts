@@ -22,7 +22,10 @@ import {
   type ChainEntry,
   type ChainEntryInput,
 } from '../src/common/hash-chain/hash-chain';
-import { computeAnchor } from '../src/integrity/chain-anchor';
+import {
+  computeAnchor,
+  EMPTY_ANCHOR_ROOT,
+} from '../src/integrity/chain-anchor';
 import { IntegrityService } from '../src/integrity/integrity.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import type { IntegrityAlerter } from '../src/integrity/integrity-alerter';
@@ -594,12 +597,87 @@ describe('Job de verificación de integridad (integration)', () => {
 
       // ENG-85 no ve nada: la cadena es coherente y coincide con el snapshot.
       expect(segunda.failures).toEqual([]);
-      expect(segunda.status).toBe('OK');
 
       // El ancla sí: la raíz cambió y el total de entradas no subió.
       expect(segunda.anchor?.root).not.toBe(primera.anchor?.root);
       expect(segunda.anchor?.entries).toBe(primera.anchor?.entries);
       expect(segunda.anchorRegression).toBe(true);
+
+      // Y la corrida NO se registra como sana, aunque no haya inconsistencias
+      // por paciente: la fila con la raíz manipulada no puede entrar en la
+      // búsqueda de la línea de base.
+      expect(segunda.status).toBe('ANCHOR_REGRESSION');
+      const fila = await prisma.integrityCheck.findUniqueOrThrow({
+        where: { id: segunda.checkId },
+      });
+      expect(fila.status).toBe('ANCHOR_REGRESSION');
+      expect(fila.inconsistencies_found).toBe(0);
+    });
+
+    it('sigue alertando la semana siguiente: la raíz manipulada no pasa a ser la referencia', async () => {
+      // El complemento del test anterior. Si la corrida con regresión quedara
+      // como `OK`, la corrida siguiente la tomaría como línea de base, la
+      // comparación cerraría y el job reportaría verde sobre el estado
+      // manipulado: la alarma sonaría UNA vez y se silenciaría sola.
+      const { patientId } = await seedChain(4);
+      await service.run();
+
+      await prisma.$executeRaw`
+        delete from clinical_record_entries where patient_id = ${patientId}::uuid`;
+
+      let previousHash = GENESIS_HASH;
+      let head = '';
+      for (let i = 1; i <= 4; i++) {
+        const entry = appendEntry(
+          entryInput(patientId, i, i === 2 ? 999 : 60 + i),
+          previousHash,
+        );
+        await insertEntry(entry);
+        previousHash = entry.contentHash;
+        head = entry.contentHash;
+      }
+      await prisma.$executeRaw`
+        update chain_head_snapshots
+           set head_hash = ${head}, sequence_number = 4
+         where patient_id = ${patientId}::uuid`;
+
+      const segunda = await service.run();
+      expect(segunda.anchorRegression).toBe(true);
+
+      // Tercera corrida, sin tocar nada más: la base ya está "estable" en la
+      // versión del atacante. La referencia sigue siendo la raíz sana.
+      const tercera = await service.run();
+
+      expect(tercera.failures).toEqual([]);
+      expect(tercera.anchor?.root).toBe(segunda.anchor?.root);
+      expect(tercera.anchorRegression).toBe(true);
+      expect(tercera.status).toBe('ANCHOR_REGRESSION');
+    });
+
+    it('publica el ancla cuando el borrado total dejó el conjunto vacío', async () => {
+      // Se borran las dos tablas: no queda nada que verificar y el conjunto
+      // anclado queda vacío. El mensaje semanal tiene que salir igual — es la
+      // única copia fuera de la base, y callarla dejaría un hueco en la serie
+      // publicada exactamente en la semana del incidente.
+      await seedChain(5);
+      const primera = await service.run();
+      expect(primera.status).toBe('OK');
+      expect(alerter.anchors).toHaveLength(1);
+
+      await prisma.clinicalRecordEntry.deleteMany();
+      await prisma.chainHeadSnapshot.deleteMany();
+
+      const segunda = await service.run();
+
+      // No hay pacientes que recorrer, así que tampoco hay `failures`.
+      expect(segunda.patientsChecked).toBe(0);
+      expect(segunda.failures).toEqual([]);
+      expect(segunda.anchor).toMatchObject({ patients: 0, entries: 0 });
+      expect(segunda.anchor?.root).toBe(EMPTY_ANCHOR_ROOT);
+      expect(segunda.anchorRegression).toBe(true);
+      expect(segunda.status).toBe('ANCHOR_REGRESSION');
+      expect(alerter.anchors).toHaveLength(2);
+      expect(alerter.alerts).toEqual([]);
     });
 
     it('no ancla una corrida con inconsistencias', async () => {
