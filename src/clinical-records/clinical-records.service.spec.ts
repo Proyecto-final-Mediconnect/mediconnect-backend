@@ -63,6 +63,7 @@ describe('ClinicalRecordsService', () => {
   let prisma: {
     appointment: { findFirst: jest.Mock };
     consultation: { findFirst: jest.Mock };
+    professional: { findMany: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
       findMany: jest.Mock;
@@ -78,6 +79,15 @@ describe('ClinicalRecordsService', () => {
       },
       consultation: {
         findFirst: jest.fn().mockResolvedValue({ id: 'consulta-1' }),
+      },
+      professional: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            profile_id: PROFESSIONAL,
+            first_name: 'Ana',
+            last_name: 'García',
+          },
+        ]),
       },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -255,6 +265,83 @@ describe('ClinicalRecordsService', () => {
 
     it('una HC vacía es una lista vacía, no un error', async () => {
       await expect(service.listForPatient('jwt', PATIENT)).resolves.toEqual([]);
+    });
+
+    describe('autor de cada entrada (ENG-59)', () => {
+      const OTRO_PROFESIONAL = '44444444-4444-4444-8444-444444444444';
+
+      /** Fila cruda como la devuelve PostgREST. */
+      function storedRow(id: string, professionalId: string) {
+        return {
+          id,
+          patient_id: PATIENT,
+          professional_id: professionalId,
+          sequence_number: 1,
+          entry_type: 'CONSULTA',
+          fhir_resource_type: 'ClinicalImpression',
+          content: { resourceType: 'ClinicalImpression' },
+          consultation_id: null,
+          corrects_entry_id: null,
+          created_at: NOW.toISOString(),
+          content_hash: 'a'.repeat(64),
+          previous_hash: '0'.repeat(64),
+        };
+      }
+
+      it('resuelve el nombre del profesional que firmó', async () => {
+        order.mockResolvedValue({
+          data: [storedRow('e1', PROFESSIONAL)],
+          error: null,
+        });
+
+        const [entry] = await service.listForPatient('jwt', PATIENT);
+
+        expect(entry.professional).toEqual({
+          firstName: 'Ana',
+          lastName: 'García',
+        });
+      });
+
+      it('los resuelve en una sola consulta, no una por entrada', async () => {
+        // Una HC con veinte asientos de tres profesionales son tres nombres.
+        order.mockResolvedValue({
+          data: [
+            storedRow('e1', PROFESSIONAL),
+            storedRow('e2', PROFESSIONAL),
+            storedRow('e3', OTRO_PROFESIONAL),
+          ],
+          error: null,
+        });
+
+        await service.listForPatient('jwt', PATIENT);
+
+        expect(prisma.professional.findMany).toHaveBeenCalledTimes(1);
+        expect(prisma.professional.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { profile_id: { in: [PROFESSIONAL, OTRO_PROFESIONAL] } },
+          }),
+        );
+      });
+
+      it('deja el autor en null si no tiene perfil, sin romper la lista', async () => {
+        // Es una historia clínica: mejor la entrada sin el nombre que una
+        // pantalla en blanco.
+        order.mockResolvedValue({
+          data: [storedRow('e1', OTRO_PROFESIONAL)],
+          error: null,
+        });
+
+        const [entry] = await service.listForPatient('jwt', PATIENT);
+
+        expect(entry.professional).toBeNull();
+        expect(entry.id).toBe('e1');
+      });
+
+      it('no consulta profesionales cuando la HC está vacía', async () => {
+        await service.listForPatient('jwt', PATIENT);
+
+        expect(prisma.professional.findMany).not.toHaveBeenCalled();
+      });
     });
   });
 
