@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   InternalServerErrorException,
@@ -27,6 +28,7 @@ import {
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
+const CONSULTATION = '33333333-3333-4333-8333-333333333333';
 const NOW = new Date('2026-08-27T12:00:00.000Z');
 
 function newEntry(overrides: Partial<NewClinicalEntry> = {}): NewClinicalEntry {
@@ -60,6 +62,7 @@ describe('ClinicalRecordsService', () => {
   let service: ClinicalRecordsService;
   let prisma: {
     appointment: { findFirst: jest.Mock };
+    consultation: { findFirst: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
       findMany: jest.Mock;
@@ -72,6 +75,9 @@ describe('ClinicalRecordsService', () => {
     prisma = {
       appointment: {
         findFirst: jest.fn().mockResolvedValue({ id: 'turno-1' }),
+      },
+      consultation: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'consulta-1' }),
       },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -318,7 +324,7 @@ describe('ClinicalRecordsService', () => {
       expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
     });
 
-    it('acepta un turno cancelado o pasado', async () => {
+    it('acepta un turno pasado: se puede ampliar el registro después', async () => {
       // "Durante y después de la consulta": quien atendió hace un mes sigue
       // teniendo que poder ampliar el registro.
       prisma.appointment.findFirst.mockResolvedValue({ id: 'turno-viejo' });
@@ -326,9 +332,73 @@ describe('ClinicalRecordsService', () => {
       await expect(
         service.addEntryAsProfessional(PROFESSIONAL, PATIENT, form, NOW),
       ).resolves.toMatchObject({ sequenceNumber: 1 });
-      // El filtro no mira el estado del turno, solo la relación.
-      const where = prisma.appointment.findFirst.mock.calls[0][0].where;
-      expect(where).not.toHaveProperty('status');
+    });
+
+    it('no cuenta un turno cancelado o liberado como vínculo', async () => {
+      // Un turno que nunca ocurrió no es una atención. Sin este filtro, un
+      // paciente que reserva y se arrepiente cinco minutos después le habilita a
+      // ese profesional escribir en su HC para siempre — y lo que escriba no se
+      // puede borrar.
+      const where = (): Record<string, unknown> =>
+        prisma.appointment.findFirst.mock.calls[0][0].where as Record<
+          string,
+          unknown
+        >;
+
+      prisma.appointment.findFirst.mockResolvedValue({ id: 'turno-atendido' });
+      await service.addEntryAsProfessional(PROFESSIONAL, PATIENT, form, NOW);
+
+      expect(where().status).toEqual({
+        in: ['RESERVADO_SIN_PAGAR', 'CONFIRMADO', 'COMPLETADO', 'NO_ASISTIO'],
+      });
+    });
+
+    describe('consulta referenciada', () => {
+      const conConsulta = { ...form, consultationId: CONSULTATION };
+
+      it('rechaza una consulta que no es de este par', async () => {
+        // La FK solo exige que el id exista: sin este chequeo, la HC de un
+        // paciente podía quedar apuntando a la consulta de otro, y como la tabla
+        // es append-only ese cruce no se deshace.
+        prisma.consultation.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.addEntryAsProfessional(
+            PROFESSIONAL,
+            PATIENT,
+            conConsulta,
+            NOW,
+          ),
+        ).rejects.toThrow(BadRequestException);
+        expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+      });
+
+      it('la busca por el turno del par, no solo por id', async () => {
+        await service.addEntryAsProfessional(
+          PROFESSIONAL,
+          PATIENT,
+          conConsulta,
+          NOW,
+        );
+
+        expect(prisma.consultation.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: {
+              id: CONSULTATION,
+              appointment: {
+                professional_id: PROFESSIONAL,
+                patient_id: PATIENT,
+              },
+            },
+          }),
+        );
+      });
+
+      it('no la consulta cuando la entrada no referencia ninguna', async () => {
+        await service.addEntryAsProfessional(PROFESSIONAL, PATIENT, form, NOW);
+
+        expect(prisma.consultation.findFirst).not.toHaveBeenCalled();
+      });
     });
 
     it('encadena contra la cabeza existente de esa HC', async () => {
