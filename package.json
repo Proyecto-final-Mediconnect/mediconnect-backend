@@ -25,6 +25,7 @@
     "verify:integrity": "node --env-file-if-exists=.env --import tsx scripts/verify-integrity.ts",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "node --env-file-if-exists=.env --import tsx prisma/seed.ts",
+    "db:seed:demo": "node --env-file-if-exists=.env --import tsx prisma/seed-demo.ts",
     "db:setup": "prisma migrate deploy && pnpm run db:seed",
     "db:reset": "prisma migrate reset --force",
     "db:studio": "prisma studio",
