@@ -198,16 +198,69 @@ describe('Catálogo público (integration)', () => {
 
   it('filtra por especialidad resolviendo la junction N:M', async () => {
     const result = await service.listProfessionals(
-      query({ specialtyId: specialtyIds['Cardiología'], limit: 50 }),
+      query({ specialtyId: [specialtyIds['Cardiología']], limit: 50 }),
     );
 
     expect(result.data.map((c) => c.firstName)).toEqual(['Ana', 'Carla']);
     expect(result.meta.total).toBe(2);
   });
 
+  it('con varias especialidades devuelve la unión, sin repetir a nadie', async () => {
+    // Cardiología: Ana y Carla. Pediatría: Bruno y Elena. Carla además tiene
+    // Clínica Médica, así que si la junction se resolviera con un join sin
+    // deduplicar, aparecería dos veces al sumar esa tercera.
+    const result = await service.listProfessionals(
+      query({
+        specialtyId: [
+          specialtyIds['Cardiología'],
+          specialtyIds['Pediatría'],
+          specialtyIds['Clínica Médica'],
+        ],
+        limit: 50,
+      }),
+    );
+
+    expect(result.data.map((c) => c.firstName)).toEqual([
+      'Ana',
+      'Bruno',
+      'Carla',
+      'Diego',
+      'Elena',
+    ]);
+    expect(result.meta.total).toBe(5);
+  });
+
+  it('dos especialidades traen la unión de las dos, no la intersección', async () => {
+    const result = await service.listProfessionals(
+      query({
+        specialtyId: [specialtyIds['Cardiología'], specialtyIds['Pediatría']],
+        limit: 50,
+      }),
+    );
+
+    // Con AND (intersección) esto daría vacío: nadie tiene las dos.
+    expect(result.data.map((c) => c.firstName)).toEqual([
+      'Ana',
+      'Bruno',
+      'Carla',
+      'Elena',
+    ]);
+  });
+
+  it('la lista vacía de especialidades devuelve el catálogo completo', async () => {
+    const sinFiltro = await service.listProfessionals(query({ limit: 50 }));
+    const listaVacia = await service.listProfessionals(
+      query({ specialtyId: [], limit: 50 }),
+    );
+
+    expect(listaVacia.data.map((c) => c.firstName)).toEqual(
+      sinFiltro.data.map((c) => c.firstName),
+    );
+  });
+
   it('devuelve todas las especialidades del profesional y la principal alfabética', async () => {
     const result = await service.listProfessionals(
-      query({ specialtyId: specialtyIds['Clínica Médica'], limit: 50 }),
+      query({ specialtyId: [specialtyIds['Clínica Médica']], limit: 50 }),
     );
 
     const carla = result.data.find((c) => c.firstName === 'Carla');
@@ -244,7 +297,7 @@ describe('Catálogo público (integration)', () => {
   it('combina especialidad y precio', async () => {
     const result = await service.listProfessionals(
       query({
-        specialtyId: specialtyIds['Cardiología'],
+        specialtyId: [specialtyIds['Cardiología']],
         maxPrice: 6000,
         limit: 50,
       }),

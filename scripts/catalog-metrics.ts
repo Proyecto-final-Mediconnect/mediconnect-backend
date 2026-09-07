@@ -184,7 +184,7 @@ async function main(): Promise<void> {
   await measure('filtro por especialidad', {
     page: 1,
     limit: 20,
-    specialtyId: specialtyIds['Cardiología'],
+    specialtyId: [specialtyIds['Cardiología']],
   });
   await measure('filtro por rango de precio', {
     page: 1,
@@ -195,9 +195,21 @@ async function main(): Promise<void> {
   await measure('especialidad + precio', {
     page: 1,
     limit: 20,
-    specialtyId: specialtyIds['Cardiología'],
+    specialtyId: [specialtyIds['Cardiología']],
     minPrice: 5000,
     maxPrice: 15000,
+  });
+
+  // El filtro múltiple es el caso nuevo: `in` sobre la junction en vez de una
+  // igualdad. Se mide aparte para poder compararlo contra el de una sola.
+  await measure('filtro por tres especialidades', {
+    page: 1,
+    limit: 20,
+    specialtyId: [
+      specialtyIds['Cardiología'],
+      specialtyIds['Clínica Médica'],
+      specialtyIds['Pediatría'],
+    ],
   });
   await measure('filtro sin resultados', { page: 1, limit: 20, minPrice: 999999 });
 
