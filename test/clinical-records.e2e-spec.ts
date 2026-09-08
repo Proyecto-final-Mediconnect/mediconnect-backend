@@ -27,6 +27,8 @@ describe('Historia clínica (e2e)', () => {
   let publicKey: CryptoKey;
   let prisma: {
     appointment: { findFirst: jest.Mock };
+    consultation: { findFirst: jest.Mock };
+    professional: { findMany: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
       findMany: jest.Mock;
@@ -45,6 +47,19 @@ describe('Historia clínica (e2e)', () => {
     prisma = {
       appointment: {
         findFirst: jest.fn().mockResolvedValue({ id: 'turno-1' }),
+      },
+      consultation: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'consulta-1' }),
+      },
+      // ENG-59: el service resuelve el nombre de quien firmó cada entrada.
+      professional: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            profile_id: PROFESSIONAL,
+            first_name: 'Ana',
+            last_name: 'García',
+          },
+        ]),
       },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),

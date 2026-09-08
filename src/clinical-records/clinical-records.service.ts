@@ -67,11 +67,32 @@ export interface NewClinicalEntry {
   correctsEntryId?: string | null;
 }
 
+/** Autor del asiento, resuelto para poder mostrarlo (ENG-59). */
+export interface EntryAuthor {
+  firstName: string;
+  lastName: string;
+}
+
 /** Entrada ya sellada y guardada. */
 export interface ClinicalEntryView {
   id: string;
   patientId: string;
   professionalId: string;
+  /**
+   * Quién firmó el asiento, por nombre (ENG-59).
+   *
+   * El criterio pide que cada entrada muestre "el profesional", y un UUID no es
+   * el profesional para un paciente. Se resuelve por Prisma y no con un embed de
+   * PostgREST por el mismo motivo que `findCounterpart` en la videoconsulta: RLS
+   * solo deja a cada uno leer su propia fila de `professionals`, así que a un
+   * paciente el embed le devolvería `null`. La autorización ya la hizo RLS al
+   * decidir qué entradas ve.
+   *
+   * `null` si el profesional no tiene perfil cargado — no debería pasar, pero es
+   * una historia clínica: mejor mostrar la entrada sin el nombre que romper la
+   * pantalla entera.
+   */
+  professional: EntryAuthor | null;
   sequenceNumber: number;
   entryType: string;
   fhirResourceType: string;
@@ -166,6 +187,14 @@ export class ClinicalRecordsService {
     // entrada sale reportada como manipulada estando intacta.
     const createdAt = new Date(now.getTime());
 
+    // Se resuelve ACÁ y no dentro del `try`: no depende de la fila, y si fallara
+    // adentro el error quedaría tapado por el catch del `create` — el usuario
+    // vería "no pudimos guardar la entrada" con la fila ya escrita.
+    const author =
+      (await this.resolveAuthors([entry.professionalId])).get(
+        entry.professionalId,
+      ) ?? null;
+
     for (let attempt = 1; attempt <= MAX_APPEND_ATTEMPTS; attempt++) {
       const head = await this.headOf(entry.patientId);
 
@@ -202,7 +231,7 @@ export class ClinicalRecordsService {
           select: ENTRY_SELECT,
         });
 
-        return toView(row);
+        return toView(row, author);
       } catch (error) {
         if ((error as { code?: string }).code !== PRISMA_UNIQUE_VIOLATION) {
           this.logger.error(
@@ -399,8 +428,45 @@ export class ClinicalRecordsService {
       );
     }
 
-    return ((data ?? []) as unknown as (ChainEntryRow & { id: string })[]).map(
-      toView,
+    const rows = (data ?? []) as unknown as (ChainEntryRow & { id: string })[];
+    const authors = await this.resolveAuthors(
+      rows.map((row) => row.professional_id),
+    );
+
+    return rows.map((row) =>
+      toView(row, authors.get(row.professional_id) ?? null),
+    );
+  }
+
+  /**
+   * Nombres de los profesionales que firmaron estas entradas (ENG-59).
+   *
+   * Una sola consulta para toda la lista, no una por entrada: una HC con veinte
+   * asientos de tres profesionales distintos son tres nombres, no veinte
+   * lecturas.
+   *
+   * Va por Prisma —que corre como owner— y no por un embed de PostgREST porque
+   * RLS solo deja a cada uno leer su propia fila de `professionals`: a un
+   * paciente el embed le devolvería `null` en todas. Quién puede ver estas
+   * entradas ya lo decidió RLS al listarlas; esto solo completa el nombre de
+   * quien las firmó.
+   */
+  private async resolveAuthors(
+    professionalIds: string[],
+  ): Promise<Map<string, EntryAuthor>> {
+    const unique = [...new Set(professionalIds)];
+    if (unique.length === 0) return new Map();
+
+    const rows = await this.prisma.professional.findMany({
+      where: { profile_id: { in: unique } },
+      select: { profile_id: true, first_name: true, last_name: true },
+    });
+
+    return new Map(
+      rows.map((row) => [
+        row.profile_id,
+        { firstName: row.first_name, lastName: row.last_name },
+      ]),
     );
   }
 
@@ -426,13 +492,17 @@ export class ClinicalRecordsService {
 }
 
 /** Fila de la base → objeto que sale por la API. */
-function toView(row: ChainEntryRow & { id: string }): ClinicalEntryView {
+function toView(
+  row: ChainEntryRow & { id: string },
+  author: EntryAuthor | null = null,
+): ClinicalEntryView {
   const entry: ChainEntry = chainEntryFromRow(row);
 
   return {
     id: row.id,
     patientId: entry.patientId,
     professionalId: entry.professionalId,
+    professional: author,
     sequenceNumber: entry.sequenceNumber,
     entryType: entry.entryType,
     fhirResourceType: entry.fhirResourceType,
