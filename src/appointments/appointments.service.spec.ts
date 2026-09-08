@@ -213,21 +213,36 @@ describe('AppointmentsService', () => {
     });
 
     it('rechaza un rango más largo que el tope por consulta', async () => {
+      // El tope acompaña al horizonte (60 + 2). Se pide desde antes de hoy para
+      // pasarse de largo sin chocar primero contra el horizonte.
       await expect(
         service.getAvailability(
           PRO_ID,
-          { from: MONDAY, to: '2026-09-30' },
+          { from: '2026-08-01', to: '2026-10-15' },
           NOW,
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('rechaza pedir más allá del horizonte de 4 semanas', async () => {
-      // Hoy + 28 días ya está fuera: el horizonte incluye hoy.
+    it('acepta el horizonte completo en una sola consulta', async () => {
+      // La pantalla de reserva pide los 60 días de una vez y pagina en el
+      // cliente. Si el tope por consulta bajara del horizonte, eso sería un 400.
+      const view = await service.getAvailability(
+        PRO_ID,
+        { from: '2026-08-17', to: '2026-10-15' },
+        NOW,
+      );
+
+      expect(view.days).toHaveLength(BOOKING_HORIZON_DAYS);
+    });
+
+    it('rechaza pedir más allá del horizonte', async () => {
+      // Hoy + 60 días ya está fuera: el horizonte incluye hoy, así que el último
+      // día publicado es 2026-10-15.
       await expect(
         service.getAvailability(
           PRO_ID,
-          { from: '2026-09-10', to: '2026-09-14' },
+          { from: '2026-10-14', to: '2026-10-16' },
           NOW,
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
@@ -310,8 +325,9 @@ describe('AppointmentsService', () => {
     });
 
     it('rechaza un horario más allá del horizonte', async () => {
+      // Último día publicado: 2026-10-15 (hoy + 59). El 16 ya está afuera.
       await expect(
-        service.book(TOKEN, PATIENT_ID, { ...VALID, date: '2026-09-21' }, NOW),
+        service.book(TOKEN, PATIENT_ID, { ...VALID, date: '2026-10-16' }, NOW),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
@@ -428,8 +444,8 @@ describe('AppointmentsService', () => {
       ).rejects.toBeInstanceOf(InternalServerErrorException);
     });
 
-    it('el horizonte configurado son 4 semanas', () => {
-      expect(BOOKING_HORIZON_DAYS).toBe(28);
+    it('el horizonte configurado son dos meses', () => {
+      expect(BOOKING_HORIZON_DAYS).toBe(60);
     });
   });
 
