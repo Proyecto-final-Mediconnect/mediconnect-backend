@@ -10,10 +10,15 @@ import { ClinicalRecordsService } from './clinical-records.service';
  *
  * El `GET` sirve a los dos roles con una sola ruta —RLS decide qué devuelve—, así
  * que ENG-59 (el paciente ve su HC) y ENG-60 (el profesional ve la del paciente)
- * son pantallas sobre este endpoint, no endpoints nuevos. ENG-60 sí tiene que
- * traer su política de RLS si decide ampliar lo que ve el profesional, y ENG-100
- * (corregir una entrada) su propio POST, porque una corrección referencia a la
- * entrada corregida.
+ * son pantallas sobre este endpoint, no endpoints nuevos.
+ *
+ * ENG-60 resolvió el alcance que ENG-57 había dejado abierto: el profesional con
+ * un turno no cancelado ve la HC **completa** del paciente, no solo lo que firmó.
+ * Trajo su política de RLS, el 403 sin relación y el registro del acceso en
+ * `audit_logs`.
+ *
+ * Queda ENG-100 (corregir una entrada) con su propio POST, porque una corrección
+ * referencia a la entrada corregida.
  */
 @Module({
   controllers: [ClinicalRecordsController],
