@@ -37,7 +37,8 @@ export class ClinicalRecordsController {
    * Un solo endpoint para los dos roles: **RLS decide qué devuelve**. El paciente
    * ve su historia completa (`..._select_own_patient`, ENG-57), el profesional ve
    * lo que firmó (`..._select_own_authored`, ENG-58) y, desde ENG-60, el
-   * profesional con un turno no cancelado con ese paciente ve la HC **completa**,
+   * profesional con un turno que implique consulta con ese paciente
+   * (`RESERVADO_SIN_PAGAR`, `CONFIRMADO` o `COMPLETADO`) ve la HC **completa**,
    * incluidas las entradas de otros profesionales.
    *
    * **ENG-60 cambió el 404-por-omisión de ENG-58 por un 403 explícito.** Este
@@ -45,8 +46,12 @@ export class ClinicalRecordsController {
    * tercero que ese paciente tiene historia clínica. El criterio de aceptación de
    * ENG-60 pide 403 sin relación vigente y esa es la decisión que se tomó: el
    * profesional que se equivoca de paciente merece un error claro, no una HC
-   * vacía que parece un paciente sin historia. Se asume el costo de revelar que
-   * el UUID corresponde a un paciente real.
+   * vacía que parece un paciente sin historia.
+   *
+   * El cambio **no cuesta privacidad**: la respuesta es idéntica —mismo status y
+   * mismo mensaje— para un paciente real sin relación, para un profesional y para
+   * un UUID que no existe, así que no hay forma de usarla para averiguar si un id
+   * corresponde a alguien.
    *
    * Una HC realmente vacía sigue devolviendo `[]` con 200.
    *

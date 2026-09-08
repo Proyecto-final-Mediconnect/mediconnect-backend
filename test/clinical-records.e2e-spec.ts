@@ -257,11 +257,15 @@ describe('Historia clínica (e2e)', () => {
      * que se tomó: al profesional que se equivoca de paciente, una HC vacía le
      * parece un paciente sin historia, que es peor que un error claro.
      *
-     * Lo que se pierde es real y queda anotado: un 403 confirma que ese UUID es
-     * un paciente. Como es un UUID v4 no adivinable, la superficie es acotada.
+     * No cuesta privacidad: la respuesta es idéntica —mismo status y mismo
+     * mensaje— para un paciente real sin relación, para un profesional y para un
+     * UUID que no existe, así que no sirve para averiguar si un id corresponde a
+     * alguien. (Una versión anterior de este comentario asumía ese costo.)
      */
     it('un profesional sin turno con el paciente recibe 403', async () => {
       prisma.appointment.findFirst.mockResolvedValue(null);
+      // Tampoco firmó ninguna entrada: sin ninguno de los dos caminos, es 403.
+      prisma.clinicalRecordEntry.findFirst.mockResolvedValue(null);
 
       await request(app.getHttpServer())
         .get(url())
@@ -269,9 +273,45 @@ describe('Historia clínica (e2e)', () => {
         .expect(403);
     });
 
+    it('quien firmó una entrada puede releerla aunque ya no tenga turno', async () => {
+      // `assertCanWriteFor` acepta turnos en CUALQUIER estado, así que un
+      // profesional puede escribir un asiento y que después el turno se cancele.
+      // Con el gate cortando solo por turno, quedaba sin poder releer lo que él
+      // mismo escribió — el escenario que la migración de ENG-58 dice evitar,
+      // reintroducido por el 403.
+      //
+      // No ve de más: sin turno vigente, RLS le devuelve únicamente sus propias
+      // entradas por `..._select_own_authored`.
+      prisma.appointment.findFirst.mockResolvedValue(null);
+      prisma.clinicalRecordEntry.findFirst.mockResolvedValue({ id: 'e1' });
+
+      await request(app.getHttpServer())
+        .get(url())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(200);
+    });
+
+    it('el dueño lee su HC con el UUID en mayúsculas', async () => {
+      // `ParseUUIDPipe` acepta mayúsculas (su regex lleva flag `/i`) y hay
+      // clientes que las mandan: `UUID().uuidString` de iOS devuelve mayúsculas.
+      // Comparando con `===` a secas, el dueño de la historia caía por el camino
+      // del profesional y recibía 403 sobre su propia HC.
+      prisma.appointment.findFirst.mockResolvedValue(null);
+      prisma.clinicalRecordEntry.findFirst.mockResolvedValue(null);
+
+      await request(app.getHttpServer())
+        .get(url(PATIENT.toUpperCase()))
+        .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+        .expect(200);
+
+      // Y se audita como lectura propia, no como acceso de un profesional.
+      expect(prisma.auditLog.create).toHaveBeenCalled();
+    });
+
     it('no audita ni consulta la HC cuando corta con 403', async () => {
       // El 403 sale antes de tocar la historia: no hay lectura que auditar.
       prisma.appointment.findFirst.mockResolvedValue(null);
+      prisma.clinicalRecordEntry.findFirst.mockResolvedValue(null);
 
       await request(app.getHttpServer())
         .get(url())

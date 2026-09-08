@@ -218,7 +218,16 @@ describe('Historia clínica con cadena de hash (integration)', () => {
   function createAppointment(
     patientId: string,
     professionalId: string,
-    status: 'RESERVADO_SIN_PAGAR' | 'CONFIRMADO' | 'CANCELADO' | 'COMPLETADO',
+    // La union completa de `appointment_status`, no un subconjunto: si manana se
+    // agrega un estado, el compilador obliga a venir a decidir si habilita la HC
+    // en vez de dejar que la policy lo resuelva sola por descarte.
+    status:
+      | 'RESERVADO_SIN_PAGAR'
+      | 'CONFIRMADO'
+      | 'CANCELADO'
+      | 'COMPLETADO'
+      | 'NO_ASISTIO'
+      | 'LIBERADO',
   ) {
     return prisma.appointment.create({
       data: {
@@ -273,6 +282,31 @@ describe('Historia clínica con cadena de hash (integration)', () => {
         ${entry.previousHash},
         ${entry.createdAt}
       )`;
+  }
+
+  /**
+   * Agrega una entrada firmada por `professionalId`, encadenada a la cabeza real
+   * de la HC del paciente. Sirve para el caso "escribio y despues perdio el
+   * turno": lo que ve tiene que ser exactamente lo suyo.
+   */
+  async function appendEntryAs(patientId: string, professionalId: string) {
+    const [head] = await prisma.$queryRaw<
+      { content_hash: string; sequence_number: bigint }[]
+    >`
+      select content_hash, sequence_number
+        from clinical_record_entries
+       where patient_id = ${patientId}::uuid
+       order by sequence_number desc
+       limit 1`;
+
+    const sequenceNumber = head ? Number(head.sequence_number) + 1 : 1;
+    const entry = appendEntry(
+      { ...entryInput(patientId, sequenceNumber), professionalId },
+      head?.content_hash ?? GENESIS_HASH,
+    );
+
+    await insert(entry);
+    return entry;
   }
 
   /** Siembra `n` entradas selladas para un paciente nuevo. */
@@ -542,6 +576,50 @@ describe('Historia clínica con cadena de hash (integration)', () => {
         const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
 
         expect(Number(n)).toBe(0);
+      });
+
+      it('un turno LIBERADO NO habilita el acceso', async () => {
+        // LIBERADO es el turno reservado y nunca pagado que da de baja el job de
+        // ENG-101. Nunca hubo consulta: un profesional al que le liberaron un
+        // turno no puede quedarse con la HC completa del paciente para siempre.
+        // Hoy ningun turno llega a este estado, asi que el test es lo que evita
+        // que la fuga se encienda sola el dia que ENG-101 exista.
+        const { patientId } = await seedChain(3);
+        const tratante = await createProfessional();
+        await createAppointment(patientId, tratante, 'LIBERADO');
+
+        const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
+
+        expect(Number(n)).toBe(0);
+      });
+
+      it('un turno NO_ASISTIO NO habilita el acceso', async () => {
+        // Hubo turno pero no hubo consulta. Leer la HC COMPLETA —con las entradas
+        // de todos los demas profesionales— es una decision de privacidad, y un
+        // paciente que no se presento no la habilita.
+        const { patientId } = await seedChain(3);
+        const tratante = await createProfessional();
+        await createAppointment(patientId, tratante, 'NO_ASISTIO');
+
+        const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
+
+        expect(Number(n)).toBe(0);
+      });
+
+      it('sin turno habilitante todavia ve lo que el mismo firmo', async () => {
+        // La policy de ENG-58 sigue viva y las de RLS se suman: al profesional no
+        // se le pierde lo suyo por no tener turno vigente. Es lo que hace que
+        // cerrar LIBERADO y NO_ASISTIO no deje a nadie sin poder releer su propio
+        // asiento.
+        const { patientId } = await seedChain(2);
+        const tratante = await createProfessional();
+        await createAppointment(patientId, tratante, 'CANCELADO');
+        await appendEntryAs(patientId, tratante);
+
+        const [{ n }] = await asUser(tratante, (tx) => count(tx, patientId));
+
+        // Las 2 del seed las firmo otro profesional y no las ve; la suya si.
+        expect(Number(n)).toBe(1);
       });
 
       it('un turno cancelado no anula otro turno vigente', async () => {

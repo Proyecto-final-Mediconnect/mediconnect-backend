@@ -28,10 +28,27 @@
 -- Un turno **reservado en adelante**: desde que el paciente reserva, ya es su
 -- paciente. Eso incluye `RESERVADO_SIN_PAGAR`, `CONFIRMADO` y `COMPLETADO`.
 --
--- El único estado que NO habilita es `CANCELADO`: un turno que se dio de baja
--- nunca constituyó una relación de atención, y sin este filtro un turno cancelado
--- hace un año le daría a ese profesional la HC completa del paciente para
--- siempre.
+-- Se escribe como lista de estados HABILITADOS y no como `<> 'CANCELADO'`, y la
+-- diferencia importa: `appointment_status` tiene seis valores y una condición
+-- por descarte le abre la HC a todo estado que se agregue después. Con la lista
+-- explícita, un valor nuevo empieza cerrado y hay que venir acá a decidir.
+--
+-- Los tres que quedan afuera, y por qué:
+--
+--   - `CANCELADO`: el turno se dio de baja, nunca hubo atención. Sin este filtro
+--     un turno cancelado hace un año le daría a ese profesional la HC completa
+--     del paciente para siempre.
+--   - `LIBERADO`: turno reservado y nunca pagado que el job da de baja (ENG-101).
+--     Nunca hubo encuentro; ENG-54 ya lo agrupa con `CANCELADO` a los efectos de
+--     ocupar la agenda. Hoy ningún turno llega a este estado —el único valor que
+--     se escribe en producción es `CANCELADO`—, así que esto cierra la fuga
+--     ANTES de que ENG-101 la encienda sola, sin motivo para volver a mirar este
+--     archivo.
+--   - `NO_ASISTIO`: hubo turno pero no hubo consulta. Leer la historia clínica
+--     COMPLETA de alguien —incluidas las entradas de todos los demás
+--     profesionales— es una decisión de privacidad, y un paciente que no se
+--     presentó no la habilita. Al profesional no se le pierde nada de lo suyo:
+--     `..._select_own_authored` (ENG-58) le sigue devolviendo lo que él firmó.
 --
 -- El acceso no caduca mientras el turno siga en pie: la continuidad de la
 -- atención es justamente lo que una HC longitudinal tiene que sostener.
@@ -48,7 +65,7 @@ create policy clinical_record_entries_select_assigned_professional
       from public.appointments a
       where a.patient_id = clinical_record_entries.patient_id
         and a.professional_id = auth.uid()
-        and a.status <> 'CANCELADO'
+        and a.status in ('RESERVADO_SIN_PAGAR', 'CONFIRMADO', 'COMPLETADO')
     )
   );
 
@@ -66,4 +83,4 @@ create policy clinical_record_entries_select_assigned_professional
 --;;
 create index if not exists appointments_patient_professional_idx
   on public.appointments (patient_id, professional_id)
-  where status <> 'CANCELADO';
+  where status in ('RESERVADO_SIN_PAGAR', 'CONFIRMADO', 'COMPLETADO');

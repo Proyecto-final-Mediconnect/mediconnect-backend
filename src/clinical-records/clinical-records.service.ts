@@ -100,6 +100,24 @@ const MAX_APPEND_ATTEMPTS = 3;
 /** `P2002` de Prisma: violación de una restricción unique. */
 const PRISMA_UNIQUE_VIOLATION = 'P2002';
 
+/**
+ * Estados de turno que habilitan a un profesional a leer la HC del paciente.
+ *
+ * **Lista de habilitados y no de excluidos**, y la diferencia importa:
+ * `appointment_status` tiene seis valores y un `!== 'CANCELADO'` le abre la HC a
+ * todo estado que se agregue después. Así, un valor nuevo empieza cerrado.
+ *
+ * Espeja `clinical_record_entries_select_assigned_professional` (ENG-60): si
+ * cambia uno, tiene que cambiar el otro. Los tres que quedan afuera —`CANCELADO`,
+ * `LIBERADO` y `NO_ASISTIO`— tienen en común que nunca hubo consulta; el detalle
+ * de cada uno está en la migración.
+ */
+const READABLE_APPOINTMENT_STATUSES = [
+  'RESERVADO_SIN_PAGAR',
+  'CONFIRMADO',
+  'COMPLETADO',
+] as const;
+
 const ENTRY_SELECT = {
   id: true,
   patient_id: true,
@@ -350,10 +368,14 @@ export class ClinicalRecordsService {
    *
    * Sobre el 403: ENG-58 devolvía `[]` a propósito, para no confirmarle a un
    * tercero que ese paciente tiene historia clínica. El criterio de aceptación de
-   * ENG-60 pide 403 explícito y esa es la decisión que se tomó, asumiendo el
-   * costo: un 403 revela que el `patientId` corresponde a un paciente real. Se
-   * mitiga en parte con el mensaje, que no dice nada de la HC en sí. Como el
-   * `patientId` es un UUID v4 no adivinable, la superficie es acotada.
+   * ENG-60 pide 403 explícito y esa es la decisión que se tomó.
+   *
+   * **No cuesta privacidad**: el 403 es el mismo para un paciente real sin
+   * relación, para un profesional y para un UUID que no existe — mismo status y
+   * mismo mensaje, que además no dice nada de la HC en sí. No hay ninguna
+   * respuesta que distinga "existe" de "no existe", así que esto no es un oráculo
+   * de existencia. (Una versión anterior de este comentario decía lo contrario y
+   * asumía un costo que el código no tiene.)
    */
   async readPatientRecord(
     viewerId: string,
@@ -363,7 +385,14 @@ export class ClinicalRecordsService {
     // `patientId` es el `profile_id` del paciente, el mismo valor que el `sub`
     // del JWT: si coinciden, es el paciente leyendo su propia historia y no hay
     // relación que validar.
-    const asPatient = viewerId === patientId;
+    //
+    // Se normaliza a minúsculas antes de comparar. `ParseUUIDPipe` acepta el UUID
+    // en mayúsculas (su regex lleva flag `/i`) y un cliente puede mandarlo así
+    // —`UUID().uuidString` de iOS devuelve mayúsculas—. Con `===` a secas, el
+    // dueño de la historia caía por el camino del profesional y recibía 403 sobre
+    // su propia HC. Postgres compara `uuid` sin distinguir mayúsculas, así que RLS
+    // habría respondido bien: el bug era solo de esta comparación en JS.
+    const asPatient = viewerId.toLowerCase() === patientId.toLowerCase();
 
     if (!asPatient) {
       await this.assertCanReadFor(viewerId, patientId);
@@ -379,21 +408,32 @@ export class ClinicalRecordsService {
   /**
    * Exige una relación profesional-paciente para leer la HC.
    *
-   * **Relación = un turno que no esté cancelado.** Desde que el paciente reserva
-   * ya es su paciente, así que valen `RESERVADO_SIN_PAGAR`, `CONFIRMADO` y
-   * `COMPLETADO`; `CANCELADO` no, porque un turno dado de baja nunca constituyó
-   * una atención.
+   * **Relación = un turno en un estado que implique consulta** (ver
+   * `READABLE_APPOINTMENT_STATUSES`) **o haber firmado alguna entrada de esa
+   * historia.**
    *
    * Espeja la condición de la política de RLS a propósito. La política es la
    * autoridad —es la que protege la lectura por PostgREST—, pero sola solo puede
    * devolver cero filas, y de una HC vacía no se distingue. Esta consulta es la
    * que permite contestar 403.
    *
-   * Es más amplia que `assertCanWriteFor` (ENG-58), que acepta cualquier turno
-   * sin mirar el estado. La diferencia es deliberada: leer de más es un problema
-   * de privacidad y escribir de más es un problema de integridad de la HC, así
-   * que el filtro por estado va del lado de la lectura. Unificar los dos criterios
-   * merece su propio ticket.
+   * ## Por qué el segundo camino
+   *
+   * `assertCanWriteFor` (ENG-58) acepta turnos en CUALQUIER estado, así que un
+   * profesional puede escribir un asiento y que después el turno se cancele. Sin
+   * este chequeo, el gate cortaba con 403 antes de que RLS entrara en juego y ese
+   * profesional no podía releer lo que él mismo había escrito — el escenario que
+   * la migración de ENG-58 dice estar evitando, reintroducido por acá. Se
+   * reproducía sin ninguna feature futura: turno confirmado, POST de la entrada,
+   * el paciente cancela, GET → 403.
+   *
+   * No amplía lo que se ve: quien pasa solo por este camino no tiene turno
+   * vigente, así que `..._select_assigned_professional` no lo alcanza y RLS le
+   * devuelve únicamente sus propias entradas vía `..._select_own_authored`. El
+   * gate deja de mentirle; la autorización sigue siendo de la base.
+   *
+   * La consulta extra corre SOLO cuando no hay turno habilitante: el camino
+   * normal —el profesional que está atendiendo— sigue costando una sola lectura.
    */
   private async assertCanReadFor(
     professionalId: string,
@@ -403,12 +443,19 @@ export class ClinicalRecordsService {
       where: {
         professional_id: professionalId,
         patient_id: patientId,
-        status: { not: 'CANCELADO' },
+        status: { in: [...READABLE_APPOINTMENT_STATUSES] },
       },
       select: { id: true },
     });
 
-    if (!appointment) {
+    if (appointment) return;
+
+    const authored = await this.prisma.clinicalRecordEntry.findFirst({
+      where: { patient_id: patientId, professional_id: professionalId },
+      select: { id: true },
+    });
+
+    if (!authored) {
       throw new ForbiddenException(
         'Solo podés ver la historia clínica de un paciente con el que tenés un turno.',
       );
