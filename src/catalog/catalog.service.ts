@@ -114,12 +114,18 @@ export class CatalogService {
 function buildWhere(
   query: ListProfessionalsQueryDto,
 ): Prisma.ProfessionalWhereInput {
-  const { specialtyId, minPrice, maxPrice } = query;
+  const { specialtyId: specialtyIds, minPrice, maxPrice } = query;
 
   const where: Prisma.ProfessionalWhereInput = { status: PUBLIC_STATUS };
 
-  if (specialtyId) {
-    where.specialties = { some: { specialty_id: specialtyId } };
+  // `some` + `in` es un OR: entra el profesional que tenga AL MENOS UNA de las
+  // especialidades elegidas. Con una sola, es exactamente la query de antes.
+  //
+  // El array vacío se trata como "sin filtro" y no como "ninguna especialidad":
+  // `in: []` no matchea nada y devolvería el catálogo vacío, que no es lo que
+  // significa destildar la última opción.
+  if (specialtyIds && specialtyIds.length > 0) {
+    where.specialties = { some: { specialty_id: { in: specialtyIds } } };
   }
 
   // `consultation_price` es nullable: al filtrar por rango, un profesional sin

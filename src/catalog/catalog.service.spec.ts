@@ -147,7 +147,7 @@ describe('CatalogService', () => {
       findMany.mockResolvedValue([]);
 
       const result = await service.listProfessionals(
-        query({ specialtyId: '22222222-2222-4222-8222-222222222222' }),
+        query({ specialtyId: ['22222222-2222-4222-8222-222222222222'] }),
       );
 
       expect(result.data).toEqual([]);
@@ -163,11 +163,35 @@ describe('CatalogService', () => {
     it('filtra por especialidad vía la junction', async () => {
       const specialtyId = '33333333-3333-4333-8333-333333333333';
 
-      await service.listProfessionals(query({ specialtyId }));
+      await service.listProfessionals(query({ specialtyId: [specialtyId] }));
 
       expect((findMany.mock.calls[0][0] as FindManyArgs).where).toMatchObject({
-        specialties: { some: { specialty_id: specialtyId } },
+        specialties: { some: { specialty_id: { in: [specialtyId] } } },
       });
+    });
+
+    it('con varias especialidades las combina en OR', async () => {
+      // El profesional entra si tiene ALGUNA de las elegidas. Con AND, sumar una
+      // segunda especialidad daría cero resultados casi siempre.
+      const cardio = '33333333-3333-4333-8333-333333333333';
+      const pediatria = '55555555-5555-4555-8555-555555555555';
+
+      await service.listProfessionals(
+        query({ specialtyId: [cardio, pediatria] }),
+      );
+
+      expect((findMany.mock.calls[0][0] as FindManyArgs).where).toMatchObject({
+        specialties: { some: { specialty_id: { in: [cardio, pediatria] } } },
+      });
+    });
+
+    it('una lista vacía es "sin filtro", no "ninguna especialidad"', async () => {
+      // `in: []` no matchea nada y vaciaría el catálogo. Destildar la última
+      // opción tiene que devolver a todos, no a ninguno.
+      await service.listProfessionals(query({ specialtyId: [] }));
+
+      const where = (findMany.mock.calls[0][0] as FindManyArgs).where;
+      expect(where).not.toHaveProperty('specialties');
     });
 
     it('aplica el rango de precio completo', async () => {
@@ -198,12 +222,12 @@ describe('CatalogService', () => {
       const specialtyId = '44444444-4444-4444-8444-444444444444';
 
       await service.listProfessionals(
-        query({ specialtyId, minPrice: 1000, maxPrice: 2000 }),
+        query({ specialtyId: [specialtyId], minPrice: 1000, maxPrice: 2000 }),
       );
 
       expect((findMany.mock.calls[0][0] as FindManyArgs).where).toMatchObject({
         status: 'VALIDADO',
-        specialties: { some: { specialty_id: specialtyId } },
+        specialties: { some: { specialty_id: { in: [specialtyId] } } },
         consultation_price: { gte: 1000, lte: 2000 },
       });
     });

@@ -51,18 +51,33 @@ import { CreateAppointmentDto } from './dto/create-appointment.dto';
 const BOOKABLE_STATUS = 'VALIDADO';
 
 /**
- * Hasta cuántos días adelante se puede ver y reservar. 28 = las 4 semanas del
- * criterio de aceptación, contadas desde hoy inclusive.
+ * Hasta cuántos días adelante se puede ver y reservar, contando hoy.
  *
  * Es un límite de negocio, no técnico: sin él, un paciente podría reservar un
  * turno para dentro de dos años sobre una agenda que el profesional va a cambiar
  * cincuenta veces antes.
+ *
+ * Eran 28 —las 4 semanas del criterio de aceptación original de ENG-54—, y se
+ * ampliaron a dos meses. Con cuatro semanas, un paciente que quería un control
+ * para "dentro de un mes y medio" simplemente no podía reservarlo: la pantalla
+ * no se lo ofrecía y no había forma de pedirlo. Sesenta días cubren el caso sin
+ * volver al problema de agendar sobre una agenda que todavía no existe.
+ *
+ * `mediconnect-web/src/features/appointments/lib/weeks.ts` tiene la misma
+ * constante para paginar sin preguntar. Si cambia una, tiene que cambiar la otra.
  */
-export const BOOKING_HORIZON_DAYS = 28;
+export const BOOKING_HORIZON_DAYS = 60;
 
-/** Tope de días que puede pedir una consulta de disponibilidad. Acota el trabajo
- *  por request; la pantalla pide de a una semana. */
-const MAX_RANGE_DAYS = 31;
+/**
+ * Tope de días que puede pedir una consulta de disponibilidad. Acota el trabajo
+ * por request.
+ *
+ * Tiene que dar para el horizonte ENTERO: la pantalla de reserva pide todo de
+ * una vez y pagina en el cliente, porque es la única forma de saber en qué
+ * página está el primer día con lugar sin haberla pedido antes. Con un tope
+ * menor que el horizonte, esa consulta sería un 400.
+ */
+const MAX_RANGE_DAYS = BOOKING_HORIZON_DAYS + 2;
 
 /** Estados que ocupan el horario. Espeja el índice parcial
  *  `appointments_professional_active_slot_key` de la migración: si cambia uno,
@@ -182,7 +197,7 @@ export class AppointmentsService {
 
     if (dto.date < today || dto.date > horizon) {
       throw new BadRequestException(
-        `Solo se pueden reservar turnos dentro de las próximas ${BOOKING_HORIZON_DAYS / 7} semanas.`,
+        `Solo se pueden reservar turnos dentro de los próximos ${BOOKING_HORIZON_DAYS} días.`,
       );
     }
 
@@ -441,7 +456,7 @@ export class AppointmentsService {
     const horizon = addDays(todayInArgentina(now), BOOKING_HORIZON_DAYS - 1);
     if (to > horizon) {
       throw new BadRequestException(
-        `La agenda se publica hasta ${horizon} (${BOOKING_HORIZON_DAYS / 7} semanas).`,
+        `La agenda se publica hasta ${horizon} (${BOOKING_HORIZON_DAYS} días).`,
       );
     }
 
