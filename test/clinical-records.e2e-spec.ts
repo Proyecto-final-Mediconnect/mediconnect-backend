@@ -27,6 +27,8 @@ describe('Historia clínica (e2e)', () => {
   let publicKey: CryptoKey;
   let prisma: {
     appointment: { findFirst: jest.Mock };
+    consultation: { findFirst: jest.Mock };
+    professional: { findMany: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
       findMany: jest.Mock;
