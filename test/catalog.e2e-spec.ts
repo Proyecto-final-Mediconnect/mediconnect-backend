@@ -98,10 +98,29 @@ describe('Catálogo público (e2e)', () => {
         expect.objectContaining({
           page: 2,
           limit: 5,
-          specialtyId,
+          // Un solo valor también llega como lista: el service ve siempre la
+          // misma forma, venga uno o vengan cinco.
+          specialtyId: [specialtyId],
           minPrice: 100,
           maxPrice: 900,
         }),
+      );
+    });
+
+    it('acumula el specialtyId repetido en una lista', async () => {
+      const cardio = '33333333-3333-4333-8333-333333333333';
+      const pediatria = '55555555-5555-4555-8555-555555555555';
+
+      await request(app.getHttpServer())
+        .get('/catalog/professionals')
+        // supertest serializa el array como `specialtyId[]=…`; se arma el query
+        // string a mano para probar la forma real que manda el navegador con
+        // `URLSearchParams.append`.
+        .query(`specialtyId=${cardio}&specialtyId=${pediatria}`)
+        .expect(200);
+
+      expect(listProfessionals).toHaveBeenCalledWith(
+        expect.objectContaining({ specialtyId: [cardio, pediatria] }),
       );
     });
 
@@ -116,6 +135,20 @@ describe('Catálogo público (e2e)', () => {
         .get('/catalog/professionals')
         .query(params)
         .expect(400);
+    });
+
+    it('400 si una especialidad de la lista no es UUID', async () => {
+      // Query string crudo a propósito: con `.query({ specialtyId: [...] })`
+      // supertest serializa `specialtyId[0]=…` y el 400 podría venir de
+      // `forbidNonWhitelisted` en vez de la validación del UUID.
+      await request(app.getHttpServer())
+        .get('/catalog/professionals')
+        .query(
+          'specialtyId=33333333-3333-4333-8333-333333333333&specialtyId=cardiologia',
+        )
+        .expect(400);
+
+      expect(listProfessionals).not.toHaveBeenCalled();
     });
 
     it('400 ante un query param desconocido (whitelist)', () => {
