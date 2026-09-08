@@ -9,6 +9,7 @@
  */
 import {
   appendEntry,
+  chainEntryFromRow,
   canonicalJson,
   computeContentHash,
   GENESIS_HASH,
@@ -238,5 +239,50 @@ describe('verifyChain', () => {
 
     expect(result.valid).toBe(true);
     expect(elapsedMs).toBeLessThan(1000);
+  });
+});
+
+describe('chainEntryFromRow', () => {
+  /** Fila con `created_at` en el formato de cada origen. */
+  function row(createdAt: Date | string) {
+    return {
+      patient_id: PATIENT,
+      professional_id: '22222222-2222-4222-8222-222222222222',
+      sequence_number: 1n as unknown as bigint,
+      entry_type: 'CONSULTA',
+      fhir_resource_type: 'ClinicalImpression',
+      content: { resourceType: 'ClinicalImpression' },
+      consultation_id: null,
+      corrects_entry_id: null,
+      created_at: createdAt,
+      content_hash: 'a'.repeat(64),
+      previous_hash: '0'.repeat(64),
+    };
+  }
+
+  const INSTANTE = '2026-08-27T12:00:00.000Z';
+
+  it('acepta el `Date` que devuelve Prisma', () => {
+    expect(chainEntryFromRow(row(new Date(INSTANTE))).createdAt).toEqual(
+      new Date(INSTANTE),
+    );
+  });
+
+  it('acepta el string ISO que devuelve PostgREST', () => {
+    // PostgREST serializa a JSON, así que la fecha llega como string. Sin
+    // normalizar, listar una HC con al menos una entrada terminaba en 500 al
+    // llamar `.toISOString()` sobre un string.
+    expect(chainEntryFromRow(row(INSTANTE)).createdAt).toEqual(
+      new Date(INSTANTE),
+    );
+  });
+
+  it('los dos orígenes producen el mismo instante, así el hash no cambia', () => {
+    const desdePrisma = chainEntryFromRow(row(new Date(INSTANTE)));
+    const desdePostgrest = chainEntryFromRow(row(INSTANTE));
+
+    expect(computeContentHash(desdePostgrest, GENESIS_HASH)).toBe(
+      computeContentHash(desdePrisma, GENESIS_HASH),
+    );
   });
 });

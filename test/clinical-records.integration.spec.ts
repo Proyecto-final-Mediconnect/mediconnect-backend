@@ -45,14 +45,19 @@ import {
  * Todos los recursos FHIR son sintéticos.
  */
 
-const MIGRATION = join(
-  __dirname,
-  '..',
-  'prisma',
-  'migrations',
-  '20260826120000_eng57_clinical_record_chain',
-  'migration.sql',
-);
+function migration(name: string): string {
+  return join(__dirname, '..', 'prisma', 'migrations', name, 'migration.sql');
+}
+
+/**
+ * Las dos migraciones de la HC, en orden. ENG-58 agrega una politica de SELECT
+ * sobre la tabla que cierra ENG-57, asi que la segunda no tiene sentido sin la
+ * primera.
+ */
+const MIGRATIONS = [
+  migration('20260826120000_eng57_clinical_record_chain'),
+  migration('20260826140000_eng58_professional_authored_entries'),
+];
 
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
 
@@ -100,11 +105,13 @@ describe('Historia clínica con cadena de hash (integration)', () => {
       'grant usage on schema public to authenticated',
     );
 
-    for (const statement of readFileSync(MIGRATION, 'utf8').split(
-      /^--;;[ \t]*\r?$/m,
-    )) {
-      const sql = statement.trim();
-      if (sql.length > 0) await prisma.$executeRawUnsafe(sql);
+    for (const file of MIGRATIONS) {
+      for (const statement of readFileSync(file, 'utf8').split(
+        /^--;;[ \t]*\r?$/m,
+      )) {
+        const sql = statement.trim();
+        if (sql.length > 0) await prisma.$executeRawUnsafe(sql);
+      }
     }
   }, 60_000);
 
@@ -115,6 +122,7 @@ describe('Historia clínica con cadena de hash (integration)', () => {
       'drop trigger if exists clinical_record_entries_no_mutation on public.clinical_record_entries',
       'drop trigger if exists clinical_record_entries_link on public.clinical_record_entries',
       'drop policy if exists clinical_record_entries_select_own_patient on public.clinical_record_entries',
+      'drop policy if exists clinical_record_entries_select_own_authored on public.clinical_record_entries',
       'alter table public.clinical_record_entries no force row level security',
       'alter table public.clinical_record_entries disable row level security',
     ]) {
@@ -370,14 +378,37 @@ describe('Historia clínica con cadena de hash (integration)', () => {
       expect(Number(n)).toBe(0);
     });
 
-    it('el profesional que la escribió tampoco la ve todavía', async () => {
-      // ENG-60 es quien decide y agrega esa política. Hasta entonces, la HC es
-      // solo del paciente — cerrar y abrir después es más fácil que al revés.
+    it('el profesional ve las entradas que él firmó (ENG-58)', async () => {
+      // Es la mitad que no tiene discusión: nadie necesita decidir nada de
+      // alcance para afirmar que un profesional puede releer lo que escribió.
       const { patientId } = await seedChain(2);
 
       const [{ n }] = await asUser(PROFESSIONAL, (tx) => count(tx, patientId));
 
+      expect(Number(n)).toBe(2);
+    });
+
+    it('otro profesional NO ve esas entradas', async () => {
+      // Lo que sigue abierto para ENG-60 es si un profesional ve las entradas de
+      // OTROS profesionales del mismo paciente. Hoy no, y este test lo fija.
+      const { patientId } = await seedChain(2);
+      const otroProfesional = randomUUID();
+
+      const [{ n }] = await asUser(otroProfesional, (tx) =>
+        count(tx, patientId),
+      );
+
       expect(Number(n)).toBe(0);
+    });
+
+    it('las dos políticas se suman: el paciente sigue viendo todo', async () => {
+      // En RLS las policies de un mismo comando se combinan con OR. Agregar la
+      // de ENG-58 no puede haberle restado nada al paciente.
+      const { patientId } = await seedChain(3);
+
+      const [{ n }] = await asUser(patientId, (tx) => count(tx, patientId));
+
+      expect(Number(n)).toBe(3);
     });
 
     it('authenticated no puede insertar aunque la cadena cierre', async () => {
