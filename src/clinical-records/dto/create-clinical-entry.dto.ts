@@ -1,4 +1,24 @@
-import { IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { Transform } from 'class-transformer';
+import {
+  IsIn,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+} from 'class-validator';
+
+/**
+ * Recorta el valor antes de validar.
+ *
+ * Va antes de `@IsNotEmpty()` a propósito: sin esto, `"   "` pasaría la
+ * validación y quedaría un asiento con un motivo en blanco — y como la tabla es
+ * append-only, esa fila no se puede borrar nunca.
+ */
+const trimmed = () =>
+  Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  );
 
 /**
  * Nueva entrada de historia clínica (ENG-58).
@@ -39,13 +59,16 @@ export class CreateClinicalEntryDto {
 
   /** Motivo de consulta. Es el único obligatorio: un asiento sin motivo no dice
    *  nada, y los otros tres pueden no aplicar según el tipo de entrada. */
+  @trimmed()
   @IsString()
+  @IsNotEmpty({ message: 'El motivo es obligatorio' })
   @MaxLength(2000, {
     message: 'El motivo no puede superar los 2000 caracteres',
   })
   reason!: string;
 
   /** Evolución y hallazgos. */
+  @trimmed()
   @IsOptional()
   @IsString()
   @MaxLength(5000, {
@@ -53,6 +76,7 @@ export class CreateClinicalEntryDto {
   })
   findings?: string;
 
+  @trimmed()
   @IsOptional()
   @IsString()
   @MaxLength(2000, {
@@ -61,6 +85,7 @@ export class CreateClinicalEntryDto {
   diagnosis?: string;
 
   /** Plan o indicaciones. */
+  @trimmed()
   @IsOptional()
   @IsString()
   @MaxLength(5000, {

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -66,11 +67,32 @@ export interface NewClinicalEntry {
   correctsEntryId?: string | null;
 }
 
+/** Autor del asiento, resuelto para poder mostrarlo (ENG-59). */
+export interface EntryAuthor {
+  firstName: string;
+  lastName: string;
+}
+
 /** Entrada ya sellada y guardada. */
 export interface ClinicalEntryView {
   id: string;
   patientId: string;
   professionalId: string;
+  /**
+   * Quién firmó el asiento, por nombre (ENG-59).
+   *
+   * El criterio pide que cada entrada muestre "el profesional", y un UUID no es
+   * el profesional para un paciente. Se resuelve por Prisma y no con un embed de
+   * PostgREST por el mismo motivo que `findCounterpart` en la videoconsulta: RLS
+   * solo deja a cada uno leer su propia fila de `professionals`, así que a un
+   * paciente el embed le devolvería `null`. La autorización ya la hizo RLS al
+   * decidir qué entradas ve.
+   *
+   * `null` si el profesional no tiene perfil cargado — no debería pasar, pero es
+   * una historia clínica: mejor mostrar la entrada sin el nombre que romper la
+   * pantalla entera.
+   */
+  professional: EntryAuthor | null;
   sequenceNumber: number;
   entryType: string;
   fhirResourceType: string;
@@ -101,16 +123,41 @@ const MAX_APPEND_ATTEMPTS = 3;
 const PRISMA_UNIQUE_VIOLATION = 'P2002';
 
 /**
- * Estados de turno que habilitan a un profesional a leer la HC del paciente.
+ * Estados de turno que habilitan **escribir** en la HC del paciente.
+ *
+ * Se excluyen `CANCELADO` y `LIBERADO`: un turno que nunca ocurrió no es una
+ * atención. Sin eso, un paciente que reserva y se arrepiente cinco minutos
+ * después le deja a ese profesional permiso permanente de escritura sobre su
+ * historia clínica — y como la tabla es append-only, lo que escriba no se puede
+ * borrar.
+ *
+ * `COMPLETADO` y `NO_ASISTIO` sí entran, y `RESERVADO_SIN_PAGAR`/`CONFIRMADO`
+ * también: el asiento se puede escribir durante la consulta, no solo después.
+ */
+const ATTENDED_STATUSES = [
+  'RESERVADO_SIN_PAGAR',
+  'CONFIRMADO',
+  'COMPLETADO',
+  'NO_ASISTIO',
+] as const;
+
+/**
+ * Estados de turno que habilitan a un profesional a **leer** la HC del paciente
+ * (ENG-60).
  *
  * **Lista de habilitados y no de excluidos**, y la diferencia importa:
  * `appointment_status` tiene seis valores y un `!== 'CANCELADO'` le abre la HC a
  * todo estado que se agregue después. Así, un valor nuevo empieza cerrado.
  *
- * Espeja `clinical_record_entries_select_assigned_professional` (ENG-60): si
- * cambia uno, tiene que cambiar el otro. Los tres que quedan afuera —`CANCELADO`,
- * `LIBERADO` y `NO_ASISTIO`— tienen en común que nunca hubo consulta; el detalle
- * de cada uno está en la migración.
+ * Espeja `clinical_record_entries_select_assigned_professional`: si cambia uno,
+ * tiene que cambiar el otro.
+ *
+ * **Es más chico que `ATTENDED_STATUSES`, y es deliberado.** `NO_ASISTIO`
+ * habilita a escribir —"el paciente no vino" es un asiento legítimo— pero no a
+ * leer la historia COMPLETA, con las entradas de todos los demás profesionales:
+ * eso es una decisión de privacidad, y un paciente que no se presentó no la
+ * habilita. La asimetría no deja a nadie encerrado, porque `assertCanReadFor`
+ * admite además a quien firmó alguna entrada de esa historia.
  */
 const READABLE_APPOINTMENT_STATUSES = [
   'RESERVADO_SIN_PAGAR',
@@ -164,6 +211,14 @@ export class ClinicalRecordsService {
     // entrada sale reportada como manipulada estando intacta.
     const createdAt = new Date(now.getTime());
 
+    // Se resuelve ACÁ y no dentro del `try`: no depende de la fila, y si fallara
+    // adentro el error quedaría tapado por el catch del `create` — el usuario
+    // vería "no pudimos guardar la entrada" con la fila ya escrita.
+    const author =
+      (await this.resolveAuthors([entry.professionalId])).get(
+        entry.professionalId,
+      ) ?? null;
+
     for (let attempt = 1; attempt <= MAX_APPEND_ATTEMPTS; attempt++) {
       const head = await this.headOf(entry.patientId);
 
@@ -200,7 +255,7 @@ export class ClinicalRecordsService {
           select: ENTRY_SELECT,
         });
 
-        return toView(row);
+        return toView(row, author);
       } catch (error) {
         if ((error as { code?: string }).code !== PRISMA_UNIQUE_VIOLATION) {
           this.logger.error(
@@ -242,6 +297,14 @@ export class ClinicalRecordsService {
   ): Promise<ClinicalEntryView> {
     await this.assertCanWriteFor(professionalId, patientId);
 
+    if (dto.consultationId) {
+      await this.assertConsultationBelongsTo(
+        dto.consultationId,
+        professionalId,
+        patientId,
+      );
+    }
+
     // El mismo instante se usa para el recurso FHIR y para `created_at`, que
     // entra a la preimagen del hash. Si se tomaran por separado, el `date` del
     // recurso y la fecha de la fila diferirían por unos milisegundos y el asiento
@@ -262,6 +325,41 @@ export class ClinicalRecordsService {
   }
 
   /**
+   * La consulta referenciada tiene que ser de un turno de este par.
+   *
+   * La FK de `consultation_id` solo exige que el id **exista**, así que sin este
+   * chequeo una entrada de la HC de A podía quedar apuntando a una consulta de
+   * B: dos historias clínicas cruzadas de forma permanente, porque la tabla es
+   * append-only y `consultation_id` entra a la preimagen del hash (ENG-45).
+   *
+   * También arregla el otro lado: un id inexistente moría como `P2003` dentro de
+   * `append()`, que solo trata `P2002`, y salía como un 500 "probá de nuevo en
+   * unos minutos" — invitando a reintentar algo que nunca iba a funcionar.
+   */
+  private async assertConsultationBelongsTo(
+    consultationId: string,
+    professionalId: string,
+    patientId: string,
+  ): Promise<void> {
+    const consultation = await this.prisma.consultation.findFirst({
+      where: {
+        id: consultationId,
+        appointment: {
+          professional_id: professionalId,
+          patient_id: patientId,
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!consultation) {
+      throw new BadRequestException(
+        'La consulta indicada no corresponde a un turno tuyo con este paciente.',
+      );
+    }
+  }
+
+  /**
    * Un profesional solo puede escribir en la HC de un paciente con el que tiene
    * o tuvo un turno.
    *
@@ -271,18 +369,26 @@ export class ClinicalRecordsService {
    * de negocio y cruza dos tablas, así que vive acá y no en una policy: RLS
    * decide sobre la fila que se toca, no sobre la relación entre dos personas.
    *
-   * Se aceptan turnos en **cualquier** estado, incluidos cancelados y pasados. El
-   * criterio de aceptación pide el formulario disponible "durante y después de la
-   * consulta", y un profesional que atendió a alguien hace un mes sigue teniendo
-   * que poder completar o ampliar ese registro. Lo que la regla frena es al
-   * profesional que nunca tuvo nada que ver con ese paciente.
+   * Se aceptan los turnos en curso y los pasados —ver `ATTENDED_STATUSES`—:
+   * el criterio de aceptación pide el formulario disponible "durante y después
+   * de la consulta", y un profesional que atendió a alguien hace un mes sigue
+   * teniendo que poder ampliar ese registro.
+   *
+   * Lo que NO cuenta es un turno `CANCELADO` o `LIBERADO`: ahí no hubo atención.
+   * Tomarlos como vínculo dejaría que un paciente que reservó y se arrepintió
+   * cinco minutos después le habilite a ese profesional escribir en su historia
+   * clínica para siempre.
    */
   private async assertCanWriteFor(
     professionalId: string,
     patientId: string,
   ): Promise<void> {
     const appointment = await this.prisma.appointment.findFirst({
-      where: { professional_id: professionalId, patient_id: patientId },
+      where: {
+        professional_id: professionalId,
+        patient_id: patientId,
+        status: { in: [...ATTENDED_STATUSES] },
+      },
       select: { id: true },
     });
 
@@ -350,8 +456,45 @@ export class ClinicalRecordsService {
       );
     }
 
-    return ((data ?? []) as unknown as (ChainEntryRow & { id: string })[]).map(
-      toView,
+    const rows = (data ?? []) as unknown as (ChainEntryRow & { id: string })[];
+    const authors = await this.resolveAuthors(
+      rows.map((row) => row.professional_id),
+    );
+
+    return rows.map((row) =>
+      toView(row, authors.get(row.professional_id) ?? null),
+    );
+  }
+
+  /**
+   * Nombres de los profesionales que firmaron estas entradas (ENG-59).
+   *
+   * Una sola consulta para toda la lista, no una por entrada: una HC con veinte
+   * asientos de tres profesionales distintos son tres nombres, no veinte
+   * lecturas.
+   *
+   * Va por Prisma —que corre como owner— y no por un embed de PostgREST porque
+   * RLS solo deja a cada uno leer su propia fila de `professionals`: a un
+   * paciente el embed le devolvería `null` en todas. Quién puede ver estas
+   * entradas ya lo decidió RLS al listarlas; esto solo completa el nombre de
+   * quien las firmó.
+   */
+  private async resolveAuthors(
+    professionalIds: string[],
+  ): Promise<Map<string, EntryAuthor>> {
+    const unique = [...new Set(professionalIds)];
+    if (unique.length === 0) return new Map();
+
+    const rows = await this.prisma.professional.findMany({
+      where: { profile_id: { in: unique } },
+      select: { profile_id: true, first_name: true, last_name: true },
+    });
+
+    return new Map(
+      rows.map((row) => [
+        row.profile_id,
+        { firstName: row.first_name, lastName: row.last_name },
+      ]),
     );
   }
 
@@ -419,13 +562,18 @@ export class ClinicalRecordsService {
    *
    * ## Por qué el segundo camino
    *
-   * `assertCanWriteFor` (ENG-58) acepta turnos en CUALQUIER estado, así que un
-   * profesional puede escribir un asiento y que después el turno se cancele. Sin
-   * este chequeo, el gate cortaba con 403 antes de que RLS entrara en juego y ese
-   * profesional no podía releer lo que él mismo había escrito — el escenario que
-   * la migración de ENG-58 dice estar evitando, reintroducido por acá. Se
-   * reproducía sin ninguna feature futura: turno confirmado, POST de la entrada,
-   * el paciente cancela, GET → 403.
+   * Escribir y leer no exigen lo mismo, así que hay estados en los que un
+   * profesional puede haber firmado un asiento y no calificar para leer:
+   *
+   *   - `NO_ASISTIO` está en `ATTENDED_STATUSES` pero no en
+   *     `READABLE_APPOINTMENT_STATUSES`.
+   *   - El estado del turno puede cambiar DESPUÉS de escribir: turno confirmado,
+   *     POST de la entrada, el paciente cancela.
+   *
+   * En los dos casos, sin este segundo camino el gate cortaba con 403 antes de
+   * que RLS entrara en juego y ese profesional no podía releer lo que él mismo
+   * había escrito — el escenario que la migración de ENG-58 dice estar evitando,
+   * reintroducido por acá.
    *
    * No amplía lo que se ve: quien pasa solo por este camino no tiene turno
    * vigente, así que `..._select_assigned_professional` no lo alcanza y RLS le
@@ -537,13 +685,17 @@ export class ClinicalRecordsService {
 }
 
 /** Fila de la base → objeto que sale por la API. */
-function toView(row: ChainEntryRow & { id: string }): ClinicalEntryView {
+function toView(
+  row: ChainEntryRow & { id: string },
+  author: EntryAuthor | null = null,
+): ClinicalEntryView {
   const entry: ChainEntry = chainEntryFromRow(row);
 
   return {
     id: row.id,
     patientId: entry.patientId,
     professionalId: entry.professionalId,
+    professional: author,
     sequenceNumber: entry.sequenceNumber,
     entryType: entry.entryType,
     fhirResourceType: entry.fhirResourceType,

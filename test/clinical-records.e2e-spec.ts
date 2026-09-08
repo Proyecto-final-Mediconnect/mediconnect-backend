@@ -28,6 +28,8 @@ describe('Historia clínica (e2e)', () => {
   let prisma: {
     appointment: { findFirst: jest.Mock };
     auditLog: { create: jest.Mock };
+    consultation: { findFirst: jest.Mock };
+    professional: { findMany: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
       findMany: jest.Mock;
@@ -51,6 +53,19 @@ describe('Historia clínica (e2e)', () => {
       // undefined y el GET contestaria 500, que es justamente el fallo cerrado
       // que el service tiene por diseno.
       auditLog: { create: jest.fn().mockResolvedValue({ id: 'audit-1' }) },
+      consultation: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'consulta-1' }),
+      },
+      // ENG-59: el service resuelve el nombre de quien firmó cada entrada.
+      professional: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            profile_id: PROFESSIONAL,
+            first_name: 'Ana',
+            last_name: 'García',
+          },
+        ]),
+      },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),
         findMany: jest.fn().mockResolvedValue([]),

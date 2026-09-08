@@ -274,7 +274,11 @@ export interface ChainEntryRow {
   content: unknown;
   consultation_id: string | null;
   corrects_entry_id: string | null;
-  created_at: Date;
+  /**
+   * `Date` cuando la fila viene de Prisma y **string ISO** cuando viene de
+   * PostgREST, que serializa a JSON. `chainEntryFromRow` normaliza las dos.
+   */
+  created_at: Date | string;
   content_hash: string;
   previous_hash: string;
 }
@@ -305,7 +309,10 @@ export function chainEntryFromRow(row: ChainEntryRow): ChainEntry {
     content: row.content,
     consultationId: row.consultation_id,
     correctsEntryId: row.corrects_entry_id,
-    createdAt: row.created_at,
+    // Normaliza el origen: PostgREST devuelve la fecha como string y Prisma
+    // como `Date`. Sin esto, `toView` llamaba `.toISOString()` sobre un string y
+    // listar una HC con al menos una entrada terminaba en 500.
+    createdAt: new Date(row.created_at),
     contentHash: row.content_hash,
     previousHash: row.previous_hash,
   };

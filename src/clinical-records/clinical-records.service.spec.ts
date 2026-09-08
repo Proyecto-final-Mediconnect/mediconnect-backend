@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   InternalServerErrorException,
@@ -27,6 +28,7 @@ import {
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
+const CONSULTATION = '33333333-3333-4333-8333-333333333333';
 const NOW = new Date('2026-08-27T12:00:00.000Z');
 
 function newEntry(overrides: Partial<NewClinicalEntry> = {}): NewClinicalEntry {
@@ -60,6 +62,8 @@ describe('ClinicalRecordsService', () => {
   let service: ClinicalRecordsService;
   let prisma: {
     appointment: { findFirst: jest.Mock };
+    consultation: { findFirst: jest.Mock };
+    professional: { findMany: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
       findMany: jest.Mock;
@@ -72,6 +76,18 @@ describe('ClinicalRecordsService', () => {
     prisma = {
       appointment: {
         findFirst: jest.fn().mockResolvedValue({ id: 'turno-1' }),
+      },
+      consultation: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'consulta-1' }),
+      },
+      professional: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            profile_id: PROFESSIONAL,
+            first_name: 'Ana',
+            last_name: 'García',
+          },
+        ]),
       },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -250,6 +266,83 @@ describe('ClinicalRecordsService', () => {
     it('una HC vacía es una lista vacía, no un error', async () => {
       await expect(service.listForPatient('jwt', PATIENT)).resolves.toEqual([]);
     });
+
+    describe('autor de cada entrada (ENG-59)', () => {
+      const OTRO_PROFESIONAL = '44444444-4444-4444-8444-444444444444';
+
+      /** Fila cruda como la devuelve PostgREST. */
+      function storedRow(id: string, professionalId: string) {
+        return {
+          id,
+          patient_id: PATIENT,
+          professional_id: professionalId,
+          sequence_number: 1,
+          entry_type: 'CONSULTA',
+          fhir_resource_type: 'ClinicalImpression',
+          content: { resourceType: 'ClinicalImpression' },
+          consultation_id: null,
+          corrects_entry_id: null,
+          created_at: NOW.toISOString(),
+          content_hash: 'a'.repeat(64),
+          previous_hash: '0'.repeat(64),
+        };
+      }
+
+      it('resuelve el nombre del profesional que firmó', async () => {
+        order.mockResolvedValue({
+          data: [storedRow('e1', PROFESSIONAL)],
+          error: null,
+        });
+
+        const [entry] = await service.listForPatient('jwt', PATIENT);
+
+        expect(entry.professional).toEqual({
+          firstName: 'Ana',
+          lastName: 'García',
+        });
+      });
+
+      it('los resuelve en una sola consulta, no una por entrada', async () => {
+        // Una HC con veinte asientos de tres profesionales son tres nombres.
+        order.mockResolvedValue({
+          data: [
+            storedRow('e1', PROFESSIONAL),
+            storedRow('e2', PROFESSIONAL),
+            storedRow('e3', OTRO_PROFESIONAL),
+          ],
+          error: null,
+        });
+
+        await service.listForPatient('jwt', PATIENT);
+
+        expect(prisma.professional.findMany).toHaveBeenCalledTimes(1);
+        expect(prisma.professional.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { profile_id: { in: [PROFESSIONAL, OTRO_PROFESIONAL] } },
+          }),
+        );
+      });
+
+      it('deja el autor en null si no tiene perfil, sin romper la lista', async () => {
+        // Es una historia clínica: mejor la entrada sin el nombre que una
+        // pantalla en blanco.
+        order.mockResolvedValue({
+          data: [storedRow('e1', OTRO_PROFESIONAL)],
+          error: null,
+        });
+
+        const [entry] = await service.listForPatient('jwt', PATIENT);
+
+        expect(entry.professional).toBeNull();
+        expect(entry.id).toBe('e1');
+      });
+
+      it('no consulta profesionales cuando la HC está vacía', async () => {
+        await service.listForPatient('jwt', PATIENT);
+
+        expect(prisma.professional.findMany).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('addEntryAsProfessional (ENG-58)', () => {
@@ -318,7 +411,7 @@ describe('ClinicalRecordsService', () => {
       expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
     });
 
-    it('acepta un turno cancelado o pasado', async () => {
+    it('acepta un turno pasado: se puede ampliar el registro después', async () => {
       // "Durante y después de la consulta": quien atendió hace un mes sigue
       // teniendo que poder ampliar el registro.
       prisma.appointment.findFirst.mockResolvedValue({ id: 'turno-viejo' });
@@ -326,9 +419,73 @@ describe('ClinicalRecordsService', () => {
       await expect(
         service.addEntryAsProfessional(PROFESSIONAL, PATIENT, form, NOW),
       ).resolves.toMatchObject({ sequenceNumber: 1 });
-      // El filtro no mira el estado del turno, solo la relación.
-      const where = prisma.appointment.findFirst.mock.calls[0][0].where;
-      expect(where).not.toHaveProperty('status');
+    });
+
+    it('no cuenta un turno cancelado o liberado como vínculo', async () => {
+      // Un turno que nunca ocurrió no es una atención. Sin este filtro, un
+      // paciente que reserva y se arrepiente cinco minutos después le habilita a
+      // ese profesional escribir en su HC para siempre — y lo que escriba no se
+      // puede borrar.
+      const where = (): Record<string, unknown> =>
+        prisma.appointment.findFirst.mock.calls[0][0].where as Record<
+          string,
+          unknown
+        >;
+
+      prisma.appointment.findFirst.mockResolvedValue({ id: 'turno-atendido' });
+      await service.addEntryAsProfessional(PROFESSIONAL, PATIENT, form, NOW);
+
+      expect(where().status).toEqual({
+        in: ['RESERVADO_SIN_PAGAR', 'CONFIRMADO', 'COMPLETADO', 'NO_ASISTIO'],
+      });
+    });
+
+    describe('consulta referenciada', () => {
+      const conConsulta = { ...form, consultationId: CONSULTATION };
+
+      it('rechaza una consulta que no es de este par', async () => {
+        // La FK solo exige que el id exista: sin este chequeo, la HC de un
+        // paciente podía quedar apuntando a la consulta de otro, y como la tabla
+        // es append-only ese cruce no se deshace.
+        prisma.consultation.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.addEntryAsProfessional(
+            PROFESSIONAL,
+            PATIENT,
+            conConsulta,
+            NOW,
+          ),
+        ).rejects.toThrow(BadRequestException);
+        expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+      });
+
+      it('la busca por el turno del par, no solo por id', async () => {
+        await service.addEntryAsProfessional(
+          PROFESSIONAL,
+          PATIENT,
+          conConsulta,
+          NOW,
+        );
+
+        expect(prisma.consultation.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: {
+              id: CONSULTATION,
+              appointment: {
+                professional_id: PROFESSIONAL,
+                patient_id: PATIENT,
+              },
+            },
+          }),
+        );
+      });
+
+      it('no la consulta cuando la entrada no referencia ninguna', async () => {
+        await service.addEntryAsProfessional(PROFESSIONAL, PATIENT, form, NOW);
+
+        expect(prisma.consultation.findFirst).not.toHaveBeenCalled();
+      });
     });
 
     it('encadena contra la cabeza existente de esa HC', async () => {
