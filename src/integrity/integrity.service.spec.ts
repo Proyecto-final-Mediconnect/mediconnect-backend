@@ -13,6 +13,7 @@ import {
   type ChainEntryInput,
 } from '../common/hash-chain/hash-chain';
 import type { PrismaService } from '../prisma/prisma.service';
+import { computeAnchor } from './chain-anchor';
 import { IntegrityService } from './integrity.service';
 
 const PROFESSIONAL_ID = '22222222-2222-4222-8222-222222222222';
@@ -74,14 +75,20 @@ interface Harness {
       findMany: jest.Mock;
       upsert: jest.Mock;
     };
-    integrityCheck: { create: jest.Mock };
+    integrityCheck: { create: jest.Mock; findMany: jest.Mock };
   };
-  alerter: { inconsistencyDetected: jest.Mock; runFailed: jest.Mock };
+  alerter: {
+    inconsistencyDetected: jest.Mock;
+    runFailed: jest.Mock;
+    anchorPublished: jest.Mock;
+  };
 }
 
 /**
  * @param chains entradas por paciente, ya selladas.
  * @param snapshots cabeza que dejó la corrida anterior, por paciente.
+ * @param previousChecks filas de `integrity_checks` que devuelve la búsqueda del
+ *   ancla anterior (ENG-123). Vacío = primera corrida, no hay contra qué comparar.
  */
 function harness(
   chains: Record<string, ChainEntry[]>,
@@ -89,6 +96,7 @@ function harness(
     string,
     { head_hash: string; sequence_number: bigint }
   > = {},
+  previousChecks: { details: unknown }[] = [],
 ): Harness {
   const prisma: Harness['prisma'] = {
     clinicalRecordEntry: {
@@ -114,12 +122,15 @@ function harness(
     },
     integrityCheck: {
       create: jest.fn().mockResolvedValue({ id: 'check-1' }),
+      // Ancla de la corrida anterior (ENG-123). Sin corridas previas, vacío.
+      findMany: jest.fn().mockResolvedValue(previousChecks),
     },
   };
 
   const alerter = {
     inconsistencyDetected: jest.fn().mockResolvedValue(true),
     runFailed: jest.fn().mockResolvedValue(true),
+    anchorPublished: jest.fn().mockResolvedValue(true),
   };
 
   return {
@@ -335,6 +346,186 @@ describe('IntegrityService', () => {
         details: expect.objectContaining({ failures_omitted: 5 }),
       });
       expect(createdCheck(h).details.failures).toHaveLength(50);
+    });
+  });
+
+  describe('ancla externa (ENG-123)', () => {
+    it('publica el ancla de una corrida sana y la guarda en details', async () => {
+      const chainA = buildChain(PACIENTE_A, 3);
+      const h = harness({ [PACIENTE_A]: chainA });
+
+      const result = await h.service.run();
+
+      expect(result.anchor).toMatchObject({ patients: 1, entries: 3 });
+      expect(result.anchor?.root).toMatch(/^[0-9a-f]{64}$/);
+      expect(result.anchorRegression).toBe(false);
+
+      expect(createdCheck(h).details).toMatchObject({
+        anchor: {
+          root: result.anchor?.root,
+          patients: 1,
+          entries: 3,
+        },
+        anchor_regression: false,
+      });
+      expect(h.alerter.anchorPublished).toHaveBeenCalledTimes(1);
+    });
+
+    it('el ancla se calcula sobre las cabezas reales de las cadenas', async () => {
+      const chainA = buildChain(PACIENTE_A, 3);
+      const chainB = buildChain(PACIENTE_B, 2);
+      const h = harness({ [PACIENTE_A]: chainA, [PACIENTE_B]: chainB });
+
+      const result = await h.service.run();
+
+      const esperado = computeAnchor([
+        {
+          patientId: PACIENTE_A,
+          sequenceNumber: 3,
+          headHash: chainA[2].contentHash,
+        },
+        {
+          patientId: PACIENTE_B,
+          sequenceNumber: 2,
+          headHash: chainB[1].contentHash,
+        },
+      ]);
+      expect(result.anchor?.root).toBe(esperado.root);
+    });
+
+    it('NO ancla una corrida con inconsistencias', async () => {
+      const chain = buildChain(PACIENTE_A, 3);
+      chain[1] = { ...chain[1], contentHash: '0'.repeat(64) };
+      const h = harness({ [PACIENTE_A]: chain });
+
+      const result = await h.service.run();
+
+      // Anclar un conjunto que incluye una cadena manipulada la convertiría en
+      // la referencia buena de la semana siguiente.
+      expect(result.anchor).toBeNull();
+      expect(createdCheck(h).details).toMatchObject({ anchor: null });
+      expect(h.alerter.anchorPublished).not.toHaveBeenCalled();
+    });
+
+    it('no manda el mensaje semanal mientras no haya ninguna HC', async () => {
+      const h = harness({});
+
+      const result = await h.service.run();
+
+      // Anclar el conjunto vacío de una base que nunca tuvo HC sería un mensaje
+      // semanal sin información. Distinto del conjunto vacío que dejó un
+      // borrado, que sí se publica: ahí hay un ancla previa contra la que el
+      // vacío es una regresión.
+      expect(result.anchor).toMatchObject({ patients: 0 });
+      expect(result.anchorRegression).toBe(false);
+      expect(result.status).toBe('OK');
+      expect(h.alerter.anchorPublished).not.toHaveBeenCalled();
+    });
+
+    it('detecta que la raíz se movió sin que la HC creciera', async () => {
+      const chain = buildChain(PACIENTE_A, 3);
+      // Ancla previa con el mismo total de entradas pero otra raíz: es lo que
+      // deja una reescritura que también ajustó chain_head_snapshots.
+      const anclaPrevia = computeAnchor([
+        { patientId: PACIENTE_A, sequenceNumber: 3, headHash: 'f'.repeat(64) },
+      ]);
+      const h = harness({ [PACIENTE_A]: chain }, {}, [
+        { details: { anchor: anclaPrevia } },
+      ]);
+
+      const result = await h.service.run();
+
+      // Las verificaciones por paciente pasan: la cadena es coherente.
+      expect(result.failures).toEqual([]);
+      // Lo único que la delata es el ancla, y eso alcanza para que la corrida NO
+      // se registre como sana: `lastPublishedAnchor()` filtra por OK, así que una
+      // fila OK acá haría que la corrida siguiente adoptara la raíz manipulada
+      // como línea de base y el job diera verde para siempre.
+      expect(result.anchorRegression).toBe(true);
+      expect(result.status).toBe('ANCHOR_REGRESSION');
+      expect(createdCheck(h)).toMatchObject({
+        status: 'ANCHOR_REGRESSION',
+        // Sigue siendo 0: no hay ninguna inconsistencia por paciente que listar.
+        inconsistencies_found: 0,
+        details: expect.objectContaining({ anchor_regression: true }),
+      });
+      // La alerta que corresponde es la del ancla, no la de inconsistencias:
+      // esa mandaría un mensaje que dice "0 inconsistencia(s)".
+      expect(h.alerter.inconsistencyDetected).not.toHaveBeenCalled();
+      expect(h.alerter.anchorPublished).toHaveBeenCalledTimes(1);
+    });
+
+    it('la corrida con regresión no queda como línea de base de la siguiente', async () => {
+      // La corrida siguiente busca su referencia con `status: 'OK'`. Si la fila
+      // de la regresión entrara en esa búsqueda, la raíz manipulada pasaría a ser
+      // el punto de comparación: la alarma sonaría una vez y se silenciaría sola.
+      const chain = buildChain(PACIENTE_A, 3);
+      const anclaPrevia = computeAnchor([
+        { patientId: PACIENTE_A, sequenceNumber: 3, headHash: 'f'.repeat(64) },
+      ]);
+      const h = harness({ [PACIENTE_A]: chain }, {}, [
+        { details: { anchor: anclaPrevia } },
+      ]);
+
+      await h.service.run();
+
+      const [args] = h.prisma.integrityCheck.findMany.mock.calls[0] as [
+        { where: { status: string } },
+      ];
+      expect(args.where).toEqual({ status: 'OK' });
+      expect(createdCheck(h).status).not.toBe('OK');
+    });
+
+    it('publica el ancla cuando el borrado total dejó el conjunto vacío', async () => {
+      // Alguien borra TODAS las filas de clinical_record_entries y de
+      // chain_head_snapshots: no queda nada que verificar, no hay failures y el
+      // conjunto anclado queda vacío. El mensaje semanal tiene que salir igual —
+      // es la única copia fuera de la base, y callarla dejaría un hueco en la
+      // serie publicada justo en la semana del incidente.
+      const anclaPrevia = computeAnchor([
+        {
+          patientId: PACIENTE_A,
+          sequenceNumber: 100,
+          headHash: 'f'.repeat(64),
+        },
+      ]);
+      const h = harness({}, {}, [{ details: { anchor: anclaPrevia } }]);
+
+      const result = await h.service.run();
+
+      expect(result.failures).toEqual([]);
+      expect(result.anchor).toMatchObject({ patients: 0, entries: 0 });
+      expect(result.anchorRegression).toBe(true);
+      expect(result.status).toBe('ANCHOR_REGRESSION');
+      expect(h.alerter.anchorPublished).toHaveBeenCalledTimes(1);
+    });
+
+    it('no marca regresión cuando la cadena simplemente creció', async () => {
+      const chain = buildChain(PACIENTE_A, 5);
+      const anclaPrevia = computeAnchor([
+        { patientId: PACIENTE_A, sequenceNumber: 2, headHash: 'f'.repeat(64) },
+      ]);
+      const h = harness({ [PACIENTE_A]: chain }, {}, [
+        { details: { anchor: anclaPrevia } },
+      ]);
+
+      const result = await h.service.run();
+
+      expect(result.anchorRegression).toBe(false);
+    });
+
+    it('compara contra la última corrida OK, no contra una fila sin ancla', async () => {
+      const chain = buildChain(PACIENTE_A, 3);
+      // La búsqueda filtra por status OK; una fila sin ancla no debe tomarse
+      // como referencia vacía y perder el punto de comparación.
+      const h = harness({ [PACIENTE_A]: chain }, {}, [{ details: null }]);
+
+      const result = await h.service.run();
+
+      expect(result.anchorRegression).toBe(false);
+      expect(h.prisma.integrityCheck.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: 'OK' } }),
+      );
     });
   });
 });

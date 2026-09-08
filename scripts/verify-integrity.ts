@@ -16,9 +16,10 @@
 //
 // Códigos de salida:
 //   0 — la cadena de todos los pacientes verificó bien.
-//   1 — se detectaron inconsistencias, o la corrida no pudo terminar.
+//   1 — se detectaron inconsistencias, la raíz del ancla regresó (ENG-123), o la
+//       corrida no pudo terminar.
 //
-// Los dos casos salen con 1 a propósito: para el equipo, "hay manipulación" y
+// Los tres casos salen con 1 a propósito: para el equipo, "hay manipulación" y
 // "no sabemos si hay manipulación" requieren la misma reacción — ir a mirar.
 
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -59,10 +60,37 @@ function summarize(result: IntegrityRunResult): string {
     `| \`integrity_checks.id\` | \`${result.checkId}\` |`,
   ];
 
-  if (result.failures.length === 0) return header.join('\n');
+  // El ancla (ENG-123). Este resumen es una de las dos copias que viven fuera de
+  // Supabase: si alguien manipula `integrity_checks`, el historial de corridas de
+  // GitHub sigue teniendo la raíz de cada semana. Por eso va completa y en
+  // bloque de código, para poder copiarla y compararla.
+  // `null` para lo condicional y `''` para los saltos de línea deliberados: en
+  // Markdown la línea en blanco antes de un bloque de código o de una cita es
+  // parte de la sintaxis, así que filtrar por `''` rompería el renderizado.
+  const anchor: string[] = result.anchor
+    ? (
+        [
+          '',
+          '### Ancla de integridad',
+          '',
+          `Pacientes anclados: ${result.anchor.patients} · Entradas: ${result.anchor.entries}`,
+          '',
+          '```',
+          result.anchor.root,
+          '```',
+          result.anchorRegression ? '' : null,
+          result.anchorRegression
+            ? '> ⚠️ **La raíz cambió sin que la Historia Clínica haya crecido.** Las verificaciones por paciente dieron OK, así que apunta a una manipulación que también tocó la base de comparación.'
+            : null,
+        ] as (string | null)[]
+      ).filter((line): line is string => line !== null)
+    : [];
+
+  if (result.failures.length === 0) return [...header, ...anchor].join('\n');
 
   return [
     ...header,
+    ...anchor,
     '',
     '### Inconsistencias',
     '',
@@ -94,7 +122,20 @@ async function main(): Promise<number> {
       console.log(
         `✅ Integridad OK — ${result.patientsChecked} paciente(s), ${result.entriesChecked} entrada(s), ${result.durationMs} ms`,
       );
+      if (result.anchor) console.log(`🔒 Raíz: ${result.anchor.root}`);
       return 0;
+    }
+
+    // Una regresión del ancla sale con 1 aunque las verificaciones por paciente
+    // hayan dado OK: es exactamente el caso en el que la base ya no es confiable
+    // como fuente, así que no puede reportarse como corrida sana.
+    if (result.status === 'ANCHOR_REGRESSION') {
+      if (result.anchor) console.log(`🔒 Raíz: ${result.anchor.root}`);
+      console.error(
+        '🚨 La raíz del ancla cambió sin que la HC haya crecido. Ver docs/security/integrity-check-runbook.md',
+      );
+      console.error(`Detalle en integrity_checks (${result.checkId}).`);
+      return 1;
     }
 
     console.error(

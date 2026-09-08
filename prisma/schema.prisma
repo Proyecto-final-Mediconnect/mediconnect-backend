@@ -667,11 +667,19 @@ model AuditLog {
 
 /// Resultado del job semanal de verificación de la cadena de hash (TT-03 / ENG-85).
 ///
-/// `status`: `OK` | `INCONSISTENT` | `ERROR`. El tercero no está en esquema.md a
-/// propósito del documento: lo agrega ENG-85 porque una corrida que no pudo
-/// terminar (base caída, credencial vencida) NO es lo mismo que una corrida que
-/// verificó y no encontró nada. Sin distinguirlas, un job que falla en silencio
-/// deja una racha de "OK" que nadie mira.
+/// `status`: `OK` | `INCONSISTENT` | `ANCHOR_REGRESSION` | `ERROR`. Los dos
+/// últimos no están en esquema.md a propósito del documento y los agregan los
+/// tickets, por la misma razón en los dos casos: un estado colapsado dentro de
+/// otro deja una racha de "OK" que nadie mira.
+///
+/// `ERROR` (ENG-85): la corrida no pudo terminar (base caída, credencial
+/// vencida). NO es lo mismo que una corrida que verificó y no encontró nada.
+///
+/// `ANCHOR_REGRESSION` (ENG-123): todas las cadenas verificaron, pero la raíz del
+/// ancla cambió sin que la HC creciera. Se distingue de `OK` porque la búsqueda
+/// de la línea de base filtra por `OK`: registrarla como sana haría que la
+/// corrida siguiente adoptara la raíz manipulada como referencia y el job diera
+/// verde para siempre. Estas filas llevan `inconsistencies_found = 0`.
 ///
 /// `details` lleva el resumen de la corrida y las inconsistencias (paciente,
 /// `sequence_number`, motivo). NUNCA lleva `content`: el contenido clínico no

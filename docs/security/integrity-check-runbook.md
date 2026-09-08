@@ -18,8 +18,10 @@ El diseño de la cadena está en
 | Auditoría contra la corrida anterior | `src/integrity/chain-audit.ts` |
 | Orquestación y persistencia | `src/integrity/integrity.service.ts` |
 | Ejecutable | `scripts/verify-integrity.ts` (`pnpm run verify:integrity`) |
+| Cálculo del ancla externa | `src/integrity/chain-anchor.ts` (ENG-123) |
 | Historial de corridas | tabla `integrity_checks` |
 | Cabeza por paciente | tabla `chain_head_snapshots` |
+| Ancla publicada | Slack + resumen de la corrida en GitHub Actions |
 
 ## Motivos de falla
 
@@ -34,6 +36,19 @@ El diseño de la cadena está en
 
 Los dos últimos son los que la cadena sola no puede ver —una cadena de hash no
 conoce su propia longitud— y por eso existe `chain_head_snapshots`.
+
+Y hay una alerta más, que no es de un paciente sino de toda la corrida:
+
+| Señal | Qué pasó |
+|---|---|
+| 🚨 *La raíz se movió sin explicación* | El ancla (ENG-123) cambió **sin que la HC haya crecido**, aunque todas las cadenas verificaron bien |
+
+Esa es la que agarra al atacante que tocó también la base de comparación. Queda
+registrada con `status = 'ANCHOR_REGRESSION'` e `inconsistencies_found = 0`: no
+hay ninguna inconsistencia por paciente que listar, y por eso no es
+`INCONSISTENT` — pero tampoco es `OK`, porque la búsqueda de la línea de base
+filtra por `OK` y adoptar la raíz sospechada blanquearía la manipulación. Ver
+[Cuando la raíz del ancla no coincide](#cuando-la-raíz-del-ancla-no-coincide).
 
 ## Qué hacer cuando suena la alerta
 
@@ -62,6 +77,56 @@ conoce su propia longitud— y por eso existe `chain_head_snapshots`.
 5. **Reconstruir qué pasó.** `audit_logs` registra los accesos a HC. Cruzar el
    `patient_id` y la ventana temporal entre las dos últimas corridas.
 
+## Cuando la raíz del ancla no coincide
+
+Cada corrida sana publica en Slack una **raíz**: el SHA-256 de las cabezas de
+todas las cadenas. Es la copia que vive fuera de Supabase.
+
+```
+🔒 Ancla de integridad de la Historia Clínica
+Pacientes: 1.284 · Entradas: 47.912
+9a2c71acea9a23d749fc253a88d6d6ad5443a7bec817108d5179e85f16d49cdc
+```
+
+**Que la raíz cambie de una semana a otra es normal**: cambia con cada entrada
+nueva. Lo que no tiene explicación legítima es que cambie **sin que el total de
+entradas haya subido**. La tabla es append-only, así que si el contenido se movió
+y la cuenta no creció, algo se reescribió o se borró. Eso es lo que dispara la
+alerta 🚨.
+
+Es la señal más grave del sistema, porque **significa que las verificaciones por
+paciente dieron OK igual**: quien haya tocado la HC tocó también
+`chain_head_snapshots` para que cerrara. O sea, alguien con acceso de escritura a
+la base, no un bug.
+
+Qué hacer:
+
+1. **No toques la base.** Ni para "arreglar", ni para investigar con `UPDATE`.
+2. **Buscá la raíz de la semana anterior en Slack** y compará a mano contra la
+   nueva. No confíes en `integrity_checks` para esto: esa copia está en la misma
+   base que se sospecha comprometida. La otra copia limpia está en el historial
+   de corridas de GitHub Actions.
+3. **Escalá inmediatamente.** Esto ya no es "una entrada quedó mal", es acceso no
+   autorizado a la base de producción.
+4. Rotar credenciales de Supabase y revisar quién tuvo acceso en la ventana entre
+   las dos corridas.
+
+Un caso benigno posible antes de asumir lo peor: una **restauración de backup**
+puede dejar la base con menos entradas y una raíz distinta. Si hubo una, es la
+explicación; igual conviene dejarlo asentado.
+
+**La alerta se va a repetir todas las semanas**, igual que la de una cadena rota
+y por el mismo motivo: la línea de base sigue siendo la última raíz sana, no la
+sospechada, así que la corrida siguiente vuelve a marcar la diferencia. No se
+silencia sola. Para cerrarla hay que resolver el incidente y dejar registrada una
+corrida `OK`.
+
+Un caso extremo que entra por acá: **si alguien vacía `clinical_record_entries` y
+`chain_head_snapshots`**, no queda ninguna cadena que verificar y el job publica
+igual el ancla del conjunto vacío (`e3b0c442…`, el SHA-256 de la cadena vacía),
+marcada como regresión. Cero pacientes después de una serie de semanas con miles
+no es una base nueva: es un borrado.
+
 ## Si la alerta es `⚠️ la verificación no pudo correr`
 
 La integridad **no quedó verificada** esa semana. Suele ser el secret
@@ -78,9 +143,9 @@ pnpm run verify:integrity
 DATABASE_URL="postgresql://..." pnpm run verify:integrity
 ```
 
-Sale con código `0` si todo verificó y `1` si hay inconsistencias **o** si la
-corrida no pudo terminar. Sin `SLACK_WEBHOOK_URL` verifica y registra igual, solo
-que no alerta.
+Sale con código `0` si todo verificó y `1` si hay inconsistencias, si la raíz del
+ancla regresó **o** si la corrida no pudo terminar. Sin `SLACK_WEBHOOK_URL`
+verifica y registra igual, solo que no alerta.
 
 ## Secrets que necesita el workflow
 
@@ -93,18 +158,24 @@ que no alerta.
 
 `chain_head_snapshots` vive en la misma base que protege. Un atacante con acceso
 de escritura suficiente puede reescribir la cadena **y** el snapshot en la misma
-operación, y quedar consistente. Eso sube mucho el costo del ataque —hay que
-tocar dos tablas de forma coordinada en vez de un `UPDATE`— pero no lo cierra.
+operación, y las verificaciones por paciente quedan consistentes.
 
-La mitigación que sí lo cierra es el **anclaje externo**: publicar periódicamente
-el hash de cabeza de cada paciente fuera del alcance del atacante (otra base, un
-log append-only de un tercero, un correo firmado). Lo recomienda el spike ENG-45 y
-queda como tarea técnica aparte de EP-06; este job es el lugar natural para
-emitir el ancla cuando exista, porque ya recorre todas las cadenas.
+Eso lo cubre el **ancla externa** (ENG-123): la raíz se publica cada semana en
+Slack y en el resumen de la corrida de GitHub Actions, dos sistemas con
+credenciales distintas de las de Supabase. Para que la manipulación pase
+inadvertida ahora hay que comprometer los tres.
 
-Lo que sí queda registrado hoy fuera de la base es el resumen de cada corrida en
-el historial de GitHub Actions (`$GITHUB_STEP_SUMMARY`): si alguien manipula
-`integrity_checks`, los runs de Actions siguen ahí.
+Lo que sigue abierto, y conviene decirlo antes de que lo pregunte el jurado:
+
+- **Un admin del workspace de Slack puede borrar mensajes.** El ancla es una
+  cerradura más, en otro sistema — no es a prueba de todo.
+- **La retención corta la serie a los 90 días** (plan gratuito de Slack, y por
+  defecto también los logs de Actions). Alcanza para acotar la ventana a una
+  semana, no para reconstruir la HC de hace dos años.
+- El ancla fuerte de verdad sería un repositorio git aparte con rama protegida
+  (append-only real, timestamps firmados por GitHub) o un servicio de
+  timestamping de terceros. No hace falta para el MVP, pero es la evolución
+  natural si algún día se necesita.
 
 ## Qué falta de EP-06
 
