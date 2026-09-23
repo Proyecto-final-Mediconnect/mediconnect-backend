@@ -334,4 +334,40 @@ describe('Auth registro (e2e)', () => {
 
     return request(app.getHttpServer()).post('/auth/refresh').expect(429);
   });
+
+  // ENG-84: en producción todos los requests llegan desde la IP de salida de
+  // Cloudflare. Si el límite se contara por esa IP, el cupo de 5 sería de toda
+  // la región y no de cada usuario.
+  it('el límite es por cliente (CF-Connecting-IP): otro usuario no hereda el 429', async () => {
+    const server = app.getHttpServer();
+    for (let i = 0; i < 5; i++) {
+      await request(server)
+        .post('/auth/refresh')
+        .set('CF-Connecting-IP', '190.12.34.56');
+    }
+
+    await request(server)
+      .post('/auth/refresh')
+      .set('CF-Connecting-IP', '190.12.34.56')
+      .expect(429);
+
+    const otroUsuario = await request(server)
+      .post('/auth/refresh')
+      .set('CF-Connecting-IP', '181.45.67.89');
+    expect(otroUsuario.status).not.toBe(429);
+  });
+
+  it('un X-Forwarded-For inventado no esquiva el límite', async () => {
+    const server = app.getHttpServer();
+    for (let i = 0; i < 5; i++) {
+      await request(server)
+        .post('/auth/refresh')
+        .set('X-Forwarded-For', `10.0.0.${i}`);
+    }
+
+    return request(server)
+      .post('/auth/refresh')
+      .set('X-Forwarded-For', '10.0.0.99')
+      .expect(429);
+  });
 });
