@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   InternalServerErrorException,
+  NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -29,6 +30,8 @@ import {
 const PATIENT = '11111111-1111-4111-8111-111111111111';
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
 const CONSULTATION = '33333333-3333-4333-8333-333333333333';
+const CORRECTED_ENTRY = '44444444-4444-4444-8444-444444444444';
+const OTHER_PROFESSIONAL = '55555555-5555-4555-8555-555555555555';
 const NOW = new Date('2026-08-27T12:00:00.000Z');
 
 function newEntry(overrides: Partial<NewClinicalEntry> = {}): NewClinicalEntry {
@@ -66,6 +69,7 @@ describe('ClinicalRecordsService', () => {
     professional: { findMany: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
+      findUnique: jest.Mock;
       findMany: jest.Mock;
       create: jest.Mock;
     };
@@ -91,6 +95,15 @@ describe('ClinicalRecordsService', () => {
       },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),
+        // La entrada a corregir (ENG-100): por defecto existe, es de este
+        // paciente, la firmó este profesional y todavía no tiene corrección.
+        findUnique: jest.fn().mockResolvedValue({
+          id: CORRECTED_ENTRY,
+          patient_id: PATIENT,
+          professional_id: PROFESSIONAL,
+          consultation_id: null,
+          corrected_by: [],
+        }),
         findMany: jest.fn().mockResolvedValue([]),
         create: jest
           .fn()
@@ -503,6 +516,197 @@ describe('ClinicalRecordsService', () => {
 
       expect(view.sequenceNumber).toBe(4);
       expect(view.previousHash).toBe('e'.repeat(64));
+    });
+  });
+
+  describe('correctEntryAsProfessional (ENG-100)', () => {
+    const form = {
+      reason: 'Control de rutina',
+      diagnosis: 'Lumbalgia mecánica',
+      correctionReason:
+        'El diagnóstico estaba cargado con el código de otra patología',
+    };
+
+    const correct = (
+      professionalId = PROFESSIONAL,
+      patientId = PATIENT,
+      entryId = CORRECTED_ENTRY,
+    ) =>
+      service.correctEntryAsProfessional(
+        professionalId,
+        patientId,
+        entryId,
+        form,
+        NOW,
+      );
+
+    it('no modifica la entrada original: agrega una nueva', async () => {
+      // Es el criterio de aceptación central y la exigencia de la Ley 26.529
+      // art. 15. El único write que hace este camino es un INSERT.
+      const view = await correct();
+
+      expect(prisma.clinicalRecordEntry.create).toHaveBeenCalledTimes(1);
+      expect(view.correctsEntryId).toBe(CORRECTED_ENTRY);
+      expect(view.entryType).toBe('CORRECCION');
+    });
+
+    it('la corrección se encadena como cualquier otra entrada', async () => {
+      prisma.clinicalRecordEntry.findFirst.mockResolvedValue({
+        sequence_number: BigInt(4),
+        content_hash: 'c'.repeat(64),
+      });
+
+      const view = await correct();
+
+      expect(view.sequenceNumber).toBe(5);
+      expect(view.previousHash).toBe('c'.repeat(64));
+      expect(view.contentHash).toBe(
+        computeContentHash(
+          {
+            patientId: PATIENT,
+            professionalId: PROFESSIONAL,
+            sequenceNumber: 5,
+            entryType: 'CORRECCION',
+            fhirResourceType: 'ClinicalImpression',
+            content: view.content,
+            consultationId: null,
+            correctsEntryId: CORRECTED_ENTRY,
+            createdAt: new Date(view.createdAt),
+          },
+          'c'.repeat(64),
+        ),
+      );
+    });
+
+    it('el recurso FHIR enlaza con la entrada corregida y explica el error', async () => {
+      const view = await correct();
+
+      expect(view.content).toMatchObject({
+        resourceType: 'ClinicalImpression',
+        description: 'Control de rutina',
+        previous: { reference: `ClinicalImpression/${CORRECTED_ENTRY}` },
+        extension: [
+          {
+            url: 'urn:mediconnect:fhir:extension:correction-reason',
+            valueString: form.correctionReason,
+          },
+        ],
+      });
+    });
+
+    it('hereda la consulta de la entrada corregida', async () => {
+      // No se acepta del cuerpo: la corrección pertenece a la misma consulta que
+      // el asiento que corrige, y ese valor entra a la preimagen del hash.
+      prisma.clinicalRecordEntry.findUnique.mockResolvedValue({
+        id: CORRECTED_ENTRY,
+        patient_id: PATIENT,
+        professional_id: PROFESSIONAL,
+        consultation_id: CONSULTATION,
+        corrected_by: [],
+      });
+
+      await expect(correct()).resolves.toMatchObject({
+        consultationId: CONSULTATION,
+      });
+    });
+
+    it('no pide un turno vigente: alcanza con haber firmado la entrada', async () => {
+      // El turno se puede caer DESPUÉS del asiento (el paciente cancela). Si se
+      // exigiera un turno no cancelado, el profesional no podría corregir nunca
+      // su propio error y el dato equivocado quedaría en la HC para siempre.
+      prisma.appointment.findFirst.mockResolvedValue(null);
+
+      await expect(correct()).resolves.toMatchObject({
+        entryType: 'CORRECCION',
+      });
+    });
+
+    describe('quién puede corregir qué', () => {
+      it('404 si la entrada no existe', async () => {
+        prisma.clinicalRecordEntry.findUnique.mockResolvedValue(null);
+
+        await expect(correct()).rejects.toThrow(NotFoundException);
+      });
+
+      it('404 —no 403— si la entrada es de la HC de otro paciente', async () => {
+        // Misma respuesta que "no existe" a propósito: si distinguiera, este
+        // endpoint sería un oráculo para averiguar si un UUID cualquiera es una
+        // entrada de la historia clínica de alguien.
+        prisma.clinicalRecordEntry.findUnique.mockResolvedValue({
+          id: CORRECTED_ENTRY,
+          patient_id: '99999999-9999-4999-8999-999999999999',
+          professional_id: PROFESSIONAL,
+          consultation_id: null,
+          corrected_by: [],
+        });
+
+        await expect(correct()).rejects.toThrow(NotFoundException);
+      });
+
+      it('403 si la firmó otro profesional', async () => {
+        // Corregir el asiento de un colega sería contradecirlo por escrito sobre
+        // su propia firma. Para eso existe una entrada nueva.
+        prisma.clinicalRecordEntry.findUnique.mockResolvedValue({
+          id: CORRECTED_ENTRY,
+          patient_id: PATIENT,
+          professional_id: OTHER_PROFESSIONAL,
+          consultation_id: null,
+          corrected_by: [],
+        });
+
+        await expect(correct()).rejects.toThrow(ForbiddenException);
+      });
+
+      it('409 si esa entrada ya tiene una corrección', async () => {
+        // Dos correcciones hermanas dejan sin respuesta la pregunta de cuál es el
+        // dato vigente. Hay que corregir la última, no el original.
+        prisma.clinicalRecordEntry.findUnique.mockResolvedValue({
+          id: CORRECTED_ENTRY,
+          patient_id: PATIENT,
+          professional_id: PROFESSIONAL,
+          consultation_id: null,
+          corrected_by: [{ id: 'correccion-previa' }],
+        });
+
+        await expect(correct()).rejects.toThrow(ConflictException);
+      });
+
+      it.each([
+        ['no existe', null],
+        [
+          'es de otro paciente',
+          {
+            id: CORRECTED_ENTRY,
+            patient_id: '99999999-9999-4999-8999-999999999999',
+            professional_id: PROFESSIONAL,
+            consultation_id: null,
+            corrected_by: [],
+          },
+        ],
+        [
+          'la firmó otro',
+          {
+            id: CORRECTED_ENTRY,
+            patient_id: PATIENT,
+            professional_id: OTHER_PROFESSIONAL,
+            consultation_id: null,
+            corrected_by: [],
+          },
+        ],
+      ])('no escribe nada cuando la entrada %s', async (_caso, entry) => {
+        prisma.clinicalRecordEntry.findUnique.mockResolvedValue(entry);
+
+        await expect(correct()).rejects.toThrow();
+        expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+      });
+
+      it('acepta el UUID en mayúsculas', async () => {
+        // `ParseUUIDPipe` los acepta y hay clientes que los mandan así. Con `===`
+        // a secas, el autor recibía 403 sobre su propia entrada.
+        await expect(
+          correct(PROFESSIONAL.toUpperCase(), PATIENT.toUpperCase()),
+        ).resolves.toMatchObject({ entryType: 'CORRECCION' });
+      });
     });
   });
 

@@ -20,6 +20,7 @@ import { SupabaseService } from './../src/supabase/supabase.service';
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
 const PATIENT = '11111111-1111-4111-8111-111111111111';
+const CORRECTED_ENTRY = '44444444-4444-4444-8444-444444444444';
 
 describe('Historia clínica (e2e)', () => {
   let app: INestApplication<App>;
@@ -32,6 +33,7 @@ describe('Historia clínica (e2e)', () => {
     professional: { findMany: jest.Mock };
     clinicalRecordEntry: {
       findFirst: jest.Mock;
+      findUnique: jest.Mock;
       findMany: jest.Mock;
       create: jest.Mock;
     };
@@ -68,6 +70,15 @@ describe('Historia clínica (e2e)', () => {
       },
       clinicalRecordEntry: {
         findFirst: jest.fn().mockResolvedValue(null),
+        // La entrada a corregir (ENG-100): existe, es de este paciente, la firmó
+        // este profesional y todavía no tiene corrección.
+        findUnique: jest.fn().mockResolvedValue({
+          id: CORRECTED_ENTRY,
+          patient_id: PATIENT,
+          professional_id: PROFESSIONAL,
+          consultation_id: null,
+          corrected_by: [],
+        }),
         findMany: jest.fn().mockResolvedValue([]),
         create: jest
           .fn()
@@ -226,6 +237,121 @@ describe('Historia clínica (e2e)', () => {
         .set('Authorization', `Bearer ${await signToken()}`)
         .send(body)
         .expect(403);
+
+      expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST :entryId/corrections (ENG-100)', () => {
+    const correctionUrl = (
+      entryId: string = CORRECTED_ENTRY,
+      patientId: string = PATIENT,
+    ) => `${url(patientId)}/${entryId}/corrections`;
+
+    const correction = {
+      reason: 'Control de rutina',
+      diagnosis: 'Lumbalgia mecánica',
+      correctionReason:
+        'El diagnóstico estaba cargado con el código equivocado',
+    };
+
+    /** El token se resuelve adentro, así que el helper es async y hay que
+     *  esperarlo: por eso el status esperado va como parámetro y no como
+     *  `.expect()` encadenado afuera. */
+    const post = async (
+      body: Record<string, unknown> = correction,
+      status = 201,
+    ) =>
+      request(app.getHttpServer())
+        .post(correctionUrl())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send(body)
+        .expect(status);
+
+    it('sin token devuelve 401 y no escribe nada', async () => {
+      await request(app.getHttpServer())
+        .post(correctionUrl())
+        .send(correction)
+        .expect(401);
+
+      expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('devuelve 201 con la corrección sellada', async () => {
+      const res = await post();
+
+      expect(res.body).toMatchObject({
+        entryType: 'CORRECCION',
+        correctsEntryId: CORRECTED_ENTRY,
+        fhirResourceType: 'ClinicalImpression',
+      });
+      expect(res.body.contentHash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('un entryId que no es UUID da 400 sin escribir', async () => {
+      await request(app.getHttpServer())
+        .post(`${url()}/no-es-uuid/corrections`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send(correction)
+        .expect(400);
+
+      expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('rechaza el motivo de la corrección vacío', async () => {
+      await post({ ...correction, correctionReason: '   ' }, 400);
+
+      expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+    });
+
+    it.each(['entryType', 'correctsEntryId', 'consultationId'])(
+      'rechaza %s mandado en el cuerpo',
+      async (prop) => {
+        // `forbidNonWhitelisted`: el tipo es siempre CORRECCION, a quién corrige
+        // va en la URL y la consulta se hereda de la entrada corregida. Aceptar
+        // cualquiera de los tres del cuerpo dejaría escribir un asiento que
+        // después no se puede arreglar.
+        await post(
+          { ...correction, [prop]: '33333333-3333-4333-8333-333333333333' },
+          400,
+        );
+
+        expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+      },
+    );
+
+    it('404 cuando la entrada no existe, sin escribir', async () => {
+      prisma.clinicalRecordEntry.findUnique.mockResolvedValue(null);
+
+      await post(correction, 404);
+
+      expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('403 cuando la firmó otro profesional, sin escribir', async () => {
+      prisma.clinicalRecordEntry.findUnique.mockResolvedValue({
+        id: CORRECTED_ENTRY,
+        patient_id: PATIENT,
+        professional_id: '99999999-9999-4999-8999-999999999999',
+        consultation_id: null,
+        corrected_by: [],
+      });
+
+      await post(correction, 403);
+
+      expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
+    });
+
+    it('409 cuando esa entrada ya tiene una corrección', async () => {
+      prisma.clinicalRecordEntry.findUnique.mockResolvedValue({
+        id: CORRECTED_ENTRY,
+        patient_id: PATIENT,
+        professional_id: PROFESSIONAL,
+        consultation_id: null,
+        corrected_by: [{ id: 'correccion-previa' }],
+      });
+
+      await post(correction, 409);
 
       expect(prisma.clinicalRecordEntry.create).not.toHaveBeenCalled();
     });

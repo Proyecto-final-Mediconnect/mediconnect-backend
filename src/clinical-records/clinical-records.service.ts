@@ -5,6 +5,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -21,6 +22,7 @@ import {
   CLINICAL_ENTRY_RESOURCE_TYPE,
   toClinicalImpression,
 } from './clinical-entry.fhir';
+import { CorrectClinicalEntryDto } from './dto/correct-clinical-entry.dto';
 import { CreateClinicalEntryDto } from './dto/create-clinical-entry.dto';
 
 /**
@@ -325,6 +327,146 @@ export class ClinicalRecordsService {
   }
 
   /**
+   * Corrige una entrada ya escrita agregando un asiento nuevo (ENG-100).
+   *
+   * **No hay UPDATE en ningún lado, y es el punto entero de la historia.** La
+   * entrada original queda intacta, con su hash y su lugar en la cadena; la
+   * corrección es una entrada más, de tipo `CORRECCION`, que la referencia por
+   * `corrects_entry_id`. Así lo exige el art. 15 de la Ley 26.529 y así lo
+   * impone la base: el trigger `clinical_record_entries_no_mutation` (ENG-57)
+   * rechaza cualquier UPDATE incluso viniendo del owner.
+   *
+   * La cadena no necesita nada especial: la corrección se sella contra la cabeza
+   * como cualquier otra entrada y `corrects_entry_id` entra a la preimagen
+   * (`PREIMAGE_COLUMNS`), así que reapuntar una corrección a otra entrada rompe
+   * el hash.
+   *
+   * ## Quién puede corregir: el que firmó, y solo esa entrada
+   *
+   * **No se llama a `assertCanWriteFor`**, a diferencia del alta, y es
+   * deliberado. Ser el autor de la entrada es un gate más fuerte que tener un
+   * turno vigente —haber firmado prueba que en su momento pudo escribir— y
+   * además el turno se puede caer DESPUÉS del asiento: turno `CONFIRMADO`,
+   * entrada escrita, el paciente cancela. Con la validación del alta, ese
+   * profesional no podría corregir nunca su propio error y el dato equivocado
+   * quedaría en la HC para siempre, que es exactamente lo que este endpoint
+   * viene a evitar. Es el mismo razonamiento del segundo camino de
+   * `assertCanReadFor`.
+   *
+   * Que sea el autor y no cualquier profesional del paciente también importa: si
+   * otro pudiera "corregir" un asiento ajeno estaría contradiciendo por escrito
+   * a un colega sobre su propia firma, y para eso existe una entrada nueva, no
+   * una corrección.
+   */
+  async correctEntryAsProfessional(
+    professionalId: string,
+    patientId: string,
+    entryId: string,
+    dto: CorrectClinicalEntryDto,
+    now: Date = new Date(),
+  ): Promise<ClinicalEntryView> {
+    const corrected = await this.loadCorrectableEntry(
+      professionalId,
+      patientId,
+      entryId,
+    );
+
+    // Un solo instante para el recurso FHIR y para `created_at`, por el mismo
+    // motivo que en el alta: los dos tienen que decir lo mismo sobre cuándo se
+    // escribió el asiento.
+    const at = new Date(now.getTime());
+
+    return this.append(
+      {
+        patientId,
+        professionalId,
+        entryType: 'CORRECCION',
+        fhirResourceType: CLINICAL_ENTRY_RESOURCE_TYPE,
+        content: toClinicalImpression(dto, { patientId, professionalId }, at, {
+          correctsEntryId: corrected.id,
+          reason: dto.correctionReason,
+        }),
+        // Se hereda de la entrada corregida en vez de aceptarse del cuerpo. La
+        // corrección pertenece a la misma consulta que el asiento que corrige, y
+        // la original ya pasó por `assertConsultationBelongsTo` cuando se
+        // escribió, así que el valor heredado es válido por construcción.
+        consultationId: corrected.consultation_id,
+        correctsEntryId: corrected.id,
+      },
+      at,
+    );
+  }
+
+  /**
+   * Busca la entrada a corregir y verifica las tres condiciones para corregirla.
+   *
+   * El orden de los chequeos es el que no filtra información:
+   *
+   * 1. **404** si no existe o es de otro paciente — la misma respuesta para los
+   *    dos casos, así que un profesional no puede usar este endpoint para
+   *    averiguar si un UUID cualquiera es una entrada de HC de alguien más.
+   * 2. **403** si existe en esta historia pero la firmó otro profesional. Acá sí
+   *    se distingue, y no cuesta nada: para llegar hasta este punto ya hay que
+   *    tener el id de una entrada de un paciente cuya HC este profesional puede
+   *    leer.
+   * 3. **409** si esa entrada ya tiene una corrección.
+   *
+   * ## Por qué no se puede corregir dos veces la misma entrada
+   *
+   * Nada en la base lo impide: podrían existir dos `CORRECCION` apuntando al
+   * mismo asiento. El problema es que entonces **la pregunta "cuál es el dato
+   * vigente" deja de tener respuesta** — dos correcciones hermanas, las dos
+   * válidas, las dos firmadas, sin orden entre ellas más que el reloj.
+   *
+   * Exigir que se corrija la corrección más reciente convierte el historial en
+   * una cadena lineal: original → corrección → corrección de la corrección, y la
+   * última es la vigente. No se pierde nada, porque una corrección se corrige
+   * igual que cualquier otra entrada.
+   *
+   * Las comparaciones de UUID van por `sameUuid` y no por `===`: `ParseUUIDPipe`
+   * acepta mayúsculas y un cliente puede mandarlas —`UUID().uuidString` de iOS
+   * las devuelve así—. Es el mismo bug que `readPatientRecord` documenta haber
+   * tenido sobre `patientId`.
+   */
+  private async loadCorrectableEntry(
+    professionalId: string,
+    patientId: string,
+    entryId: string,
+  ): Promise<{ id: string; consultation_id: string | null }> {
+    const entry = await this.prisma.clinicalRecordEntry.findUnique({
+      where: { id: entryId },
+      select: {
+        id: true,
+        patient_id: true,
+        professional_id: true,
+        consultation_id: true,
+        // `take: 1` porque solo interesa si hay alguna, no cuántas.
+        corrected_by: { select: { id: true }, take: 1 },
+      },
+    });
+
+    if (!entry || !sameUuid(entry.patient_id, patientId)) {
+      throw new NotFoundException(
+        'La entrada que querés corregir no está en la historia clínica de este paciente.',
+      );
+    }
+
+    if (!sameUuid(entry.professional_id, professionalId)) {
+      throw new ForbiddenException(
+        'Solo el profesional que firmó una entrada puede corregirla. Si el dato es tuyo y está mal, agregá una entrada nueva.',
+      );
+    }
+
+    if (entry.corrected_by.length > 0) {
+      throw new ConflictException(
+        'Esa entrada ya tiene una corrección. Corregí la corrección más reciente, así queda claro cuál es el dato vigente.',
+      );
+    }
+
+    return { id: entry.id, consultation_id: entry.consultation_id };
+  }
+
+  /**
    * La consulta referenciada tiene que ser de un turno de este par.
    *
    * La FK de `consultation_id` solo exige que el id **exista**, así que sin este
@@ -529,13 +671,10 @@ export class ClinicalRecordsService {
     // del JWT: si coinciden, es el paciente leyendo su propia historia y no hay
     // relación que validar.
     //
-    // Se normaliza a minúsculas antes de comparar. `ParseUUIDPipe` acepta el UUID
-    // en mayúsculas (su regex lleva flag `/i`) y un cliente puede mandarlo así
-    // —`UUID().uuidString` de iOS devuelve mayúsculas—. Con `===` a secas, el
-    // dueño de la historia caía por el camino del profesional y recibía 403 sobre
-    // su propia HC. Postgres compara `uuid` sin distinguir mayúsculas, así que RLS
-    // habría respondido bien: el bug era solo de esta comparación en JS.
-    const asPatient = viewerId.toLowerCase() === patientId.toLowerCase();
+    // Se compara con `sameUuid` y no con `===` por el bug que ese helper
+    // documenta: el dueño de la historia mandando su UUID en mayúsculas caía por
+    // el camino del profesional y recibía 403 sobre su propia HC.
+    const asPatient = sameUuid(viewerId, patientId);
 
     if (!asPatient) {
       await this.assertCanReadFor(viewerId, patientId);
@@ -682,6 +821,19 @@ export class ClinicalRecordsService {
       rows.map((row) => chainEntryFromRow(row as ChainEntryRow)),
     );
   }
+}
+
+/**
+ * Compara dos UUID sin distinguir mayúsculas.
+ *
+ * Postgres compara `uuid` sin distinguir caso, pero en JS son strings.
+ * `ParseUUIDPipe` acepta el UUID en mayúsculas (su regex lleva flag `/i`) y hay
+ * clientes que los mandan así —`UUID().uuidString` de iOS—, así que un `===` a
+ * secas rechaza valores que la base considera iguales. Ya pasó una vez: el dueño
+ * de una HC recibía 403 sobre su propia historia.
+ */
+function sameUuid(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
 }
 
 /** Fila de la base → objeto que sale por la API. */
