@@ -113,6 +113,117 @@ $ DATABASE_URL="postgresql://postgres.<project-ref>:<password>@aws-1-sa-east-1.p
 El seed es **idempotente** (`upsert` por `name`): correrlo de nuevo no duplica
 filas ni falla. Verificación: `select count(*) from public.specialties` → `17`.
 
+### Validación manual de matrículas (ENG-109)
+
+Todo profesional que se registra queda en `status = 'PENDIENTE_VALIDACION_MATRICULA'`
+(lo setea el alta de ENG-43), y **el catálogo público de ENG-49 lista únicamente los
+`VALIDADO`**. O sea que sin este procedimiento un profesional que se registra queda
+invisible para siempre y la cadena ENG-49 → ENG-50 → ENG-54 se queda sin datos con
+los que trabajar.
+
+El Sprint 0 (criterios de HU-02) decidió que durante el MVP la validación es
+**manual, hecha por el equipo y no automatizada**. Lo que nunca se había definido
+es qué significa "manual", y eso es lo que documenta esta sección.
+
+> **No hay pantalla de moderación, y es deliberado.** El sistema tiene el rol
+> `MODERADOR` en el enum `user_role`, pero construir la pantalla es alcance nuevo:
+> no está en las 48 historias del backlog y contradice la decisión del Sprint 0 de
+> que en el MVP la validación sea manual. Si en algún momento el volumen lo pide, la
+> pantalla entra como historia propia y con su release asignado — no como un agregado
+> de este procedimiento.
+
+#### Quién valida
+
+**Responsable: Juan Cruz García Amadey.** Ocupa operativamente el rol `MODERADOR`,
+que hasta ENG-109 existía en el enum sin que nadie lo ejerciera. Es también el
+asignado del ticket que definió este procedimiento; el equipo puede reasignarlo en
+una daily, y si lo hace hay que actualizar este párrafo en el mismo PR.
+
+#### Contra qué se valida
+
+El número de matrícula se verifica **en el registro público del colegio profesional
+que corresponda a la especialidad y a la provincia** del profesional. Es el mínimo
+exigible: la matrícula es lo que habilita a ejercer, y publicar en el catálogo a
+alguien sin verificarla expone a los pacientes y al equipo.
+
+Se comprueban tres cosas antes de aprobar:
+
+1. Que la matrícula exista en el registro del colegio.
+2. Que esté **vigente** (no vencida, no suspendida).
+3. Que el nombre del registro coincida con `first_name` / `last_name` de la ficha.
+
+Si alguna de las tres no cierra, va a `RECHAZADO`. Un dato que no se puede verificar
+no es un dato verificado.
+
+#### Cada cuánto se revisa la cola
+
+**En la daily.** No es una cadencia elegida por prolijidad: mientras la cuenta está
+pendiente el profesional no aparece en el catálogo y no puede recibir turnos, así
+que cada día de demora es un día en que alguien que se registró no puede usar la
+plataforma. Revisarla en la daily acota la espera a 24 horas hábiles.
+
+#### El procedimiento
+
+Se corre con el **SQL Editor de Supabase** (Dashboard → SQL Editor) con una cuenta
+del equipo con acceso al proyecto. No hay endpoint ni script: son tres consultas y
+dejarlas a mano evita construir un camino de escritura sobre `professionals.status`
+que hoy nadie más necesita.
+
+**1. Listar las pendientes.** Es el disparador del procedimiento:
+
+```sql
+select profile_id, first_name, last_name, license_number, created_at
+from public.professionals
+where status = 'PENDIENTE_VALIDACION_MATRICULA'
+order by created_at;
+```
+
+**2. Aprobar**, una vez verificada la matrícula en el registro del colegio:
+
+```sql
+update public.professionals
+set status = 'VALIDADO', updated_at = now()
+where license_number = 'MP-XXXXX';
+```
+
+**3. Rechazar**, si la matrícula no existe, está vencida o el nombre no coincide:
+
+```sql
+update public.professionals
+set status = 'RECHAZADO', updated_at = now()
+where license_number = 'MP-XXXXX';
+```
+
+Las dos escrituras van acotadas por `license_number` y no por especialidad ni por
+fecha: es el dato que se acaba de verificar, y un `where` más amplio puede validar
+de un saque a alguien que nadie miró. `license_number` es `varchar(30)` y **no tiene
+unique**, así que conviene confirmar que el `update` afectó **una** fila; si afectó
+más de una, hay dos fichas con la misma matrícula y eso es un caso a mirar aparte,
+no a aprobar.
+
+`updated_at` se pone a mano porque la columna tiene `default now()` solo en el
+INSERT: sin esto, la ficha queda diciendo que no se tocó desde el registro.
+
+#### Verificación
+
+- Registrar un profesional nuevo y confirmar que aparece en la consulta de pendientes.
+- Aplicar el SQL de aprobación y confirmar que `GET /professionals/me` devuelve
+  `status: "VALIDADO"`.
+- Confirmar que recién ahí aparece en el catálogo público (`GET /catalog/professionals`,
+  ENG-49) y que su perfil público responde (`GET /professionals/:id`, ENG-50). Antes
+  de aprobar, las dos cosas lo ignoran: los dos caminos filtran por
+  `status = 'VALIDADO'`.
+- Aplicar el SQL de rechazo sobre otro profesional y confirmar que **no** aparece en
+  el catálogo.
+
+#### Antecedente
+
+Verificado el 13/08/2026: los 2 profesionales que había en la base estaban los dos
+en `PENDIENTE_VALIDACION_MATRICULA`. Se los pasó a `VALIDADO` a mano para desbloquear
+ENG-49 — un parche puntual, sin verificar ninguna matrícula contra ningún registro y
+sin procedimiento detrás. Esta sección es lo que faltaba para que el próximo que se
+registre no dependa de que alguien se acuerde.
+
 ## Tests de integración (PostgreSQL 15 via Docker)
 
 La suite de integración corre contra un PostgreSQL 15 real (base **separada** de la
