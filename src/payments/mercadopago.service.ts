@@ -109,9 +109,32 @@ export class MercadoPagoService {
     return Boolean(this.config.get<string>('MERCADOPAGO_ACCESS_TOKEN'));
   }
 
-  /** `true` si el token configurado es de prueba. Lo usa el spike para no
-   *  ejecutarse jamás contra credenciales productivas. */
+  /**
+   * `true` si se está operando contra el entorno de prueba.
+   *
+   * Lo usa el spike para no ejecutarse jamás contra credenciales productivas, y
+   * ENG-63 para dos cosas distintas: a qué `init_point` mandar al pagador y si
+   * avisarle en pantalla que el cobro no es real.
+   *
+   * **Se puede forzar con `MERCADOPAGO_SANDBOX` y por eso existe esa variable.**
+   * Inferirlo del prefijo del token alcanza mientras las credenciales de prueba
+   * sean `TEST-`, pero las de un *usuario de prueba* creado con el endpoint de
+   * test users son `APP_USR-` igual que las productivas: ahí el prefijo deja de
+   * distinguir nada y el flag miente, sin que nadie se entere hasta que alguien
+   * mira un checkout que no debería poder completarse.
+   *
+   * No se cambió la regla del prefijo —que `APP_USR-` pase a significar sandbox
+   * rompería las credenciales productivas de verdad, y cuál de los dos
+   * `init_point` corresponde a un usuario de prueba no está documentado— sino
+   * que se agregó la forma de decirlo explícitamente. Una variable en Render
+   * resuelve el caso sin tocar código ni apostar a una inferencia.
+   */
   isSandbox(): boolean {
+    const explicito = this.config.get<string>('MERCADOPAGO_SANDBOX');
+    if (explicito !== undefined && explicito !== '') {
+      return explicito === 'true';
+    }
+
     return (
       this.config
         .get<string>('MERCADOPAGO_ACCESS_TOKEN')

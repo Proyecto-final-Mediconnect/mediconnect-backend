@@ -111,6 +111,14 @@ class EnvironmentVariables {
   @IsOptional()
   @IsUrl({ require_tld: false, require_protocol: true })
   MERCADOPAGO_NOTIFICATION_URL?: string;
+
+  // Fuerza el entorno de MercadoPago en vez de inferirlo del prefijo del token.
+  // Hace falta con credenciales de un usuario de prueba, que son `APP_USR-`
+  // igual que las productivas: ahí el prefijo no distingue nada. Ver
+  // `MercadoPagoService.isSandbox`.
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  MERCADOPAGO_SANDBOX?: string;
 }
 
 /** Falla rápido al bootear si falta o está mal formada una env var requerida,
