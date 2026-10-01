@@ -77,7 +77,7 @@ describe('Historia clínica (e2e)', () => {
           patient_id: PATIENT,
           professional_id: PROFESSIONAL,
           consultation_id: null,
-          corrected_by: [],
+          corrected_by: null,
         }),
         findMany: jest.fn().mockResolvedValue([]),
         create: jest
@@ -334,7 +334,7 @@ describe('Historia clínica (e2e)', () => {
         patient_id: PATIENT,
         professional_id: '99999999-9999-4999-8999-999999999999',
         consultation_id: null,
-        corrected_by: [],
+        corrected_by: null,
       });
 
       await post(correction, 403);
@@ -348,7 +348,7 @@ describe('Historia clínica (e2e)', () => {
         patient_id: PATIENT,
         professional_id: PROFESSIONAL,
         consultation_id: null,
-        corrected_by: [{ id: 'correccion-previa' }],
+        corrected_by: { id: 'correccion-previa' },
       });
 
       await post(correction, 409);

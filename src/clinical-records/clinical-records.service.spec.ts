@@ -102,7 +102,7 @@ describe('ClinicalRecordsService', () => {
           patient_id: PATIENT,
           professional_id: PROFESSIONAL,
           consultation_id: null,
-          corrected_by: [],
+          corrected_by: null,
         }),
         findMany: jest.fn().mockResolvedValue([]),
         create: jest
@@ -245,6 +245,26 @@ describe('ClinicalRecordsService', () => {
       );
       expect(prisma.clinicalRecordEntry.create).toHaveBeenCalledTimes(3);
     });
+
+    it.each([
+      ['la lista de columnas', ['corrects_entry_id']],
+      ['el nombre del índice', 'clinical_record_entries_corrects_entry_id_key'],
+    ])(
+      'la unique de corrects_entry_id (informada como %s) es 409 sin reintento',
+      async (_forma, target) => {
+        // Otra corrección de la misma entrada ganó la carrera (ENG-100).
+        // Reintentar con el número siguiente dejaría dos correcciones hermanas.
+        prisma.clinicalRecordEntry.create.mockRejectedValue({
+          code: 'P2002',
+          meta: { target },
+        });
+
+        await expect(service.append(newEntry(), NOW)).rejects.toThrow(
+          'Esa entrada ya tiene una corrección',
+        );
+        expect(prisma.clinicalRecordEntry.create).toHaveBeenCalledTimes(1);
+      },
+    );
 
     it('un error que no es colisión no se reintenta', async () => {
       // Reintentar un fallo de base tres veces solo demora el error.
@@ -602,7 +622,7 @@ describe('ClinicalRecordsService', () => {
         patient_id: PATIENT,
         professional_id: PROFESSIONAL,
         consultation_id: CONSULTATION,
-        corrected_by: [],
+        corrected_by: null,
       });
 
       await expect(correct()).resolves.toMatchObject({
@@ -637,7 +657,7 @@ describe('ClinicalRecordsService', () => {
           patient_id: '99999999-9999-4999-8999-999999999999',
           professional_id: PROFESSIONAL,
           consultation_id: null,
-          corrected_by: [],
+          corrected_by: null,
         });
 
         await expect(correct()).rejects.toThrow(NotFoundException);
@@ -651,7 +671,7 @@ describe('ClinicalRecordsService', () => {
           patient_id: PATIENT,
           professional_id: OTHER_PROFESSIONAL,
           consultation_id: null,
-          corrected_by: [],
+          corrected_by: null,
         });
 
         await expect(correct()).rejects.toThrow(ForbiddenException);
@@ -665,7 +685,7 @@ describe('ClinicalRecordsService', () => {
           patient_id: PATIENT,
           professional_id: PROFESSIONAL,
           consultation_id: null,
-          corrected_by: [{ id: 'correccion-previa' }],
+          corrected_by: { id: 'correccion-previa' },
         });
 
         await expect(correct()).rejects.toThrow(ConflictException);
@@ -680,7 +700,7 @@ describe('ClinicalRecordsService', () => {
             patient_id: '99999999-9999-4999-8999-999999999999',
             professional_id: PROFESSIONAL,
             consultation_id: null,
-            corrected_by: [],
+            corrected_by: null,
           },
         ],
         [
@@ -690,7 +710,7 @@ describe('ClinicalRecordsService', () => {
             patient_id: PATIENT,
             professional_id: OTHER_PROFESSIONAL,
             consultation_id: null,
-            corrected_by: [],
+            corrected_by: null,
           },
         ],
       ])('no escribe nada cuando la entrada %s', async (_caso, entry) => {

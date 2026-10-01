@@ -124,6 +124,12 @@ const MAX_APPEND_ATTEMPTS = 3;
 /** `P2002` de Prisma: violación de una restricción unique. */
 const PRISMA_UNIQUE_VIOLATION = 'P2002';
 
+/** Mensaje del 409 de corregir dos veces la misma entrada (ENG-100). Lo usan el
+ *  chequeo previo y la unique de `corrects_entry_id`, que tienen que decir lo
+ *  mismo: para el profesional es el mismo error. */
+const ALREADY_CORRECTED_MESSAGE =
+  'Esa entrada ya tiene una corrección. Corregí la corrección más reciente, así queda claro cuál es el dato vigente.';
+
 /**
  * Estados de turno que habilitan **escribir** en la HC del paciente.
  *
@@ -266,6 +272,13 @@ export class ClinicalRecordsService {
           throw new InternalServerErrorException(
             'No pudimos guardar la entrada en la historia clínica. Probá de nuevo en unos minutos.',
           );
+        }
+
+        // La unique de `corrects_entry_id` (ENG-100) NO es una colisión de
+        // secuencia: otra corrección de la misma entrada ganó. Reintentar con el
+        // número siguiente es justo lo que dejaría dos correcciones hermanas.
+        if (violatesUniqueOn(error, 'corrects_entry_id')) {
+          throw new ConflictException(ALREADY_CORRECTED_MESSAGE);
         }
 
         // Alguien escribió en esta cadena entre que leímos la cabeza y guardamos.
@@ -440,8 +453,7 @@ export class ClinicalRecordsService {
         patient_id: true,
         professional_id: true,
         consultation_id: true,
-        // `take: 1` porque solo interesa si hay alguna, no cuántas.
-        corrected_by: { select: { id: true }, take: 1 },
+        corrected_by: { select: { id: true } },
       },
     });
 
@@ -457,10 +469,12 @@ export class ClinicalRecordsService {
       );
     }
 
-    if (entry.corrected_by.length > 0) {
-      throw new ConflictException(
-        'Esa entrada ya tiene una corrección. Corregí la corrección más reciente, así queda claro cuál es el dato vigente.',
-      );
+    // Atajo para el caso común, con un mensaje claro. NO es lo que impide el
+    // duplicado: entre esta lectura y el INSERT otra corrección puede entrar.
+    // Eso lo cierra la unique sobre `corrects_entry_id`, que `append()` traduce
+    // al mismo 409.
+    if (entry.corrected_by) {
+      throw new ConflictException(ALREADY_CORRECTED_MESSAGE);
     }
 
     return { id: entry.id, consultation_id: entry.consultation_id };
@@ -821,6 +835,19 @@ export class ClinicalRecordsService {
       rows.map((row) => chainEntryFromRow(row as ChainEntryRow)),
     );
   }
+}
+
+/**
+ * Si un `P2002` vino de la unique sobre `column`.
+ *
+ * Prisma informa la restricción en `meta.target`, que según el motor llega como
+ * la lista de columnas (`['corrects_entry_id']`) o como el nombre del índice
+ * (`clinical_record_entries_corrects_entry_id_key`). Se aceptan las dos formas.
+ */
+function violatesUniqueOn(error: unknown, column: string): boolean {
+  const target = (error as { meta?: { target?: unknown } }).meta?.target;
+  if (Array.isArray(target)) return target.includes(column);
+  return typeof target === 'string' && target.includes(column);
 }
 
 /**

@@ -268,6 +268,30 @@ describe('Corregir una entrada de HC (integration)', () => {
     );
   });
 
+  it('dos correcciones simultáneas de la misma entrada: entra una sola', async () => {
+    // Las dos pasan el chequeo previo —todavía no hay corrección—, así que lo
+    // único que puede frenar a la segunda es la unique de corrects_entry_id.
+    const patientId = await createPatient();
+    const original = await seedEntry(patientId);
+
+    const results = await Promise.allSettled([
+      correct(patientId, original.id),
+      correct(patientId, original.id),
+    ]);
+
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const [rejected] = results.filter(
+      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    );
+    expect(rejected.reason).toBeInstanceOf(ConflictException);
+
+    await expect(
+      prisma.clinicalRecordEntry.count({
+        where: { corrects_entry_id: original.id },
+      }),
+    ).resolves.toBe(1);
+  });
+
   it('403 si la entrada la firmó otro profesional', async () => {
     const patientId = await createPatient();
     const original = await seedEntry(patientId);
