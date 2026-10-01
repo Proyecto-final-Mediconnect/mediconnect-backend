@@ -283,6 +283,18 @@ describe('AppointmentPaymentService', () => {
   });
 
   describe('sandbox', () => {
+    it('MERCADOPAGO_SANDBOX manda sobre el prefijo del token', async () => {
+      // Con credenciales de un usuario de prueba el token es `APP_USR-` igual
+      // que en producción: el prefijo deja de distinguir y la variable es lo
+      // único que lo resuelve sin tocar código.
+      mercadopago.isSandbox.mockReturnValue(true);
+
+      const link = await service.createCheckout('jwt', PATIENT, APPOINTMENT);
+
+      expect(link.sandbox).toBe(true);
+      expect(link.checkoutUrl).toBe('https://mp/checkout/sandbox');
+    });
+
     it('en sandbox devuelve el init point de prueba y lo avisa', async () => {
       const link = await service.createCheckout('jwt', PATIENT, APPOINTMENT);
 
