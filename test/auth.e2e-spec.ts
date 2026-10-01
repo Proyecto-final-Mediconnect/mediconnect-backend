@@ -357,7 +357,12 @@ describe('Auth registro (e2e)', () => {
     expect(otroUsuario.status).not.toBe(429);
   });
 
-  it('un X-Forwarded-For inventado no esquiva el límite', async () => {
+  // Cubre que el guard no lea X-Forwarded-For por su cuenta, nada más. Este app
+  // no monta `trust proxy` como main.ts, así que `req.ip` es siempre el
+  // loopback y el header no llega a influir: el ThrottlerGuard anterior también
+  // pasaría. Que en producción un X-Forwarded-For armado no mueva `req.ip`
+  // depende del proxy de Render, que acá no existe para reproducirlo.
+  it('el guard no lee X-Forwarded-For para identificar al cliente', async () => {
     const server = app.getHttpServer();
     for (let i = 0; i < 5; i++) {
       await request(server)
