@@ -2,8 +2,15 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, type Payment } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { verifyWebhookSignature } from './mercadopago-signature';
-import { MercadoPagoPayment, MercadoPagoService } from './mercadopago.service';
-import { APPROVED_STATUS } from './mercadopago.config';
+import {
+  MercadoPagoApiError,
+  MercadoPagoPayment,
+  MercadoPagoService,
+} from './mercadopago.service';
+import {
+  APPROVED_STATUS,
+  SIGNATURE_TOLERANCE_SECONDS,
+} from './mercadopago.config';
 
 /** Lo que llega por HTTP, sin interpretar. El controller no decide nada. */
 export interface IncomingWebhook {
@@ -86,6 +93,10 @@ export class PaymentWebhookService {
       dataId: incoming.dataId,
       secret,
       now,
+      // Sin ventana de antigüedad: un reintento de MercadoPago llega 15 minutos
+      // o más después, y rechazarlo por viejo dejaría el turno cobrado sin
+      // confirmar. Ver `toleranceSeconds` en `verifyWebhookSignature`.
+      toleranceSeconds: null,
     });
     if (!check.valid) {
       // Sin escribir en la base: una notificación sin firma válida no merece
@@ -94,6 +105,14 @@ export class PaymentWebhookService {
         `Webhook de MercadoPago rechazado (${check.reason}) para data.id=${incoming.dataId ?? 'ausente'}`,
       );
       return 'firma-invalida';
+    }
+
+    if (check.ageSeconds > SIGNATURE_TOLERANCE_SECONDS) {
+      // No se rechaza, pero se deja rastro: un reintento tardío es normal, un
+      // desfasaje de horas sin reintentos de por medio no lo es.
+      this.logger.warn(
+        `Webhook de MercadoPago con firma de hace ${Math.round(check.ageSeconds)} s para data.id=${incoming.dataId}: se procesa igual (reintento o reenvío).`,
+      );
     }
 
     // `merchant_order` y demás no confirman nada: el pago tiene su propia
@@ -107,7 +126,24 @@ export class PaymentWebhookService {
 
     // Si la API de MercadoPago falla, esto tira y el controller contesta 5xx:
     // es el único caso en el que queremos que MercadoPago reintente.
-    const mpPayment = await this.mercadopago.getPayment(mpPaymentId);
+    let mpPayment: MercadoPagoPayment;
+    try {
+      mpPayment = await this.mercadopago.getPayment(mpPaymentId);
+    } catch (error) {
+      // 404: el pago no existe para nuestro token (credenciales de prueba
+      // contra un pago real, o una notificación de otra cuenta). No es
+      // transitorio, así que reintentarlo no sirve: 200 y al log.
+      if (
+        error instanceof MercadoPagoApiError &&
+        error.providerStatus === 404
+      ) {
+        this.logger.error(
+          `Webhook de MercadoPago firmado para un pago que este token no ve (payment_id=${mpPaymentId}).`,
+        );
+        return 'pago-desconocido';
+      }
+      throw error;
+    }
 
     const payment = mpPayment.externalReference
       ? await this.prisma.payment.findUnique({

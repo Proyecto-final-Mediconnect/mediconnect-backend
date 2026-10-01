@@ -1,7 +1,11 @@
 import { createHmac } from 'node:crypto';
 import { Prisma } from '../../generated/prisma/client';
 import { buildManifest } from './mercadopago-signature';
-import type { MercadoPagoPayment } from './mercadopago.service';
+import { HttpStatus } from '@nestjs/common';
+import {
+  MercadoPagoApiError,
+  type MercadoPagoPayment,
+} from './mercadopago.service';
 import {
   IncomingWebhook,
   PaymentWebhookService,
@@ -13,13 +17,16 @@ const TS = String(Math.floor(NOW.getTime() / 1000));
 const APPOINTMENT_ID = '11111111-1111-1111-1111-111111111111';
 const MP_PAYMENT_ID = '123456789';
 
-function signed(overrides: Partial<IncomingWebhook> = {}): IncomingWebhook {
+function signed(
+  overrides: Partial<IncomingWebhook> = {},
+  ts = TS,
+): IncomingWebhook {
   const requestId = 'req-1';
   const v1 = createHmac('sha256', SECRET)
-    .update(buildManifest(MP_PAYMENT_ID, requestId, TS))
+    .update(buildManifest(MP_PAYMENT_ID, requestId, ts))
     .digest('hex');
   return {
-    signatureHeader: `ts=${TS},v1=${v1}`,
+    signatureHeader: `ts=${ts},v1=${v1}`,
     requestId,
     dataId: MP_PAYMENT_ID,
     topic: 'payment',
@@ -226,6 +233,37 @@ describe('PaymentWebhookService', () => {
       'pago-desconocido',
     );
     expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+  });
+
+  // Un reintento de MercadoPago llega 15 minutos o más después. Si conservara
+  // el ts original y se rechazara por viejo, el turno cobrado no se confirmaría.
+  it('una firma de hace horas (reintento) se procesa igual', async () => {
+    const threeHoursAgo = String(Math.floor(NOW.getTime() / 1000) - 3 * 3600);
+
+    await expect(
+      service.handle(signed({}, threeHoursAgo), SECRET, NOW),
+    ).resolves.toBe('turno-confirmado');
+  });
+
+  it('pago que MercadoPago no encuentra (404): 200 sin reintento, no un 5xx', async () => {
+    mercadopago.getPayment.mockRejectedValue(
+      new MercadoPagoApiError(404, HttpStatus.BAD_GATEWAY, 'no existe'),
+    );
+
+    await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
+      'pago-desconocido',
+    );
+    expect(prisma.paymentWebhookEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('un error del proveedor que no es 404 se propaga para que reintente', async () => {
+    mercadopago.getPayment.mockRejectedValue(
+      new MercadoPagoApiError(500, HttpStatus.BAD_GATEWAY, 'caído'),
+    );
+
+    await expect(service.handle(signed(), SECRET, NOW)).rejects.toBeInstanceOf(
+      MercadoPagoApiError,
+    );
   });
 
   it('si la API de MercadoPago falla, propaga el error para que reintente', async () => {

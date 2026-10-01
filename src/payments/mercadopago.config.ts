@@ -35,15 +35,6 @@ export const REQUEST_TIMEOUT_MS = 10_000;
 export const SIGNATURE_TOLERANCE_SECONDS = 300;
 
 /**
- * Prefijo de las preferencias creadas por el spike (ENG-61).
- *
- * Va en el `external_reference` para poder distinguir en el panel de
- * MercadoPago —y en la bitácora de webhooks— lo que generó una prueba de lo que
- * generó un turno real. ENG-63 usa el id del turno pelado; el spike nunca.
- */
-export const SPIKE_EXTERNAL_REFERENCE_PREFIX = 'spike-eng61';
-
-/**
  * Estados de un pago en MercadoPago que se consideran finales y aprobados.
  *
  * `approved` es el único que confirma un turno. `authorized` NO entra: es una

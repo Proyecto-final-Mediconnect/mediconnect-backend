@@ -109,8 +109,7 @@ export class MercadoPagoService {
     return Boolean(this.config.get<string>('MERCADOPAGO_ACCESS_TOKEN'));
   }
 
-  /** `true` si el token configurado es de prueba. Lo usa el spike para no
-   *  ejecutarse jamás contra credenciales productivas. */
+  /** `true` si el token configurado es de prueba (prefijo `TEST-`). */
   isSandbox(): boolean {
     return (
       this.config
@@ -267,7 +266,20 @@ export class MercadoPagoService {
     }
 
     const text = await response.text();
-    return (text ? JSON.parse(text) : {}) as T;
+    try {
+      return (text ? JSON.parse(text) : {}) as T;
+    } catch {
+      // Un 2xx con un cuerpo que no es JSON es un fallo del proveedor, y se
+      // trata como tal: 502 explicado en vez de un 500 sin mensaje.
+      this.logger.error(
+        `MercadoPago ${method} ${path} devolvió un cuerpo que no es JSON: ${text.slice(0, 300)}`,
+      );
+      throw new MercadoPagoApiError(
+        response.status,
+        HttpStatus.BAD_GATEWAY,
+        'MercadoPago devolvió una respuesta que no pudimos leer.',
+      );
+    }
   }
 }
 

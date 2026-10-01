@@ -33,7 +33,9 @@ import { SIGNATURE_TOLERANCE_SECONDS } from './mercadopago.config';
  *  nunca para responderle al emisor: decirle a un atacante si falló el formato,
  *  el HMAC o el reloj es ayudarlo a iterar. */
 export type SignatureCheck =
-  | { valid: true }
+  /** `ageSeconds`: cuánto pasó desde el `ts` firmado. Se informa siempre,
+   *  también cuando no se exige ventana, para poder loguear el desfasaje. */
+  | { valid: true; ageSeconds: number }
   | { valid: false; reason: SignatureFailure };
 
 export type SignatureFailure =
@@ -55,13 +57,24 @@ export interface SignatureInput {
   secret: string;
   /** Inyectable para poder testear el vencimiento sin viajar en el tiempo. */
   now?: Date;
+  /**
+   * Antigüedad máxima del `ts`, en segundos. `null` desactiva el chequeo.
+   *
+   * Por defecto, `SIGNATURE_TOLERANCE_SECONDS`. El webhook productivo de ENG-64
+   * pasa `null`: MercadoPago reintenta cada 15 minutos o más, y si el reintento
+   * conserva el `ts` original, una ventana de 5 minutos lo rechazaría y el turno
+   * cobrado no se confirmaría nunca. Allá el reenvío de una notificación firmada
+   * no hace daño —el estado se vuelve a pedir a la API y las transiciones son
+   * idempotentes—, así que la ventana cuesta más de lo que protege.
+   */
+  toleranceSeconds?: number | null;
 }
 
 /**
  * Decide si una notificación viene realmente de MercadoPago.
  *
  * Chequea, en este orden: que el header exista y tenga las dos partes, que el
- * `ts` esté dentro de la ventana de tolerancia, y recién ahí el HMAC. El orden
+ * `ts` esté dentro de la ventana de tolerancia (si se exige), y recién ahí el HMAC. El orden
  * importa poco para la seguridad y mucho para el costo: descarta lo barato antes
  * de calcular un digest.
  */
@@ -84,7 +97,18 @@ export function verifyWebhookSignature(input: SignatureInput): SignatureCheck {
   if (!requestId) return { valid: false, reason: 'missing-request-id' };
   if (!dataId) return { valid: false, reason: 'missing-data-id' };
 
-  if (isExpired(parsed.ts, input.now ?? new Date())) {
+  const ageSeconds = signatureAgeSeconds(parsed.ts, input.now ?? new Date());
+  // Un `ts` que no es un número no lo firma MercadoPago: se rechaza haya o no
+  // ventana.
+  if (!Number.isFinite(ageSeconds)) {
+    return { valid: false, reason: 'malformed-signature-header' };
+  }
+
+  const tolerance =
+    input.toleranceSeconds === undefined
+      ? SIGNATURE_TOLERANCE_SECONDS
+      : input.toleranceSeconds;
+  if (tolerance !== null && ageSeconds > tolerance) {
     return { valid: false, reason: 'expired-timestamp' };
   }
 
@@ -92,7 +116,7 @@ export function verifyWebhookSignature(input: SignatureInput): SignatureCheck {
   const expected = createHmac('sha256', secret).update(manifest).digest('hex');
 
   return equalsConstantTime(expected, parsed.v1)
-    ? { valid: true }
+    ? { valid: true, ageSeconds }
     : { valid: false, reason: 'mismatch' };
 }
 
@@ -134,20 +158,17 @@ function parseSignatureHeader(
   return ts && v1 ? { ts, v1 } : null;
 }
 
-/** `ts` fuera de la ventana de tolerancia, en cualquiera de los dos sentidos.
- *  Un `ts` del futuro también se rechaza: no hay razón legítima para que exista
- *  y aceptarlo permitiría fabricar una firma que no vence nunca. */
-function isExpired(ts: string, now: Date): boolean {
-  const seconds = Number(ts);
-  if (!Number.isFinite(seconds)) return true;
+/** Segundos entre el `ts` firmado y `now`, en valor absoluto. `NaN` si el `ts`
+ *  no es un número. */
+function signatureAgeSeconds(ts: string, now: Date): number {
+  const value = Number(ts);
+  if (!/^\d+$/.test(ts) || !Number.isFinite(value)) return Number.NaN;
 
-  // MercadoPago manda el `ts` en segundos, pero hay integraciones donde llega en
-  // milisegundos. Se detecta por magnitud en vez de asumir: un timestamp en
+  // MercadoPago documenta el `ts` en milisegundos, pero hay integraciones donde
+  // llega en segundos. Se detecta por magnitud en vez de asumir: un timestamp en
   // segundos posterior al año 2001 tiene 10 dígitos, y uno en milisegundos, 13.
-  const millis = ts.length >= 13 ? seconds : seconds * 1000;
-  const drift = Math.abs(now.getTime() - millis) / 1000;
-
-  return drift > SIGNATURE_TOLERANCE_SECONDS;
+  const millis = ts.length >= 13 ? value : value * 1000;
+  return Math.abs(now.getTime() - millis) / 1000;
 }
 
 /**
