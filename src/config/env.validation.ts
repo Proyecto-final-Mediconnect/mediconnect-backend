@@ -4,7 +4,6 @@ import {
   IsOptional,
   IsString,
   IsUrl,
-  Matches,
   validateSync,
 } from 'class-validator';
 
@@ -74,43 +73,6 @@ class EnvironmentVariables {
   @IsOptional()
   @IsIn(['off', 'cloud-audio-only'])
   VIDEO_RECORDING_MODE?: string;
-
-  // MercadoPago (ENG-61/ENG-64, ADR-013). Opcional por el mismo motivo que
-  // DAILY_API_KEY: CI y local tienen que bootear sin credenciales de terceros, y
-  // los endpoints de pago contestan 503 explicando que falta.
-  //
-  // El prefijo separa los dos entornos y es lo ÚNICO que los separa: sandbox y
-  // producción comparten el host `api.mercadopago.com`. `TEST-` cobra de
-  // mentira, `APP_USR-` cobra de verdad. Se valida el formato acá para que un
-  // token productivo pegado por error en un `.env` de desarrollo se note al
-  // bootear y no cuando alguien ya cobró.
-  @IsOptional()
-  @Matches(/^(TEST|APP_USR)-/, {
-    message:
-      'MERCADOPAGO_ACCESS_TOKEN debe empezar con TEST- (sandbox) o APP_USR- (producción).',
-  })
-  MERCADOPAGO_ACCESS_TOKEN?: string;
-
-  // Clave secreta del webhook, del panel de MercadoPago. Es lo que firma el
-  // manifest de las notificaciones: sin ella el endpoint público de ENG-64 no
-  // puede distinguir a MercadoPago de cualquiera, y por eso rechaza todo cuando
-  // falta en vez de procesar sin verificar.
-  @IsOptional()
-  @IsString()
-  MERCADOPAGO_WEBHOOK_SECRET?: string;
-
-  // Solo para apuntar a un mock de la API en pruebas manuales, igual que
-  // DAILY_API_URL. Sin esto se usa el endpoint real de mercadopago.config.
-  @IsOptional()
-  @IsUrl({ require_tld: false, require_protocol: true })
-  MERCADOPAGO_API_URL?: string;
-
-  // URL pública a la que MercadoPago manda los webhooks. Tiene que ser HTTPS y
-  // alcanzable desde afuera: en local hace falta un túnel (ver el informe de
-  // ENG-61). El spike la usa al crear la preferencia.
-  @IsOptional()
-  @IsUrl({ require_tld: false, require_protocol: true })
-  MERCADOPAGO_NOTIFICATION_URL?: string;
 }
 
 /** Falla rápido al bootear si falta o está mal formada una env var requerida,
