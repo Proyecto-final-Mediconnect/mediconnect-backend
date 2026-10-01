@@ -179,6 +179,16 @@ describe('Auth mobile (e2e)', () => {
         });
     });
 
+    it('400 con un refresh token desmedido, sin llegar a Supabase', () => {
+      return request(app.getHttpServer())
+        .post('/auth/mobile/refresh')
+        .send({ refreshToken: 'x'.repeat(513) })
+        .expect(400)
+        .expect(() => {
+          expect(refreshSession).not.toHaveBeenCalled();
+        });
+    });
+
     it('401 con un refresh token inválido o ya usado', () => {
       refreshSession.mockResolvedValue({
         data: {},

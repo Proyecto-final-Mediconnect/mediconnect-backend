@@ -31,6 +31,17 @@ comportan igual que las de la web:
 - Supabase caído o con rate limit → **503**: la app **no** borra la sesión, porque
   no es un token inválido.
 - **5 requests por minuto** por cliente, como `/auth/login` y `/auth/refresh`.
+  Pasado el límite → **429**: igual que el 503, la app **no** borra la sesión;
+  reintenta después del `Retry-After`.
+
+> **El 5/min del refresh es provisorio para mobile.** El cliente se identifica
+> por IP (`ClientIpThrottlerGuard`, ENG-84), y en datos móviles las operadoras
+> comparten una IP pública entre muchos clientes (CGNAT). En la web el refresh
+> lo dispara el usuario al navegar; en la app lo dispara la propia app cada vez
+> que vence el access token. Con pocos usuarios no se nota, pero a escala varios
+> pacientes de la misma operadora pueden compartir el cupo y recibir 429. Si
+> pasa, la salida es contar el refresh por algo propio de la sesión y no por IP,
+> no subir el límite a ciegas.
 - `Cache-Control: no-store`, porque la respuesta lleva credenciales (RFC 6749
   §5.1).
 
