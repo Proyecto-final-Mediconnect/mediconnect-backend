@@ -15,6 +15,7 @@ import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { ClinicalRecordsService } from './clinical-records.service';
+import { CorrectClinicalEntryDto } from './dto/correct-clinical-entry.dto';
 import { CreateClinicalEntryDto } from './dto/create-clinical-entry.dto';
 
 /**
@@ -89,5 +90,40 @@ export class ClinicalRecordsController {
   ) {
     const { userId } = requireAuth(req);
     return this.records.addEntryAsProfessional(userId, patientId, dto);
+  }
+
+  /**
+   * Corrige una entrada de la HC agregando un asiento nuevo (ENG-100).
+   *
+   * La ruta es `POST .../clinical-record/:entryId/corrections` y no un `PATCH`
+   * sobre la entrada, porque **no se modifica nada**: se crea un recurso nuevo
+   * que referencia al anterior. Un `PATCH` prometería lo que la tabla no puede
+   * cumplir —el trigger de ENG-57 rechaza todo UPDATE— y el 405 llegaría después
+   * de que el profesional ya escribió la corrección.
+   *
+   * Devuelve **201** con la entrada nueva. La original no viene en la respuesta:
+   * no cambió, y el cliente la tiene del `GET`.
+   *
+   * Mismo rate limit que el alta y por el mismo motivo: cada request deja una
+   * fila que no se puede borrar.
+   */
+  @Post(':entryId/corrections')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @HttpCode(HttpStatus.CREATED)
+  correct(
+    @Req() req: Request,
+    @Param('patientId', new ParseUUIDPipe({ version: '4' }))
+    patientId: string,
+    @Param('entryId', new ParseUUIDPipe({ version: '4' }))
+    entryId: string,
+    @Body() dto: CorrectClinicalEntryDto,
+  ) {
+    const { userId } = requireAuth(req);
+    return this.records.correctEntryAsProfessional(
+      userId,
+      patientId,
+      entryId,
+      dto,
+    );
   }
 }

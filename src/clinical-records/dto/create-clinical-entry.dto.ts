@@ -1,32 +1,11 @@
-import { Transform } from 'class-transformer';
-import {
-  IsIn,
-  IsNotEmpty,
-  IsOptional,
-  IsString,
-  IsUUID,
-  MaxLength,
-} from 'class-validator';
-
-/**
- * Recorta el valor antes de validar.
- *
- * Va antes de `@IsNotEmpty()` a propósito: sin esto, `"   "` pasaría la
- * validación y quedaría un asiento con un motivo en blanco — y como la tabla es
- * append-only, esa fila no se puede borrar nunca.
- */
-const trimmed = () =>
-  Transform(({ value }: { value: unknown }) =>
-    typeof value === 'string' ? value.trim() : value,
-  );
+import { IsIn, IsOptional, IsUUID } from 'class-validator';
+import { ClinicalEntryContentDto } from './clinical-entry-content.dto';
 
 /**
  * Nueva entrada de historia clínica (ENG-58).
  *
- * El formulario es **estructurado y no un textarea libre**, y eso no es una
- * preferencia de UI: el `content` se guarda como recurso FHIR R5 (ADR-013) y de
- * ahí sale la interoperabilidad del MediPass. Un párrafo suelto no se puede
- * mapear a nada; cuatro campos con significado propio, sí.
+ * Los cuatro campos clínicos vienen de `ClinicalEntryContentDto`, que comparte
+ * con la corrección de ENG-100.
  *
  * Lo que **no** manda el cliente, y por qué:
  *
@@ -43,7 +22,8 @@ const trimmed = () =>
 /** Valores del enum `entry_type` que puede elegir el profesional.
  *
  *  `CORRECCION` queda afuera: una corrección no se crea desde este formulario,
- *  necesita apuntar a la entrada que corrige y es ENG-100. */
+ *  necesita apuntar a la entrada que corrige y va por
+ *  `POST .../clinical-record/:entryId/corrections` (ENG-100). */
 export const SELECTABLE_ENTRY_TYPES = [
   'CONSULTA',
   'DIAGNOSTICO',
@@ -51,47 +31,11 @@ export const SELECTABLE_ENTRY_TYPES = [
   'ESTUDIO',
 ] as const;
 
-export class CreateClinicalEntryDto {
+export class CreateClinicalEntryDto extends ClinicalEntryContentDto {
   @IsIn([...SELECTABLE_ENTRY_TYPES], {
     message: 'El tipo de entrada no es válido',
   })
   entryType!: (typeof SELECTABLE_ENTRY_TYPES)[number];
-
-  /** Motivo de consulta. Es el único obligatorio: un asiento sin motivo no dice
-   *  nada, y los otros tres pueden no aplicar según el tipo de entrada. */
-  @trimmed()
-  @IsString()
-  @IsNotEmpty({ message: 'El motivo es obligatorio' })
-  @MaxLength(2000, {
-    message: 'El motivo no puede superar los 2000 caracteres',
-  })
-  reason!: string;
-
-  /** Evolución y hallazgos. */
-  @trimmed()
-  @IsOptional()
-  @IsString()
-  @MaxLength(5000, {
-    message: 'La evolución no puede superar los 5000 caracteres',
-  })
-  findings?: string;
-
-  @trimmed()
-  @IsOptional()
-  @IsString()
-  @MaxLength(2000, {
-    message: 'El diagnóstico no puede superar los 2000 caracteres',
-  })
-  diagnosis?: string;
-
-  /** Plan o indicaciones. */
-  @trimmed()
-  @IsOptional()
-  @IsString()
-  @MaxLength(5000, {
-    message: 'El plan no puede superar los 5000 caracteres',
-  })
-  plan?: string;
 
   /**
    * Consulta que originó la entrada, si se escribe durante la videoconsulta.

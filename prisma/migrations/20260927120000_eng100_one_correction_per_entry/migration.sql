@@ -1,0 +1,15 @@
+-- ENG-100 · Una entrada de HC tiene a lo sumo UNA corrección
+--
+-- El service ya rechaza con 409 corregir una entrada que tiene corrección, pero
+-- ese chequeo corre ANTES de `append()` y fuera de toda transacción: dos
+-- correcciones simultáneas de la misma entrada (doble click, dos pestañas) pasan
+-- las dos, y la segunda solo choca por `sequence_number`, reintenta con el número
+-- siguiente y se guarda. Quedan dos correcciones hermanas sin forma de saber cuál
+-- es la vigente, en una tabla que no admite UPDATE ni DELETE para arreglarlo.
+--
+-- La unique es lo que lo hace imposible de verdad. Los NULL no chocan entre sí
+-- en Postgres, así que las entradas que no son correcciones no se ven afectadas.
+--
+-- Antes de ENG-100 no había forma de escribir una corrección, así que no puede
+-- haber duplicados que hagan fallar la creación del índice.
+CREATE UNIQUE INDEX "clinical_record_entries_corrects_entry_id_key" ON "clinical_record_entries"("corrects_entry_id");
