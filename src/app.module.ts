@@ -7,7 +7,7 @@ import {
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AppointmentsModule } from './appointments/appointments.module';
@@ -15,9 +15,11 @@ import { AuthModule } from './auth/auth.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { ClinicalRecordsModule } from './clinical-records/clinical-records.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
+import { ClientIpThrottlerGuard } from './common/throttler/client-ip-throttler.guard';
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { PatientsModule } from './patients/patients.module';
+import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProfessionalsModule } from './professionals/professionals.module';
 import { SchedulesModule } from './schedules/schedules.module';
@@ -48,11 +50,13 @@ import { VideoModule } from './video/video.module';
     SchedulesModule,
     AppointmentsModule,
     ClinicalRecordsModule,
+    PaymentsModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Por IP real del cliente, no por la IP de salida de Cloudflare (ENG-84).
+    { provide: APP_GUARD, useClass: ClientIpThrottlerGuard },
     // Captura las excepciones que atraviesan el ciclo de vida de Nest. Sin este
     // filtro solo se reportarían los errores que escapan del framework.
     { provide: APP_FILTER, useClass: SentryGlobalFilter },

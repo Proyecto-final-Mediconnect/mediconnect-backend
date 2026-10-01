@@ -10,10 +10,14 @@ import { PayloadTooLargeFilter } from './common/filters/payload-too-large.filter
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
-  // Detrás de un reverse proxy (Nginx/Cloudflare/Railway/Render), `req.ip`
-  // sería la IP del proxy y ThrottlerGuard limitaría a TODOS los usuarios
-  // como uno solo (rompe el rate limit por IP de POST /auth/refresh y el
-  // límite default global). Confiamos en el primer hop de X-Forwarded-For.
+  // Detrás de Render, Express confía en un salto de X-Forwarded-For para
+  // resolver bien `req.protocol` y `req.secure`.
+  //
+  // Ojo: esto NO alcanza para que `req.ip` sea el cliente. Delante de Render
+  // hay Cloudflare, y con un salto `req.ip` queda en la IP de salida de
+  // Cloudflare, compartida por todos los usuarios de la región (medido el
+  // 23/09/2026, ENG-84). Por eso el rate limit no usa `req.ip`: identifica al
+  // cliente por `CF-Connecting-IP` — ver `ClientIpThrottlerGuard`.
   app.set('trust proxy', 1);
   app.use(cookieParser());
   app.enableCors({
