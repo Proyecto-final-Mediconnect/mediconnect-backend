@@ -135,7 +135,9 @@ es qué significa "manual", y eso es lo que documenta esta sección.
 #### Quién valida
 
 **Responsable: Juan Cruz García Amadey.** Ocupa operativamente el rol `MODERADOR`,
-que hasta ENG-109 existía en el enum sin que nadie lo ejerciera. Es también el
+que hasta ENG-109 existía en el enum sin que nadie lo ejerciera para validar
+matrículas (la web tiene `/moderacion`, pero es el placeholder de la moderación de
+reseñas de ENG-81, no de esto). Es también el
 asignado del ticket que definió este procedimiento; el equipo puede reasignarlo en
 una daily, y si lo hace hay que actualizar este párrafo en el mismo PR.
 
@@ -183,7 +185,8 @@ order by created_at;
 ```sql
 update public.professionals
 set status = 'VALIDADO', updated_at = now()
-where license_number = 'MP-XXXXX';
+where profile_id = '<profile_id de la consulta 1>'
+  and status = 'PENDIENTE_VALIDACION_MATRICULA';
 ```
 
 **3. Rechazar**, si la matrícula no existe, está vencida o el nombre no coincide:
@@ -191,15 +194,21 @@ where license_number = 'MP-XXXXX';
 ```sql
 update public.professionals
 set status = 'RECHAZADO', updated_at = now()
-where license_number = 'MP-XXXXX';
+where profile_id = '<profile_id de la consulta 1>'
+  and status = 'PENDIENTE_VALIDACION_MATRICULA';
 ```
 
-Las dos escrituras van acotadas por `license_number` y no por especialidad ni por
-fecha: es el dato que se acaba de verificar, y un `where` más amplio puede validar
-de un saque a alguien que nadie miró. `license_number` es `varchar(30)` y **no tiene
-unique**, así que conviene confirmar que el `update` afectó **una** fila; si afectó
-más de una, hay dos fichas con la misma matrícula y eso es un caso a mirar aparte,
-no a aprobar.
+Las dos escrituras van acotadas por `profile_id`, copiado de la consulta 1, y no por
+`license_number`: la matrícula **no tiene unique** (`varchar(30)`) y dos colegios
+provinciales pueden emitir el mismo número, así que un `where` por matrícula puede
+validar de un saque a alguien que nadie miró — y "confirmar después que afectó una
+fila" llega tarde, porque el `update` ya cambió las dos. Por la misma razón no se
+filtra por especialidad ni por fecha.
+
+El `and status = 'PENDIENTE_VALIDACION_MATRICULA'` evita pisar una decisión ya
+tomada: si otro miembro del equipo la resolvió en el medio, el `update` afecta
+**cero** filas en vez de dar vuelta un rechazo. El SQL Editor muestra cuántas filas
+cambió: tiene que ser **una**.
 
 `updated_at` se pone a mano porque la columna tiene `default now()` solo en el
 INSERT: sin esto, la ficha queda diciendo que no se tocó desde el registro.
