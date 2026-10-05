@@ -45,7 +45,7 @@ function verify(
 
 describe('verifyWebhookSignature', () => {
   it('acepta una notificación firmada con el secreto correcto', () => {
-    expect(verify()).toEqual({ valid: true });
+    expect(verify()).toEqual({ valid: true, ageSeconds: 0 });
   });
 
   it('rechaza una firma calculada con otro secreto', () => {
@@ -82,6 +82,7 @@ describe('verifyWebhookSignature', () => {
   it('tolera espacios y el orden invertido de ts y v1', () => {
     expect(verify({ signatureHeader: ` v1=${sign(TS)} , ts=${TS} ` })).toEqual({
       valid: true,
+      ageSeconds: 0,
     });
   });
 
@@ -123,6 +124,7 @@ describe('verifyWebhookSignature', () => {
     it('acepta un ts dentro de la ventana', () => {
       expect(verify(atOffset(-(SIGNATURE_TOLERANCE_SECONDS - 1)))).toEqual({
         valid: true,
+        ageSeconds: SIGNATURE_TOLERANCE_SECONDS - 1,
       });
     });
 
@@ -142,17 +144,40 @@ describe('verifyWebhookSignature', () => {
       });
     });
 
-    it('rechaza un ts que no es un número', () => {
-      expect(verify({ signatureHeader: 'ts=ayer,v1=deadbeef' })).toEqual({
-        valid: false,
-        reason: 'expired-timestamp',
+    it('rechaza un ts que no es un número, aun sin ventana', () => {
+      // Un ts así no lo firma MercadoPago: es un header mal formado, no viejo.
+      for (const toleranceSeconds of [undefined, null]) {
+        expect(
+          verify({ signatureHeader: 'ts=ayer,v1=deadbeef', toleranceSeconds }),
+        ).toEqual({ valid: false, reason: 'malformed-signature-header' });
+      }
+    });
+
+    // El webhook productivo (ENG-64) no exige ventana: los reintentos de
+    // MercadoPago llegan 15 minutos o más después.
+    it('con toleranceSeconds null acepta una firma vieja e informa su edad', () => {
+      const dayAgo = 24 * 60 * 60;
+      expect(verify({ ...atOffset(-dayAgo), toleranceSeconds: null })).toEqual({
+        valid: true,
+        ageSeconds: dayAgo,
       });
+    });
+
+    it('con toleranceSeconds null el HMAC se sigue exigiendo', () => {
+      const ts = String(Math.floor(NOW.getTime() / 1000) - 3600);
+      expect(
+        verify({
+          signatureHeader: header(ts, '0'.repeat(64)),
+          toleranceSeconds: null,
+        }),
+      ).toEqual({ valid: false, reason: 'mismatch' });
     });
 
     it('interpreta un ts en milisegundos por su magnitud', () => {
       const ts = String(NOW.getTime());
       expect(verify({ signatureHeader: header(ts, sign(ts)) })).toEqual({
         valid: true,
+        ageSeconds: 0,
       });
     });
   });

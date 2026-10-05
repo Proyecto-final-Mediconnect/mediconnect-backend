@@ -94,6 +94,15 @@ describe('validate (env)', () => {
       expect(() => validate({ ...validConfig })).not.toThrow();
     });
 
+    it('rechaza una notification_url con http: MercadoPago solo notifica a https', () => {
+      expect(() =>
+        validate({
+          ...validConfig,
+          MERCADOPAGO_NOTIFICATION_URL: 'http://tunel.ngrok.app/webhooks',
+        }),
+      ).toThrow(/Configuración de entorno inválida/);
+    });
+
     it('rechaza una notification_url sin protocolo', () => {
       expect(() =>
         validate({

@@ -295,6 +295,19 @@ describe('MercadoPagoService', () => {
       );
     });
 
+    it('un 2xx con un cuerpo que no es JSON es 502, no un 500 sin mensaje', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('<html>gateway</html>'),
+      });
+
+      await expect(service.getPayment('1')).rejects.toMatchObject({
+        status: HttpStatus.BAD_GATEWAY,
+        message: 'MercadoPago devolvió una respuesta que no pudimos leer.',
+      });
+    });
+
     it('es un MercadoPagoApiError, no un Error pelado', async () => {
       fetchMock.mockResolvedValue(fail(500));
       await expect(service.getPayment('1')).rejects.toBeInstanceOf(

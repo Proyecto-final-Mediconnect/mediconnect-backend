@@ -107,9 +107,11 @@ class EnvironmentVariables {
 
   // URL pública a la que MercadoPago manda los webhooks. Tiene que ser HTTPS y
   // alcanzable desde afuera: en local hace falta un túnel (ver el informe de
-  // ENG-61). El spike la usa al crear la preferencia.
+  // ENG-61). La usa ENG-63 al crear la preferencia. Se exige `https` acá porque
+  // MercadoPago no notifica a `http://`: con una URL así el pago se cobra y el
+  // webhook no llega nunca, sin ningún error que lo avise.
   @IsOptional()
-  @IsUrl({ require_tld: false, require_protocol: true })
+  @IsUrl({ require_tld: false, require_protocol: true, protocols: ['https'] })
   MERCADOPAGO_NOTIFICATION_URL?: string;
 }
 
