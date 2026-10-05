@@ -1,4 +1,4 @@
-import type { CreateClinicalEntryDto } from './dto/create-clinical-entry.dto';
+import type { ClinicalEntryContentDto } from './dto/clinical-entry-content.dto';
 
 /**
  * Traducción del formulario de ENG-58 a un recurso **FHIR R5**.
@@ -34,15 +34,49 @@ import type { CreateClinicalEntryDto } from './dto/create-clinical-entry.dto';
 export const CLINICAL_ENTRY_RESOURCE_TYPE = 'ClinicalImpression';
 
 /**
+ * URL de la extensión que lleva el motivo de la corrección (ENG-100).
+ *
+ * Es una **extensión** y no un campo del recurso porque R5 no modela "este
+ * asiento corrige aquel otro". Lo más cercano que hay es `previous`, que sí se
+ * usa —abajo— para el enlace, pero cuyo significado es "la evaluación anterior de
+ * este paciente", no "la entrada equivocada". El porqué del error no tiene dónde
+ * ir, y una extensión es el mecanismo que FHIR define exactamente para eso.
+ *
+ * Es un `urn:` y no una URL `https://` a propósito: la convención de FHIR pide
+ * una URL resoluble donde esté publicada la definición de la extensión, y el
+ * proyecto no tiene dominio ni servidor de perfiles. Inventar
+ * `https://mediconnect.../StructureDefinition/...` sería declarar una dirección
+ * que no responde. El día que exista el canonical base del MediPass, esto cambia
+ * a esa URL — y hay que tener presente que **cambiarla cambia el
+ * `content_hash`** de toda corrección escrita después, no de las anteriores.
+ */
+export const CORRECTION_REASON_EXTENSION =
+  'urn:mediconnect:fhir:extension:correction-reason';
+
+/** Datos de la corrección, cuando el asiento es una (ENG-100). */
+export interface CorrectionContext {
+  /** Entrada que este asiento corrige. */
+  correctsEntryId: string;
+  /** Qué estaba mal en la original. */
+  reason: string;
+}
+
+/**
  * Arma el recurso a partir del formulario.
  *
  * El orden de las claves acá **no importa**: `canonicalJson` las ordena antes de
  * hashear, justamente para que el hash no dependa de cómo se construyó el objeto.
+ *
+ * `correction` solo viene desde ENG-100. Cuando falta, el recurso sale
+ * **byte por byte** igual que antes de que esta rama existiera: los dos campos
+ * que agrega la corrección se omiten en vez de ir en `null`, así que el
+ * `content_hash` de un alta normal no cambió.
  */
 export function toClinicalImpression(
-  dto: CreateClinicalEntryDto,
+  dto: ClinicalEntryContentDto,
   parties: { patientId: string; professionalId: string },
   effectiveAt: Date,
+  correction?: CorrectionContext,
 ): Record<string, unknown> {
   const resource: Record<string, unknown> = {
     resourceType: CLINICAL_ENTRY_RESOURCE_TYPE,
@@ -71,6 +105,22 @@ export function toClinicalImpression(
 
   if (dto.plan) {
     resource.note = [{ text: dto.plan }];
+  }
+
+  if (correction) {
+    // `previous` es Reference(ClinicalImpression) y acá apunta a la entrada
+    // corregida. Es el mismo UUID que `corrects_entry_id` en la fila: la columna
+    // es la que usa MediConnect para armar la vista, y esto es para que el enlace
+    // sobreviva al export FHIR, donde la columna no viaja.
+    resource.previous = {
+      reference: `${CLINICAL_ENTRY_RESOURCE_TYPE}/${correction.correctsEntryId}`,
+    };
+    resource.extension = [
+      {
+        url: CORRECTION_REASON_EXTENSION,
+        valueString: correction.reason,
+      },
+    ];
   }
 
   return resource;

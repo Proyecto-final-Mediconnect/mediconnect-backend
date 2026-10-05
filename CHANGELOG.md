@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `https://…/` value doesn't produce a `//auth/v1` issuer that fails JWT checks
 
 ### Added
+- `POST /auth/mobile/login` and `POST /auth/mobile/refresh` for the mobile app
+  (ENG-114): same `AuthService` flow as the web routes, but the tokens travel in
+  the body (so the app can keep them in `expo-secure-store` and send them as
+  `Authorization: Bearer`) and no cookies are read or set. Same 5/min rate
+  limit, same generic 401 and 503 semantics, and `Cache-Control: no-store`. The
+  web routes are unchanged. See `docs/security/mobile-session.md`
 - `GET /me`: protected endpoint (`JwtAuthGuard`) returning the authenticated
   user's public profile (`id`, `email`, `role`, `firstName`, `lastName`), read
   from the `profiles` table via Prisma using the token's `sub` — never from the

@@ -467,7 +467,9 @@ model ClinicalRecordEntry {
   patient_id         String     @db.Uuid
   professional_id    String     @db.Uuid
   consultation_id    String?    @db.Uuid
-  corrects_entry_id  String?    @db.Uuid
+  /// Unique (ENG-100): una entrada tiene a lo sumo UNA corrección, así el
+  /// historial es lineal y la última es la vigente. Los NULL no chocan entre sí.
+  corrects_entry_id  String?    @unique @db.Uuid
   entry_type         entry_type
   fhir_resource_type String
   content            Json       @db.JsonB
@@ -492,7 +494,7 @@ model ClinicalRecordEntry {
   professional Professional          @relation(fields: [professional_id], references: [profile_id])
   consultation Consultation?         @relation(fields: [consultation_id], references: [id])
   corrects     ClinicalRecordEntry?  @relation("EntryCorrections", fields: [corrects_entry_id], references: [id])
-  corrected_by ClinicalRecordEntry[] @relation("EntryCorrections")
+  corrected_by ClinicalRecordEntry?  @relation("EntryCorrections")
   summary      ConsultationSummary?
 
   @@unique([patient_id, sequence_number])

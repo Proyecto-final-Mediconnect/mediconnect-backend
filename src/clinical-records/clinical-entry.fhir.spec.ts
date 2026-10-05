@@ -1,6 +1,7 @@
 import { canonicalJson } from '../common/hash-chain/hash-chain';
 import {
   CLINICAL_ENTRY_RESOURCE_TYPE,
+  CORRECTION_REASON_EXTENSION,
   toClinicalImpression,
 } from './clinical-entry.fhir';
 import type { CreateClinicalEntryDto } from './dto/create-clinical-entry.dto';
@@ -136,5 +137,76 @@ describe('toClinicalImpression', () => {
     expect(canonicalJson(toClinicalImpression(dto(), PARTIES, AT))).toBe(
       canonicalJson(toClinicalImpression(dto(), PARTIES, AT)),
     );
+  });
+
+  describe('corrección (ENG-100)', () => {
+    const CORRECTED = '44444444-4444-4444-8444-444444444444';
+    const CORRECTION = {
+      correctsEntryId: CORRECTED,
+      reason: 'El diagnóstico era de otro paciente',
+    };
+
+    it('enlaza con la entrada corregida por previous', () => {
+      const resource = toClinicalImpression(dto(), PARTIES, AT, CORRECTION);
+
+      expect(resource.previous).toEqual({
+        reference: `${CLINICAL_ENTRY_RESOURCE_TYPE}/${CORRECTED}`,
+      });
+    });
+
+    it('el motivo de la corrección va en una extensión, no mezclado con el plan', () => {
+      // Si fuera un `note` más, no habría forma de distinguirlo del plan de
+      // indicaciones: dos annotations sin etiqueta y el orden como única pista.
+      const resource = toClinicalImpression(
+        dto({ plan: 'Reposo' }),
+        PARTIES,
+        AT,
+        CORRECTION,
+      );
+
+      expect(resource.extension).toEqual([
+        {
+          url: CORRECTION_REASON_EXTENSION,
+          valueString: 'El diagnóstico era de otro paciente',
+        },
+      ]);
+      expect(resource.note).toEqual([{ text: 'Reposo' }]);
+    });
+
+    it('sin corrección el recurso no cambia en nada', () => {
+      // Es la garantía de que ENG-100 no movió el `content_hash` de un alta
+      // normal: el recurso de una entrada común sale idéntico a antes.
+      const resource = toClinicalImpression(
+        dto({ plan: 'Reposo' }),
+        PARTIES,
+        AT,
+      );
+
+      expect(resource).not.toHaveProperty('previous');
+      expect(resource).not.toHaveProperty('extension');
+    });
+
+    it('sigue siendo serializable por la forma canónica', () => {
+      expect(() =>
+        canonicalJson(toClinicalImpression(dto(), PARTIES, AT, CORRECTION)),
+      ).not.toThrow();
+    });
+
+    it('cambiar a qué entrada apunta cambia el recurso', () => {
+      // El enlace entra al hash por dos caminos —esta referencia y la columna
+      // `corrects_entry_id`—, así que reapuntar una corrección no pasa inadvertido.
+      const otra = '55555555-5555-4555-8555-555555555555';
+
+      expect(
+        canonicalJson(toClinicalImpression(dto(), PARTIES, AT, CORRECTION)),
+      ).not.toBe(
+        canonicalJson(
+          toClinicalImpression(dto(), PARTIES, AT, {
+            ...CORRECTION,
+            correctsEntryId: otra,
+          }),
+        ),
+      );
+    });
   });
 });
