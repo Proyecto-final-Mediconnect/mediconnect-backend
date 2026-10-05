@@ -17,8 +17,9 @@ import { ClinicalRecordsService } from './clinical-records.service';
  * Trajo su política de RLS, el 403 sin relación y el registro del acceso en
  * `audit_logs`.
  *
- * Queda ENG-100 (corregir una entrada) con su propio POST, porque una corrección
- * referencia a la entrada corregida.
+ * ENG-100 suma `POST :entryId/corrections`: una corrección es una entrada nueva
+ * que referencia a la corregida, así que necesita su propia ruta y no un PATCH —
+ * la tabla no admite UPDATE.
  */
 @Module({
   controllers: [ClinicalRecordsController],
