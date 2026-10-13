@@ -454,24 +454,25 @@ async function cuenta(
  *   tienen id determinístico y se hace UPSERT. Borrarlas rompería las FKs de la
  *   HC, que es justamente lo que no se puede reescribir.
  *
+ * - `audit_logs` y `medipass_access_logs` son append-only desde ENG-87, igual
+ *   que la HC. Se siembran una sola vez (ver la sección de MediPass y la de
+ *   auditoría). Por la misma razón quedan las sesiones MediPass que tienen
+ *   accesos registrados y los códigos que las abrieron: la FK no deja borrarlos.
+ *
  * Queda para borrar lo que no tiene dependientes protegidos: agenda, mensajes,
- * notificaciones, MediPass y auditoría.
+ * notificaciones, y las sesiones y códigos MediPass sin accesos.
  */
 async function limpiar(
   pacientes: string[],
   profesionales: string[],
   idsEsperados: string[],
 ): Promise<Map<string, string>> {
-  const sesiones = await prisma.mediPassSession.findMany({
-    where: { patient_id: { in: pacientes } },
-    select: { id: true },
+  await prisma.mediPassSession.deleteMany({
+    where: { patient_id: { in: pacientes }, access_logs: { none: {} } },
   });
-
-  await prisma.mediPassAccessLog.deleteMany({
-    where: { session_id: { in: sesiones.map((x) => x.id) } },
+  await prisma.mediPassCode.deleteMany({
+    where: { patient_id: { in: pacientes }, sessions: { none: {} } },
   });
-  await prisma.mediPassSession.deleteMany({ where: { patient_id: { in: pacientes } } });
-  await prisma.mediPassCode.deleteMany({ where: { patient_id: { in: pacientes } } });
 
   const conversaciones = await prisma.conversation.findMany({
     where: { patient_id: { in: pacientes } },
@@ -484,10 +485,6 @@ async function limpiar(
   await prisma.notification.deleteMany({
     where: { user_id: { in: [...pacientes, ...profesionales] } },
   });
-  await prisma.auditLog.deleteMany({
-    where: { actor_id: { in: [...pacientes, ...profesionales] } },
-  });
-
   await prisma.scheduleBlock.deleteMany({ where: { professional_id: { in: profesionales } } });
   await prisma.scheduleRule.deleteMany({ where: { professional_id: { in: profesionales } } });
   await prisma.professionalSpecialty.deleteMany({
@@ -1243,32 +1240,42 @@ async function main(): Promise<void> {
 
   // Ya usado, con la sesión que abrió: es el que da contenido al historial de
   // accesos, que es la mitad del valor de MediPass — el paciente ve quién miró.
-  const codigoUsado = randomUUID();
-  await prisma.mediPassCode.create({
-    data: { id: codigoUsado, patient_id: julian, code: generarCodigo(), expires_at: enDias(ahora, -3), used_at: enDias(ahora, -3), created_at: enDias(ahora, -3) },
+  //
+  // Se siembra UNA vez: sus accesos son append-only (ENG-87) y `limpiar` no los
+  // puede borrar. Las corridas siguientes reutilizan la sesión que ya existe.
+  const sesionExistente = await prisma.mediPassSession.findFirst({
+    where: { patient_id: julian, access_logs: { some: {} } },
+    select: { id: true },
   });
+  const sesionCerrada = sesionExistente?.id ?? randomUUID();
 
-  const sesionCerrada = randomUUID();
-  await prisma.mediPassSession.create({
-    data: {
-      id: sesionCerrada,
-      patient_id: julian,
-      medipass_code_id: codigoUsado,
-      consultant_profile_id: martin,
-      consultant_name: 'Martín Olivares',
-      consultant_license: 'MP-33871',
-      started_at: enDias(ahora, -3),
-      expires_at: enMinutos(enDias(ahora, -3), 30),
-    },
-  });
+  if (!sesionExistente) {
+    const codigoUsado = randomUUID();
+    await prisma.mediPassCode.create({
+      data: { id: codigoUsado, patient_id: julian, code: generarCodigo(), expires_at: enDias(ahora, -3), used_at: enDias(ahora, -3), created_at: enDias(ahora, -3) },
+    });
 
-  await prisma.mediPassAccessLog.createMany({
-    data: [
-      { id: randomUUID(), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'alergias', accessed_at: enMinutos(enDias(ahora, -3), 1) },
-      { id: randomUUID(), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'medicacion_activa', accessed_at: enMinutos(enDias(ahora, -3), 2) },
-      { id: randomUUID(), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'diagnosticos', accessed_at: enMinutos(enDias(ahora, -3), 4) },
-    ],
-  });
+    await prisma.mediPassSession.create({
+      data: {
+        id: sesionCerrada,
+        patient_id: julian,
+        medipass_code_id: codigoUsado,
+        consultant_profile_id: martin,
+        consultant_name: 'Martín Olivares',
+        consultant_license: 'MP-33871',
+        started_at: enDias(ahora, -3),
+        expires_at: enMinutos(enDias(ahora, -3), 30),
+      },
+    });
+
+    await prisma.mediPassAccessLog.createMany({
+      data: [
+        { id: randomUUID(), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'alergias', accessed_at: enMinutos(enDias(ahora, -3), 1) },
+        { id: randomUUID(), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'medicacion_activa', accessed_at: enMinutos(enDias(ahora, -3), 2) },
+        { id: randomUUID(), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'diagnosticos', accessed_at: enMinutos(enDias(ahora, -3), 4) },
+      ],
+    });
+  }
 
   // Una sesión revocada por el paciente: el corte de acceso es una funcionalidad
   // del ticket y sin una fila así no se puede mostrar.
@@ -1293,14 +1300,20 @@ async function main(): Promise<void> {
   // --- Auditoría -----------------------------------------------------------
   console.log('→ Auditoría…');
 
-  await prisma.auditLog.createMany({
-    data: [
-      { id: randomUUID(), actor_id: martin, action: 'CLINICAL_RECORD_VIEWED', resource_type: 'patient', resource_id: julian, metadata: { via: 'medipass', sessionId: sesionCerrada }, created_at: enDias(ahora, -3) },
-      { id: randomUUID(), actor_id: ana, action: 'CLINICAL_ENTRY_CREATED', resource_type: 'clinical_record_entry', resource_id: cadenaJulian.ids[0], metadata: { entryType: 'CONSULTA' }, created_at: enMinutos(T.pasado1.scheduled_at, 28) },
-      { id: randomUUID(), actor_id: martin, action: 'CLINICAL_ENTRY_CORRECTED', resource_type: 'clinical_record_entry', resource_id: cadenaJulian.ids[4], metadata: { corrects: cadenaJulian.ids[3] }, created_at: enMinutos(T.pasado2.scheduled_at, 90) },
-      { id: randomUUID(), actor_id: marina, action: 'MEDIPASS_SESSION_REVOKED', resource_type: 'medipass_session', metadata: { motivo: 'El paciente cortó el acceso desde la app.' }, created_at: enDias(ahora, -9) },
-    ],
-  });
+  // Append-only desde ENG-87: se siembra una sola vez, como la HC.
+  const auditoriaSembrada =
+    (await prisma.auditLog.count({ where: { actor_id: { in: [martin, ana, marina] } } })) > 0;
+
+  if (!auditoriaSembrada) {
+    await prisma.auditLog.createMany({
+      data: [
+        { id: randomUUID(), actor_id: martin, action: 'CLINICAL_RECORD_VIEWED', resource_type: 'patient', resource_id: julian, metadata: { via: 'medipass', sessionId: sesionCerrada }, created_at: enDias(ahora, -3) },
+        { id: randomUUID(), actor_id: ana, action: 'CLINICAL_ENTRY_CREATED', resource_type: 'clinical_record_entry', resource_id: cadenaJulian.ids[0], metadata: { entryType: 'CONSULTA' }, created_at: enMinutos(T.pasado1.scheduled_at, 28) },
+        { id: randomUUID(), actor_id: martin, action: 'CLINICAL_ENTRY_CORRECTED', resource_type: 'clinical_record_entry', resource_id: cadenaJulian.ids[4], metadata: { corrects: cadenaJulian.ids[3] }, created_at: enMinutos(T.pasado2.scheduled_at, 90) },
+        { id: randomUUID(), actor_id: marina, action: 'MEDIPASS_SESSION_REVOKED', resource_type: 'medipass_session', metadata: { motivo: 'El paciente cortó el acceso desde la app.' }, created_at: enDias(ahora, -9) },
+      ],
+    });
+  }
 
   // --- Resumen -------------------------------------------------------------
   console.log('');
