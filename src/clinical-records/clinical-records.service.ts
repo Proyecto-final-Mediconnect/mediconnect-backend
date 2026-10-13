@@ -265,7 +265,10 @@ export class ClinicalRecordsService {
 
         return toView(row, author);
       } catch (error) {
-        if ((error as { code?: string }).code !== PRISMA_UNIQUE_VIOLATION) {
+        if (
+          (error as { code?: string }).code !== PRISMA_UNIQUE_VIOLATION &&
+          !lostChainHeadRace(error)
+        ) {
           this.logger.error(
             `No se pudo guardar la entrada de HC del paciente ${entry.patientId}: ${String(error)}`,
           );
@@ -835,6 +838,37 @@ export class ClinicalRecordsService {
       rows.map((row) => chainEntryFromRow(row as ChainEntryRow)),
     );
   }
+}
+
+/**
+ * Si el trigger de la cadena rechazó la fila porque otra escritura cambió la
+ * cabeza entre que la leímos y la guardamos.
+ *
+ * Es la misma colisión que el `P2002` de `(patient_id, sequence_number)`, que es
+ * la que detecta la unique. Cuál de las dos frena a la segunda escritura depende
+ * del momento:
+ *
+ *   - Si el trigger corre mientras la primera todavía no confirmó, el
+ *     `for update` lo hace esperar, relee la cabeza vieja y deja pasar la fila.
+ *     Ahí la frena la unique y llega `P2002`.
+ *   - Si corre cuando la primera ya confirmó, ve la cabeza nueva y rechaza la
+ *     fila él mismo con `23514`. Prisma lo informa como error desconocido, sin
+ *     `code`.
+ *
+ * Sin esto, el segundo caso salía como 500 y el integration test de dos
+ * correcciones simultáneas (ENG-100) fallaba según cómo se intercalaran.
+ *
+ * Se reconocen por el texto de los dos `raise` de cabeza del trigger
+ * (migración de ENG-126). Los otros `23514` del trigger (cruzar historias,
+ * génesis mal formado) no se reintentan: son errores de la entrada.
+ */
+function lostChainHeadRace(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('23514') &&
+    (message.includes('sequence_number no contiguo') ||
+      message.includes('previous_hash no coincide con la cabeza'))
+  );
 }
 
 /**

@@ -237,6 +237,45 @@ describe('ClinicalRecordsService', () => {
       expect(view.previousHash).toBe('d'.repeat(64));
     });
 
+    it('reintenta también cuando la colisión la frena el trigger y no la unique', async () => {
+      // Si la otra escritura ya confirmó, el trigger ve la cabeza nueva y
+      // rechaza con 23514 antes de que la unique llegue a mirar la fila.
+      prisma.clinicalRecordEntry.findFirst
+        .mockResolvedValueOnce({
+          sequence_number: BigInt(1),
+          content_hash: 'c'.repeat(64),
+        })
+        .mockResolvedValueOnce({
+          sequence_number: BigInt(2),
+          content_hash: 'd'.repeat(64),
+        });
+      prisma.clinicalRecordEntry.create
+        .mockRejectedValueOnce(
+          new Error(
+            'ConnectorError { kind: QueryError(PostgresError { code: "23514", message: "sequence_number no contiguo en la HC del paciente x: esperaba 3, llegó 2" }) }',
+          ),
+        )
+        .mockImplementationOnce((args: CreateArgs) => rowFromCreate(args));
+
+      const view = await service.append(newEntry(), NOW);
+
+      expect(view.sequenceNumber).toBe(3);
+      expect(prisma.clinicalRecordEntry.create).toHaveBeenCalledTimes(2);
+    });
+
+    it('un 23514 del trigger que no es de cabeza no se reintenta', async () => {
+      prisma.clinicalRecordEntry.create.mockRejectedValue(
+        new Error(
+          'PostgresError { code: "23514", message: "una corrección no puede cruzar historias clínicas" }',
+        ),
+      );
+
+      await expect(service.append(newEntry(), NOW)).rejects.toThrow(
+        InternalServerErrorException,
+      );
+      expect(prisma.clinicalRecordEntry.create).toHaveBeenCalledTimes(1);
+    });
+
     it('se rinde con 409 después de tres colisiones seguidas', async () => {
       prisma.clinicalRecordEntry.create.mockRejectedValue({ code: 'P2002' });
 
