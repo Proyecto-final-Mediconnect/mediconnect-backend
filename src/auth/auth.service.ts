@@ -5,6 +5,8 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { LEGAL_VERSION } from '../legal/legal';
+import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterPatientDto } from './dto/register-patient.dto';
@@ -19,7 +21,36 @@ const GENERIC_REGISTER_MESSAGE =
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  /**
+   * Deja constancia de que el usuario recién creado aceptó los textos legales
+   * vigentes (ENG-140). El DTO ya exigió que `acceptedLegalVersion` sea la
+   * vigente, así que acá se guarda `LEGAL_VERSION` y no lo que mandó el cliente.
+   *
+   * El perfil ya existe: lo crea el trigger `on_auth_user_created` dentro del
+   * mismo `signUp`.
+   *
+   * Un fallo acá **no** falla el registro: la cuenta en Supabase ya está creada,
+   * y responder error haría que el usuario lo intente de nuevo contra un email
+   * que ya existe. Sin la fila, `GET /me` informa que no aceptó y la web se lo
+   * vuelve a pedir antes de dejarlo usar la app.
+   */
+  private async recordLegalAcceptance(userId: string): Promise<void> {
+    try {
+      await this.prisma.legalAcceptance.createMany({
+        data: [{ profile_id: userId, version: LEGAL_VERSION }],
+        skipDuplicates: true,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo registrar la aceptación legal de ${userId}: ${String(error)}`,
+      );
+    }
+  }
 
   /** Traduce un error de Supabase Auth (signUp/signIn) a una excepción HTTP con
    *  mensaje amigable, sin filtrar detalles crudos como "fetch failed". */
@@ -58,6 +89,8 @@ export class AuthService {
       return { message: GENERIC_REGISTER_MESSAGE };
     }
 
+    if (data.user) await this.recordLegalAcceptance(data.user.id);
+
     return { message: GENERIC_REGISTER_MESSAGE };
   }
 
@@ -92,6 +125,8 @@ export class AuthService {
       this.logger.debug('Registro con email ya existente (respuesta genérica)');
       return { message: GENERIC_REGISTER_MESSAGE };
     }
+
+    if (data.user) await this.recordLegalAcceptance(data.user.id);
 
     return { message: GENERIC_REGISTER_MESSAGE };
   }

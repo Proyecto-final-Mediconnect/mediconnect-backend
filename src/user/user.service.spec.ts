@@ -1,18 +1,27 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../prisma/prisma.service';
+import { LEGAL_VERSION } from '../legal/legal';
 import { UserService } from './user.service';
 
 describe('UserService', () => {
   let service: UserService;
   const findUnique = jest.fn();
+  const createMany = jest.fn();
 
   beforeEach(async () => {
     findUnique.mockReset();
+    createMany.mockReset();
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         UserService,
-        { provide: PrismaService, useValue: { profile: { findUnique } } },
+        {
+          provide: PrismaService,
+          useValue: {
+            profile: { findUnique },
+            legalAcceptance: { createMany },
+          },
+        },
       ],
     }).compile();
 
@@ -26,6 +35,7 @@ describe('UserService', () => {
       role: 'PACIENTE',
       patient: { first_name: 'Ana', last_name: 'García' },
       professional: null,
+      legal_acceptances: [],
     });
 
     await expect(service.getProfile('uid')).resolves.toEqual({
@@ -34,6 +44,8 @@ describe('UserService', () => {
       role: 'PACIENTE',
       firstName: 'Ana',
       lastName: 'García',
+      legalAccepted: false,
+      legalVersion: LEGAL_VERSION,
     });
     expect(findUnique).toHaveBeenCalledWith({
       where: { id: 'uid' },
@@ -48,6 +60,7 @@ describe('UserService', () => {
       role: 'PROFESIONAL',
       patient: null,
       professional: { first_name: 'Carlos', last_name: 'Ruiz' },
+      legal_acceptances: [],
     });
 
     const result = await service.getProfile('uid');
@@ -63,6 +76,7 @@ describe('UserService', () => {
       role: 'MODERADOR',
       patient: null,
       professional: null,
+      legal_acceptances: [],
     });
 
     await expect(service.getProfile('uid')).resolves.toEqual({
@@ -71,6 +85,8 @@ describe('UserService', () => {
       role: 'MODERADOR',
       firstName: null,
       lastName: null,
+      legalAccepted: false,
+      legalVersion: LEGAL_VERSION,
     });
   });
 
@@ -80,5 +96,57 @@ describe('UserService', () => {
     await expect(service.getProfile('inexistente')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  describe('aceptación legal (ENG-140)', () => {
+    const fila = (legal_acceptances: { id: string }[]) => ({
+      id: 'uid',
+      email: 'paciente@test.com',
+      role: 'PACIENTE',
+      patient: { first_name: 'Ana', last_name: 'García' },
+      professional: null,
+      legal_acceptances,
+    });
+
+    it('informa que aceptó cuando hay una fila de la versión vigente', async () => {
+      findUnique.mockResolvedValue(fila([{ id: 'acc-1' }]));
+
+      const result = await service.getProfile('uid');
+
+      expect(result.legalAccepted).toBe(true);
+      expect(result.legalVersion).toBe(LEGAL_VERSION);
+    });
+
+    it('solo busca aceptaciones de la versión vigente', async () => {
+      // Una aceptación de una versión vieja no cuenta: cuando cambian los
+      // textos, se vuelven a pedir.
+      findUnique.mockResolvedValue(fila([]));
+
+      const result = await service.getProfile('uid');
+
+      expect(result.legalAccepted).toBe(false);
+      expect(findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: expect.objectContaining({
+            legal_acceptances: expect.objectContaining({
+              where: { version: LEGAL_VERSION },
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('acceptLegal guarda la versión vigente sin duplicar y devuelve el perfil', async () => {
+      createMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue(fila([{ id: 'acc-1' }]));
+
+      const result = await service.acceptLegal('uid', LEGAL_VERSION);
+
+      expect(createMany).toHaveBeenCalledWith({
+        data: [{ profile_id: 'uid', version: LEGAL_VERSION }],
+        skipDuplicates: true,
+      });
+      expect(result.legalAccepted).toBe(true);
+    });
   });
 });

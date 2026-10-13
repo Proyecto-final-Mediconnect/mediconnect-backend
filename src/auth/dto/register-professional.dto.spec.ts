@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { RegisterProfessionalDto } from './register-professional.dto';
+import { LEGAL_VERSION } from '../../legal/legal';
 
 async function invalidProps(obj: Record<string, unknown>): Promise<string[]> {
   const dto = plainToInstance(RegisterProfessionalDto, obj);
@@ -18,6 +19,7 @@ describe('RegisterProfessionalDto', () => {
     lastName: 'García',
     specialty: 'Cardiología',
     licenseNumber: 'MP-12345',
+    acceptedLegalVersion: LEGAL_VERSION,
   };
 
   it('acepta datos válidos', async () => {
@@ -68,5 +70,17 @@ describe('RegisterProfessionalDto', () => {
     expect(await invalidProps({ ...valid, licenseNumber: 'ab' })).toContain(
       'licenseNumber',
     );
+  });
+
+  it('rechaza el registro sin aceptar los textos legales (ENG-140)', async () => {
+    const sinAceptar: Record<string, unknown> = { ...valid };
+    delete sinAceptar.acceptedLegalVersion;
+    expect(await invalidProps(sinAceptar)).toContain('acceptedLegalVersion');
+  });
+
+  it('rechaza una versión de los textos que no es la vigente', async () => {
+    expect(
+      await invalidProps({ ...valid, acceptedLegalVersion: '2020-01-01' }),
+    ).toContain('acceptedLegalVersion');
   });
 });

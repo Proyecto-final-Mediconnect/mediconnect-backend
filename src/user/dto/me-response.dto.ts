@@ -15,4 +15,9 @@ export interface MeResponseDto {
    *  sin fila asociada (ej. MODERADOR). */
   firstName: string | null;
   lastName: string | null;
+  /** Si aceptó la versión vigente de los textos legales (ENG-140). En `false`,
+   *  la web le pide que los acepte antes de dejarlo seguir. */
+  legalAccepted: boolean;
+  /** La versión vigente, para que la web sepa cuál está pidiendo aceptar. */
+  legalVersion: string;
 }

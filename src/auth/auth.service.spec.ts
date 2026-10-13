@@ -8,6 +8,8 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { RegisterPatientDto } from './dto/register-patient.dto';
 import { RegisterProfessionalDto } from './dto/register-professional.dto';
 import { LoginDto } from './dto/login.dto';
+import { LEGAL_VERSION } from '../legal/legal';
+import { PrismaService } from '../prisma/prisma.service';
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -18,6 +20,7 @@ describe('AuthService', () => {
     email: 'nuevo@test.com',
     password: 'Password1',
     passwordConfirmation: 'Password1',
+    acceptedLegalVersion: LEGAL_VERSION,
   };
   const proDto: RegisterProfessionalDto = {
     email: 'pro@test.com',
@@ -27,21 +30,86 @@ describe('AuthService', () => {
     lastName: 'García',
     specialty: 'Cardiología',
     licenseNumber: 'MP-12345',
+    acceptedLegalVersion: LEGAL_VERSION,
   };
   const loginDto: LoginDto = { email: 'user@test.com', password: 'Password1' };
 
   let refreshSession: jest.Mock;
+  let createMany: jest.Mock;
 
   beforeEach(() => {
     signUp = jest.fn();
     signInWithPassword = jest.fn();
     refreshSession = jest.fn();
+    createMany = jest.fn().mockResolvedValue({ count: 1 });
     const supabaseMock = {
       getClient: () => ({
         auth: { signUp, signInWithPassword, refreshSession },
       }),
     } as unknown as SupabaseService;
-    service = new AuthService(supabaseMock);
+    const prismaMock = {
+      legalAcceptance: { createMany },
+    } as unknown as PrismaService;
+    service = new AuthService(supabaseMock, prismaMock);
+  });
+
+  describe('aceptación legal (ENG-140)', () => {
+    it('deja constancia de la versión vigente para el usuario nuevo', async () => {
+      signUp.mockResolvedValue({
+        data: { user: { id: 'nuevo-id', identities: [{ id: 'abc' }] } },
+        error: null,
+      });
+
+      await service.registerPatient(dto);
+
+      expect(createMany).toHaveBeenCalledWith({
+        data: [{ profile_id: 'nuevo-id', version: LEGAL_VERSION }],
+        skipDuplicates: true,
+      });
+    });
+
+    it('también al registrar un profesional', async () => {
+      signUp.mockResolvedValue({
+        data: { user: { id: 'pro-id', identities: [{ id: 'abc' }] } },
+        error: null,
+      });
+
+      await service.registerProfessional(proDto);
+
+      expect(createMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: [{ profile_id: 'pro-id', version: LEGAL_VERSION }],
+        }),
+      );
+    });
+
+    it('no registra nada si el email ya existía', async () => {
+      // El user ofuscado de Supabase no es el del dueño de la cuenta: anotarle
+      // una aceptación sería atribuírsela a otra persona.
+      signUp.mockResolvedValue({
+        data: { user: { id: 'ofuscado', identities: [] } },
+        error: null,
+      });
+
+      await service.registerPatient(dto);
+
+      expect(createMany).not.toHaveBeenCalled();
+    });
+
+    it('si no se puede guardar, el registro responde igual', async () => {
+      // La cuenta ya existe en Supabase: un error acá haría que el usuario
+      // reintente contra un email tomado. La web le vuelve a pedir la
+      // aceptación al entrar.
+      signUp.mockResolvedValue({
+        data: { user: { id: 'nuevo-id', identities: [{ id: 'abc' }] } },
+        error: null,
+      });
+      createMany.mockRejectedValue(new Error('base caída'));
+
+      await expect(service.registerPatient(dto)).resolves.toMatchObject({
+        message: expect.stringContaining('Revisá tu email'),
+      });
+    });
   });
 
   it('registra un usuario nuevo y devuelve el mensaje genérico', async () => {

@@ -7,6 +7,7 @@ import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
+import { LEGAL_VERSION } from './../src/legal/legal';
 
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
 const SUB = 'user-id-123';
@@ -27,6 +28,7 @@ describe('GET /me (e2e)', () => {
     role: 'PACIENTE',
     patient: { first_name: 'Ana', last_name: 'García' },
     professional: null,
+    legal_acceptances: [],
   };
 
   beforeAll(async () => {
@@ -103,6 +105,8 @@ describe('GET /me (e2e)', () => {
           role: 'PACIENTE',
           firstName: 'Ana',
           lastName: 'García',
+          legalAccepted: false,
+          legalVersion: LEGAL_VERSION,
         });
       });
   });
@@ -169,7 +173,15 @@ describe('GET /me (e2e)', () => {
       .expect(200)
       .expect((res) => {
         expect(Object.keys(res.body as Record<string, unknown>).sort()).toEqual(
-          ['email', 'firstName', 'id', 'lastName', 'role'],
+          [
+            'email',
+            'firstName',
+            'id',
+            'lastName',
+            'legalAccepted',
+            'legalVersion',
+            'role',
+          ],
         );
         expect(res.body.password).toBeUndefined();
         expect(res.body.mfa_enabled).toBeUndefined();

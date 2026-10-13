@@ -115,8 +115,28 @@ model Profile {
   audit_logs             AuditLog[]
   medipass_as_consultant MediPassSession[] @relation("MediPassConsultant")
   medipass_revoked       MediPassSession[] @relation("MediPassRevoker")
+  legal_acceptances      LegalAcceptance[]
 
   @@map("profiles")
+}
+
+/// Aceptación de los términos, la política de privacidad y el consentimiento
+/// para tratar datos de salud (ENG-140, Ley 25.326 art. 7).
+///
+/// Una fila por usuario y versión de los textos: cuando cambian, la versión
+/// vigente (`LEGAL_VERSION` en `src/legal/legal.ts`) pasa a no estar aceptada y
+/// se le vuelve a pedir. Append-only por trigger: es la prueba del
+/// consentimiento, no se edita ni se borra. `profile` es RESTRICT por lo mismo.
+model LegalAcceptance {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  profile_id  String   @db.Uuid
+  version     String   @db.VarChar(20)
+  accepted_at DateTime @default(now()) @db.Timestamptz(6)
+
+  profile Profile @relation(fields: [profile_id], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([profile_id, version])
+  @@map("legal_acceptances")
 }
 
 /// Perfil de paciente 1:1 con Profile (role = PACIENTE).
