@@ -25,6 +25,13 @@ const GENERIC_FORGOT_PASSWORD_MESSAGE =
 const INVALID_RECOVERY_LINK_MESSAGE =
   'El enlace para restablecer la contraseña no es válido o ya venció. Pedí uno nuevo.';
 
+/** `code` estable en el body de los errores que ocurren DESPUÉS de canjear el
+ *  `token_hash` (ENG-142): el enlace ya se gastó, así que el front tiene que
+ *  llevar al usuario a pedir uno nuevo en vez de dejarlo reintentar. */
+export const RECOVERY_LINK_CONSUMED_CODE = 'RECOVERY_LINK_CONSUMED';
+
+const NEW_LINK_HINT = 'Por seguridad, este enlace ya no sirve: pedí uno nuevo.';
+
 /** Adónde lleva el enlace del mail de recuperación. El template de Supabase
  *  arma `{{ .RedirectTo }}?token_hash=…&type=recovery` sobre esta URL, que
  *  tiene que estar en las Redirect URLs del proyecto. */
@@ -186,6 +193,14 @@ export class AuthService {
    * el email está registrado. Solo una caída de Supabase (sin `status`) se
    * informa: no dice nada sobre la cuenta y el usuario necesita saber que el
    * mail no salió.
+   *
+   * Decisión sobre el canal lateral de tiempo (con cuenta existente GoTrue
+   * manda el mail dentro del request y tarda más): NO se dispara sin `await`.
+   * Hacerlo implicaría perder el 503 cuando Supabase no responde, y el usuario
+   * quedaría esperando un mail que nunca sale sin ningún aviso. El riesgo
+   * residual es bajo: el throttle de 3/min por IP limita mucho la medición.
+   * Si más adelante se quiere cerrar, la opción es igualar el tiempo de
+   * respuesta (delay mínimo) sin dejar de esperar a Supabase.
    */
   async forgotPassword(dto: ForgotPasswordDto): Promise<{ message: string }> {
     const { error } = await this.supabase
@@ -220,6 +235,10 @@ export class AuthService {
    *
    * Usa un cliente descartable: la sesión de recuperación no puede quedar en el
    * cliente compartido.
+   *
+   * Ojo: tras el paso 1 el enlace ya está gastado. Cualquier error del paso 2
+   * avisa que hay que pedir un enlace nuevo y trae `code:
+   * RECOVERY_LINK_CONSUMED` en el body para que el front lo maneje.
    */
   async resetPassword(dto: ResetPasswordDto): Promise<{ message: string }> {
     const client = this.supabase.createSessionClient();
@@ -230,7 +249,20 @@ export class AuthService {
     });
 
     if (verifyError || !data.session) {
-      if (verifyError && (!verifyError.status || verifyError.status === 429)) {
+      // Sin `status` (red caída), 429 o 5xx de Supabase: es un fallo de infra,
+      // no un enlace inválido (mismo criterio que `refresh()`). 503 para que
+      // el usuario reintente con el mismo enlace, que todavía no se gastó.
+      if (
+        verifyError &&
+        (!verifyError.status ||
+          verifyError.status === 429 ||
+          verifyError.status >= 500)
+      ) {
+        if (verifyError.status && verifyError.status >= 500) {
+          throw new ServiceUnavailableException(
+            'No pudimos conectar con el servicio. Probá de nuevo en unos minutos.',
+          );
+        }
         this.throwAuthError(verifyError);
       }
       throw new BadRequestException(INVALID_RECOVERY_LINK_MESSAGE);
@@ -241,17 +273,30 @@ export class AuthService {
     });
 
     if (updateError) {
+      // El enlace ya se consumió en `verifyOtp`: todos los errores de acá
+      // llevan el `code` y el aviso de pedir un enlace nuevo.
       if (updateError.code === 'same_password') {
-        throw new BadRequestException(
-          'La contraseña nueva tiene que ser distinta de la anterior.',
-        );
+        throw new BadRequestException({
+          message: `La contraseña nueva tiene que ser distinta de la anterior. ${NEW_LINK_HINT}`,
+          code: RECOVERY_LINK_CONSUMED_CODE,
+        });
       }
       if (updateError.code === 'weak_password') {
-        throw new BadRequestException(
-          'La contraseña es muy débil. Probá con una más larga o menos común.',
-        );
+        throw new BadRequestException({
+          message: `La contraseña es muy débil. ${NEW_LINK_HINT}`,
+          code: RECOVERY_LINK_CONSUMED_CODE,
+        });
       }
-      this.throwAuthError(updateError);
+      if (!updateError.status || updateError.status >= 500) {
+        throw new ServiceUnavailableException({
+          message: `No pudimos cambiar la contraseña. ${NEW_LINK_HINT}`,
+          code: RECOVERY_LINK_CONSUMED_CODE,
+        });
+      }
+      throw new BadRequestException({
+        message: `${updateError.message} ${NEW_LINK_HINT}`,
+        code: RECOVERY_LINK_CONSUMED_CODE,
+      });
     }
 
     const { error: signOutError } = await client.auth.signOut({

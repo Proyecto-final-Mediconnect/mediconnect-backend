@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  HttpException,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -398,20 +399,76 @@ describe('AuthService', () => {
       );
     });
 
-    it('si la contraseña nueva es igual a la anterior lo dice claro', async () => {
+    it('si Supabase responde 5xx al canjear el token devuelve 503, no "enlace inválido"', async () => {
       verifyOtp.mockResolvedValue({
-        data: { session: { access_token: 't' }, user: { id: 'u1' } },
-        error: null,
-      });
-      updateUser.mockResolvedValue({
-        data: { user: null },
-        error: { status: 422, code: 'same_password', message: 'same' },
+        data: { session: null, user: null },
+        error: { status: 502, message: 'bad gateway' },
       });
 
       await expect(service.resetPassword(resetDto)).rejects.toThrow(
-        'La contraseña nueva tiene que ser distinta de la anterior.',
+        ServiceUnavailableException,
       );
-      expect(signOut).not.toHaveBeenCalled();
+      expect(updateUser).not.toHaveBeenCalled();
+    });
+
+    describe('si falla el cambio de contraseña (el enlace ya se gastó)', () => {
+      beforeEach(() => {
+        verifyOtp.mockResolvedValue({
+          data: { session: { access_token: 't' }, user: { id: 'u1' } },
+          error: null,
+        });
+      });
+
+      async function caught(): Promise<{
+        status: number;
+        body: { message: string; code: string };
+      }> {
+        try {
+          await service.resetPassword(resetDto);
+        } catch (e) {
+          const ex = e as HttpException;
+          return {
+            status: ex.getStatus(),
+            body: ex.getResponse() as { message: string; code: string },
+          };
+        }
+        throw new Error('no lanzó');
+      }
+
+      it.each([
+        ['same_password', /distinta de la anterior/],
+        ['weak_password', /muy débil/],
+        ['otro_error', /boom/],
+      ])(
+        '%s: avisa que pida otro enlace y trae el code estable',
+        async (code, msg) => {
+          updateUser.mockResolvedValue({
+            data: { user: null },
+            error: { status: 422, code, message: 'boom' },
+          });
+
+          const { status, body } = await caught();
+
+          expect(status).toBe(400);
+          expect(body.code).toBe('RECOVERY_LINK_CONSUMED');
+          expect(body.message).toMatch(msg);
+          expect(body.message).toMatch(/pedí uno nuevo/);
+          expect(signOut).not.toHaveBeenCalled();
+        },
+      );
+
+      it('si Supabase no responde al cambiar la contraseña: 503 con el mismo code', async () => {
+        updateUser.mockResolvedValue({
+          data: { user: null },
+          error: { message: 'fetch failed' },
+        });
+
+        const { status, body } = await caught();
+
+        expect(status).toBe(503);
+        expect(body.code).toBe('RECOVERY_LINK_CONSUMED');
+        expect(body.message).toMatch(/pedí uno nuevo/);
+      });
     });
 
     it('si no se pueden cerrar las sesiones, la contraseña igual quedó cambiada', async () => {

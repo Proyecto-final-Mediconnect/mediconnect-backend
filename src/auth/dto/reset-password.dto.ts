@@ -1,10 +1,19 @@
-import { IsNotEmpty, IsString, Matches, MinLength } from 'class-validator';
+import {
+  IsNotEmpty,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 import { Match } from '../decorators/match.decorator';
 
 export class ResetPasswordDto {
   /** `token_hash` del enlace que llegó por email (ENG-142). */
   @IsString()
   @IsNotEmpty({ message: 'Falta el código del enlace de recuperación' })
+  @MaxLength(256, {
+    message: 'El código del enlace de recuperación no es válido',
+  })
   tokenHash!: string;
 
   // Mismas reglas que el registro (RegisterPatientDto).
