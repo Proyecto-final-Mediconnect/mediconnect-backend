@@ -455,8 +455,8 @@ async function cuenta(
  *   HC, que es justamente lo que no se puede reescribir.
  *
  * - `audit_logs` y `medipass_access_logs` son append-only desde ENG-87, igual
- *   que la HC. Se siembran una sola vez (ver la sección de MediPass y la de
- *   auditoría). Por la misma razón quedan las sesiones MediPass que tienen
+ *   que la HC. Se siembran con ids determinísticos y `skipDuplicates` (ver la sección de
+ *   MediPass y la de auditoría). Por la misma razón quedan las sesiones MediPass que tienen
  *   accesos registrados y los códigos que las abrieron: la FK no deja borrarlos.
  *
  * Queda para borrar lo que no tiene dependientes protegidos: agenda, mensajes,
@@ -1241,22 +1241,23 @@ async function main(): Promise<void> {
   // Ya usado, con la sesión que abrió: es el que da contenido al historial de
   // accesos, que es la mitad del valor de MediPass — el paciente ve quién miró.
   //
-  // Se siembra UNA vez: sus accesos son append-only (ENG-87) y `limpiar` no los
-  // puede borrar. Las corridas siguientes reutilizan la sesión que ya existe.
-  const sesionExistente = await prisma.mediPassSession.findFirst({
-    where: { patient_id: julian, access_logs: { some: {} } },
-    select: { id: true },
+  // Sus accesos son append-only (ENG-87) y `limpiar` no los puede borrar, así que
+  // todo va con id determinístico y `skipDuplicates` (INSERT ... ON CONFLICT DO
+  // NOTHING, que no dispara el trigger de UPDATE): las corridas siguientes no
+  // duplican nada, sin depender de ningún centinela.
+  const sesionCerrada = idDemo('medipass:sesion-cerrada');
+  const codigoUsado = idDemo('medipass:codigo-usado');
+
+  await prisma.mediPassCode.createMany({
+    data: [
+      { id: codigoUsado, patient_id: julian, code: generarCodigo(), expires_at: enDias(ahora, -3), used_at: enDias(ahora, -3), created_at: enDias(ahora, -3) },
+    ],
+    skipDuplicates: true,
   });
-  const sesionCerrada = sesionExistente?.id ?? randomUUID();
 
-  if (!sesionExistente) {
-    const codigoUsado = randomUUID();
-    await prisma.mediPassCode.create({
-      data: { id: codigoUsado, patient_id: julian, code: generarCodigo(), expires_at: enDias(ahora, -3), used_at: enDias(ahora, -3), created_at: enDias(ahora, -3) },
-    });
-
-    await prisma.mediPassSession.create({
-      data: {
+  await prisma.mediPassSession.createMany({
+    data: [
+      {
         id: sesionCerrada,
         patient_id: julian,
         medipass_code_id: codigoUsado,
@@ -1266,16 +1267,18 @@ async function main(): Promise<void> {
         started_at: enDias(ahora, -3),
         expires_at: enMinutos(enDias(ahora, -3), 30),
       },
-    });
+    ],
+    skipDuplicates: true,
+  });
 
-    await prisma.mediPassAccessLog.createMany({
-      data: [
-        { id: randomUUID(), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'alergias', accessed_at: enMinutos(enDias(ahora, -3), 1) },
-        { id: randomUUID(), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'medicacion_activa', accessed_at: enMinutos(enDias(ahora, -3), 2) },
-        { id: randomUUID(), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'diagnosticos', accessed_at: enMinutos(enDias(ahora, -3), 4) },
-      ],
-    });
-  }
+  await prisma.mediPassAccessLog.createMany({
+    data: [
+      { id: idDemo('medipass:acceso-alergias'), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'alergias', accessed_at: enMinutos(enDias(ahora, -3), 1) },
+      { id: idDemo('medipass:acceso-medicacion'), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'medicacion_activa', accessed_at: enMinutos(enDias(ahora, -3), 2) },
+      { id: idDemo('medipass:acceso-diagnosticos'), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'diagnosticos', accessed_at: enMinutos(enDias(ahora, -3), 4) },
+    ],
+    skipDuplicates: true,
+  });
 
   // Una sesión revocada por el paciente: el corte de acceso es una funcionalidad
   // del ticket y sin una fila así no se puede mostrar.
@@ -1300,20 +1303,24 @@ async function main(): Promise<void> {
   // --- Auditoría -----------------------------------------------------------
   console.log('→ Auditoría…');
 
-  // Append-only desde ENG-87: se siembra una sola vez, como la HC.
-  const auditoriaSembrada =
-    (await prisma.auditLog.count({ where: { actor_id: { in: [martin, ana, marina] } } })) > 0;
-
-  if (!auditoriaSembrada) {
-    await prisma.auditLog.createMany({
-      data: [
-        { id: randomUUID(), actor_id: martin, action: 'CLINICAL_RECORD_VIEWED', resource_type: 'patient', resource_id: julian, metadata: { via: 'medipass', sessionId: sesionCerrada }, created_at: enDias(ahora, -3) },
-        { id: randomUUID(), actor_id: ana, action: 'CLINICAL_ENTRY_CREATED', resource_type: 'clinical_record_entry', resource_id: cadenaJulian.ids[0], metadata: { entryType: 'CONSULTA' }, created_at: enMinutos(T.pasado1.scheduled_at, 28) },
-        { id: randomUUID(), actor_id: martin, action: 'CLINICAL_ENTRY_CORRECTED', resource_type: 'clinical_record_entry', resource_id: cadenaJulian.ids[4], metadata: { corrects: cadenaJulian.ids[3] }, created_at: enMinutos(T.pasado2.scheduled_at, 90) },
-        { id: randomUUID(), actor_id: marina, action: 'MEDIPASS_SESSION_REVOKED', resource_type: 'medipass_session', metadata: { motivo: 'El paciente cortó el acceso desde la app.' }, created_at: enDias(ahora, -9) },
-      ],
-    });
-  }
+  // Append-only desde ENG-87: ids determinísticos + `skipDuplicates`, así la
+  // corrida es idempotente aunque una anterior haya quedado a medias.
+  //
+  // El vocabulario es el que escribe el backend (`recordAccess` en
+  // ClinicalRecordsService): `CLINICAL_RECORD_READ` sobre `clinical_record_entries`,
+  // con el paciente como `resource_id`. Las otras tres acciones todavía no las
+  // escribe ningún servicio: se siembran con el nombre previsto, en el mismo
+  // estilo, y cuando existan hay que usar estas mismas cadenas (ENG-76 filtra por
+  // ellas).
+  await prisma.auditLog.createMany({
+    data: [
+      { id: idDemo('audit:martin-lee-julian'), actor_id: martin, action: 'CLINICAL_RECORD_READ', resource_type: 'clinical_record_entries', resource_id: julian, metadata: { role: 'PROFESIONAL', via: 'medipass', sessionId: sesionCerrada }, created_at: enDias(ahora, -3) },
+      { id: idDemo('audit:ana-crea-entrada'), actor_id: ana, action: 'CLINICAL_ENTRY_CREATED', resource_type: 'clinical_record_entries', resource_id: cadenaJulian.ids[0], metadata: { entryType: 'CONSULTA' }, created_at: enMinutos(T.pasado1.scheduled_at, 28) },
+      { id: idDemo('audit:martin-corrige-entrada'), actor_id: martin, action: 'CLINICAL_ENTRY_CORRECTED', resource_type: 'clinical_record_entries', resource_id: cadenaJulian.ids[4], metadata: { corrects: cadenaJulian.ids[3] }, created_at: enMinutos(T.pasado2.scheduled_at, 90) },
+      { id: idDemo('audit:marina-revoca-sesion'), actor_id: marina, action: 'MEDIPASS_SESSION_REVOKED', resource_type: 'medipass_sessions', metadata: { motivo: 'El paciente cortó el acceso desde la app.' }, created_at: enDias(ahora, -9) },
+    ],
+    skipDuplicates: true,
+  });
 
   // --- Resumen -------------------------------------------------------------
   console.log('');

@@ -73,6 +73,7 @@ describe('Audit log inmutable (integration)', () => {
     });
 
     await applyMigration(prisma, MIGRATION);
+    await applyMigration(prisma, MIGRATION); // idempotente: se puede aplicar dos veces
 
     const audit = await prisma.auditLog.create({
       data: {
@@ -177,8 +178,14 @@ describe('Audit log inmutable (integration)', () => {
     });
 
     it('un TRUNCATE en cascada desde profiles tampoco la vacía', async () => {
+      // Dentro de una transacción que SIEMPRE hace rollback: si el trigger
+      // tuviera una regresión, el truncate no vacía `profiles` en la base
+      // compartida de test.
       const error = await failure(
-        prisma.$executeRawUnsafe('truncate table public.profiles cascade'),
+        prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe('truncate table public.profiles cascade');
+          throw new Error('el truncate pasó: rollback');
+        }),
       );
 
       expect(error).toMatch(/append-only: TRUNCATE no permitido/);

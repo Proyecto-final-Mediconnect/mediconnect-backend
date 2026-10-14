@@ -29,9 +29,18 @@
 -- 42501 (insufficient_privilege), como en la HC, para que el backend lo distinga
 -- de un fallo de conexión.
 --
--- Igual que en la HC, el trigger frena al owner pero no a un superusuario, que
--- puede deshabilitarlo. Lo que este ticket cierra es el borrado "normal": un bug,
--- un script, o alguien con las credenciales del backend.
+-- Modelo de amenaza, sin vueltas: el backend entra como owner de las tablas y de
+-- esta función, y el owner PUEDE saltearse todo esto (`ALTER TABLE ... DISABLE
+-- TRIGGER`, `DROP TRIGGER`, reemplazar la función, o `SET session_replication_role
+-- = replica`, que en Supabase el rol `postgres` tiene permitido). Lo que el trigger
+-- frena de verdad es el borrado ACCIDENTAL: un bug, un script o un
+-- `truncate ... cascade`. NO frena a quien tenga las credenciales del backend.
+-- El control real contra eso es ENG-138: un rol de app que no sea owner, con solo
+-- INSERT y SELECT sobre estas tablas.
+--
+-- Como refuerzo barato, los triggers van `ENABLE ALWAYS` (sección 1b): se disparan
+-- aunque la sesión esté en `session_replication_role = replica`, que es el truco
+-- más común para saltear triggers. Un `DISABLE TRIGGER` del owner sigue pudiendo.
 --;;
 create or replace function audit_append_only_block()
 returns trigger
@@ -77,6 +86,19 @@ create trigger medipass_access_logs_no_truncate
   for each statement execute function audit_append_only_block();
 
 -- ---------------------------------------------------------------------------
+-- 1b) ENABLE ALWAYS: que el trigger corra también con session_replication_role
+--     = replica
+-- ---------------------------------------------------------------------------
+--;;
+alter table public.audit_logs enable always trigger audit_logs_no_mutation;
+--;;
+alter table public.audit_logs enable always trigger audit_logs_no_truncate;
+--;;
+alter table public.medipass_access_logs enable always trigger medipass_access_logs_no_mutation;
+--;;
+alter table public.medipass_access_logs enable always trigger medipass_access_logs_no_truncate;
+
+-- ---------------------------------------------------------------------------
 -- 2) `audit_logs.actor_id`: de SET NULL a RESTRICT
 -- ---------------------------------------------------------------------------
 -- Con `ON DELETE SET NULL`, borrar un perfil le borraba a cada registro QUIÉN
@@ -89,6 +111,20 @@ create trigger medipass_access_logs_no_truncate
 -- profesional (Ley 26.529, art. 18: la HC se conserva 10 años). Dar de baja a un
 -- usuario (ENG-86) tiene que ser anonimizar, no borrar la fila.
 --
+-- IMPACTO OPERATIVO sobre Supabase Auth: en prod `profiles.id` cascadea desde
+-- `auth.users`, y `recordAccess` audita también al paciente que lee su propia HC
+-- (`actor_id` = el paciente). Entonces cualquier usuario que alguna vez abrió su HC
+-- deja de poderse borrar, ni desde el dashboard de Supabase ni con
+-- `auth.admin.deleteUser`, y el error que devuelve Supabase es genérico
+-- ("Database error deleting user"). Es a propósito: la baja de un usuario pasa a
+-- ser anonimización (ENG-86), no borrado. En `src/` ningún flujo borra usuarios de
+-- auth, así que no se rompe nada existente; quien opere el dashboard tiene que
+-- saberlo.
+--
+-- La FK se agrega `NOT VALID` y se valida aparte: `ADD CONSTRAINT` normal valida
+-- toda la tabla con lock sobre `profiles`; así el lock es corto y la validación
+-- corre sin bloquear escrituras.
+--
 -- Mismo nombre de constraint y misma forma que genera Prisma, para que el schema
 -- y la base no difieran.
 --;;
@@ -97,7 +133,9 @@ alter table public.audit_logs drop constraint if exists audit_logs_actor_id_fkey
 alter table public.audit_logs
   add constraint audit_logs_actor_id_fkey
   foreign key (actor_id) references public.profiles (id)
-  on delete restrict on update restrict;
+  on delete restrict on update restrict not valid;
+--;;
+alter table public.audit_logs validate constraint audit_logs_actor_id_fkey;
 
 -- ---------------------------------------------------------------------------
 -- 3) Nada por PostgREST
