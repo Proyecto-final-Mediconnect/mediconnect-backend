@@ -26,7 +26,7 @@ import { CORRECTION_REASON_EXTENSION } from '../src/clinical-records/clinical-en
  * sobre la tabla. Supabase queda como stub porque el camino de escritura no lo
  * usa — si alguna vez lo usara, el stub tira y el test lo dice.
  *
- * Aplica las migraciones de ENG-57 y ENG-126 y deshace todo al terminar, por el
+ * Aplica las migraciones de ENG-57, ENG-126 y la de ENG-100 (cabeza movida) y deshace todo al terminar, por el
  * mismo motivo que los otros specs de HC: la base de integración es compartida y
  * el spec de ENG-85 hace `UPDATE`/`deleteMany` sobre esta tabla para simular
  * manipulación, cosa que el trigger append-only rechazaría.
@@ -39,6 +39,9 @@ const migrationPath = (name: string) =>
 
 const ENG57 = migrationPath('20260826120000_eng57_clinical_record_chain');
 const ENG126 = migrationPath('20260829210000_eng126_clinical_record_hardening');
+const ENG100_HEAD = migrationPath(
+  '20261014120000_eng100_chain_head_serialization_failure',
+);
 
 const AUTHOR = '66666666-6666-4666-8666-666666666666';
 const OTHER_PROFESSIONAL = '77777777-7777-4777-8777-777777777777';
@@ -96,6 +99,7 @@ describe('Corregir una entrada de HC (integration)', () => {
 
     await applyMigration(prisma, ENG57);
     await applyMigration(prisma, ENG126);
+    await applyMigration(prisma, ENG100_HEAD);
 
     const supabase = {
       getClientForToken: () => {
@@ -268,6 +272,45 @@ describe('Corregir una entrada de HC (integration)', () => {
     );
   });
 
+  it('cabeza vieja: el trigger rechaza con 40001 (P2034) y append reintenta', async () => {
+    // Determinístico: fuerza la lectura de una cabeza que ya se movió, sin
+    // depender del scheduling. Ejercita el trigger real, el mapeo real de Prisma
+    // del SQLSTATE 40001 y el reintento.
+    const patientId = await createPatient();
+    await seedEntry(patientId); // seq 1
+    const stale = await service.headOf(patientId);
+    await seedEntry(patientId); // seq 2: la cabeza se movió
+
+    jest.spyOn(service, 'headOf').mockResolvedValueOnce(stale);
+    const view = await seedEntry(patientId);
+
+    expect(view.sequenceNumber).toBe(3);
+  });
+
+  it('el error real del trigger de cabeza llega como P2034', async () => {
+    const patientId = await createPatient();
+    const first = await seedEntry(patientId);
+
+    // Un INSERT directo con número no contiguo: es lo que ve el service si la
+    // cabeza se movió. Fija el contrato `40001` -> `P2034` que usa
+    // `lostChainHeadRace()`.
+    await expect(
+      prisma.clinicalRecordEntry.create({
+        data: {
+          patient_id: patientId,
+          professional_id: AUTHOR,
+          sequence_number: BigInt(first.sequenceNumber),
+          entry_type: 'CONSULTA',
+          fhir_resource_type: 'ClinicalImpression',
+          content: {},
+          content_hash: 'a'.repeat(64),
+          previous_hash: first.contentHash,
+          created_at: new Date(),
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'P2034' });
+  });
+
   it('dos correcciones simultáneas de la misma entrada: entra una sola', async () => {
     // Las dos pasan el chequeo previo —todavía no hay corrección—, así que lo
     // único que puede frenar a la segunda es la unique de corrects_entry_id.
@@ -284,6 +327,11 @@ describe('Corregir una entrada de HC (integration)', () => {
       (r): r is PromiseRejectedResult => r.status === 'rejected',
     );
     expect(rejected.reason).toBeInstanceOf(ConflictException);
+    // El mensaje importa: el 409 genérico de "está recibiendo otra entrada" es
+    // también un `ConflictException` y es lo que saldría si el reintento se agotara.
+    expect((rejected.reason as ConflictException).message).toContain(
+      'Esa entrada ya tiene una corrección',
+    );
 
     await expect(
       prisma.clinicalRecordEntry.count({
