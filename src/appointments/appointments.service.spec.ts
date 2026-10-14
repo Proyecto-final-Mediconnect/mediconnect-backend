@@ -5,6 +5,7 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { AppointmentPaymentService } from '../payments/appointment-payment.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { toInstant } from '../common/time/argentina-time';
@@ -62,6 +63,7 @@ const CANCELLED_PRISMA_ROW = {
 
 describe('AppointmentsService', () => {
   let service: AppointmentsService;
+  let payments: { expireCheckout: jest.Mock };
   let prisma: {
     professional: { findFirst: jest.Mock; findMany: jest.Mock };
     patient: { findMany: jest.Mock };
@@ -125,9 +127,11 @@ describe('AppointmentsService', () => {
       },
     };
 
+    payments = { expireCheckout: jest.fn().mockResolvedValue(undefined) };
     service = new AppointmentsService(
       prisma as unknown as PrismaService,
       makeSupabaseMock(),
+      payments as unknown as AppointmentPaymentService,
     );
   });
 
@@ -523,6 +527,24 @@ describe('AppointmentsService', () => {
           updated_at: NOW,
         },
       });
+    });
+
+    it('vence el link de pago del turno cancelado', async () => {
+      // Si no, la pestaña de MercadoPago que quedó abierta cobraría un turno
+      // que ya no existe.
+      results = [READ_OK];
+
+      await cancel();
+
+      expect(payments.expireCheckout).toHaveBeenCalledWith(APPOINTMENT_ID, NOW);
+    });
+
+    it('si la cancelación falla, el link de pago sigue vivo', async () => {
+      results = [READ_OK];
+      prisma.appointment.update.mockRejectedValue({ code: 'P2025' });
+
+      await expect(cancel()).rejects.toBeInstanceOf(ConflictException);
+      expect(payments.expireCheckout).not.toHaveBeenCalled();
     });
 
     it('un turno que RLS no devuelve es un 404, no un 403', async () => {

@@ -10,7 +10,8 @@ import { PaymentsWebhookController } from './payments-webhook.controller';
  *
  * Tiene el cobro del turno (ENG-63) y el webhook que lo confirma (ENG-64).
  * `MercadoPagoService` se exporta porque lo va a necesitar ENG-65 para el
- * reembolso al cancelar.
+ * reembolso al cancelar, y `AppointmentPaymentService` porque la cancelación
+ * (ENG-55) vence el link de pago del turno.
  *
  * El banco de pruebas del spike (ENG-61) se sacó al cerrar ENG-64: exponía en
  * producción un endpoint para crear preferencias con montos arbitrarios. Las
@@ -24,6 +25,6 @@ import { PaymentsWebhookController } from './payments-webhook.controller';
     PaymentWebhookService,
     AppointmentPaymentService,
   ],
-  exports: [MercadoPagoService],
+  exports: [MercadoPagoService, AppointmentPaymentService],
 })
 export class PaymentsModule {}

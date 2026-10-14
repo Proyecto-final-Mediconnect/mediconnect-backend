@@ -4,11 +4,12 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AppointmentPaymentService } from './appointment-payment.service';
-import { MercadoPagoService } from './mercadopago.service';
+import { MercadoPagoApiError, MercadoPagoService } from './mercadopago.service';
 
 /**
  * Cobro del turno (ENG-63).
@@ -23,6 +24,8 @@ import { MercadoPagoService } from './mercadopago.service';
 const PATIENT = '11111111-1111-4111-8111-111111111111';
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
 const APPOINTMENT = '44444444-4444-4444-8444-444444444444';
+const NOW = new Date('2026-10-14T12:00:00.000Z');
+const MINUTE = 60 * 1000;
 
 type Row = {
   id: string;
@@ -30,6 +33,7 @@ type Row = {
   professional_id: string;
   price: string | number;
   status: string;
+  scheduled_at: string;
 };
 
 function appointmentRow(overrides: Partial<Row> = {}): Row {
@@ -39,6 +43,7 @@ function appointmentRow(overrides: Partial<Row> = {}): Row {
     professional_id: PROFESSIONAL,
     price: '15000.00',
     status: 'RESERVADO_SIN_PAGAR',
+    scheduled_at: '2026-10-20T13:00:00.000Z',
     ...overrides,
   };
 }
@@ -49,6 +54,8 @@ describe('AppointmentPaymentService', () => {
     isConfigured: jest.Mock;
     isSandbox: jest.Mock;
     createPreference: jest.Mock;
+    getPreference: jest.Mock;
+    expirePreference: jest.Mock;
   };
   let prisma: {
     payment: { findUnique: jest.Mock; upsert: jest.Mock };
@@ -77,7 +84,10 @@ describe('AppointmentPaymentService', () => {
         initPoint: 'https://mp/checkout/prod',
         sandboxInitPoint: 'https://mp/checkout/sandbox',
         externalReference: APPOINTMENT,
+        expiresAt: new Date(NOW.getTime() + 15 * MINUTE),
       }),
+      getPreference: jest.fn(),
+      expirePreference: jest.fn().mockResolvedValue(undefined),
     };
 
     prisma = {
@@ -118,16 +128,20 @@ describe('AppointmentPaymentService', () => {
   beforeEach(() => {
     env = {
       MERCADOPAGO_NOTIFICATION_URL: 'https://api.test/payments/webhook',
+      MERCADOPAGO_WEBHOOK_SECRET: 'secreto',
       WEB_ORIGIN: 'https://app.test',
     };
     build(appointmentRow());
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
   });
+
+  afterEach(() => jest.restoreAllMocks());
 
   describe('el contrato con ENG-64', () => {
     it('manda el id del turno como external_reference', async () => {
       // Si esto cambia, el webhook no encuentra el Payment y el turno queda
       // pago pero sin confirmar.
-      await service.createCheckout('jwt', PATIENT, APPOINTMENT);
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
 
       expect(mercadopago.createPreference).toHaveBeenCalledWith(
         expect.objectContaining({ externalReference: APPOINTMENT }),
@@ -144,7 +158,7 @@ describe('AppointmentPaymentService', () => {
       });
       build(appointmentRow({ price: '15000.00' }));
 
-      await service.createCheckout('jwt', PATIENT, APPOINTMENT);
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
 
       expect(prisma.payment.upsert).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -154,13 +168,18 @@ describe('AppointmentPaymentService', () => {
     });
 
     it('la fila nace en PENDIENTE', async () => {
-      const link = await service.createCheckout('jwt', PATIENT, APPOINTMENT);
+      const link = await service.createCheckout(
+        'jwt',
+        PATIENT,
+        APPOINTMENT,
+        NOW,
+      );
 
       expect(link.status).toBe('PENDIENTE');
     });
 
     it('manda la URL de notificación del webhook', async () => {
-      await service.createCheckout('jwt', PATIENT, APPOINTMENT);
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
 
       expect(mercadopago.createPreference).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -171,26 +190,133 @@ describe('AppointmentPaymentService', () => {
   });
 
   describe('idempotencia', () => {
-    it('usa el id del turno como clave, así dos clicks no crean dos cobros', async () => {
-      await service.createCheckout('jwt', PATIENT, APPOINTMENT);
+    it('la primera vez crea la preferencia con una clave atada al turno', async () => {
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
 
+      expect(mercadopago.getPreference).not.toHaveBeenCalled();
       expect(mercadopago.createPreference).toHaveBeenCalledWith(
-        expect.objectContaining({ idempotencyKey: APPOINTMENT }),
+        expect.objectContaining({ idempotencyKey: `${APPOINTMENT}:inicial` }),
       );
     });
 
-    it('con un pago PENDIENTE existente devuelve checkout igual', async () => {
+    it('con una preferencia PENDIENTE vigente la reutiliza y no crea otra', async () => {
       // Volver atrás en el navegador y reintentar es normal. Lo que no puede
-      // pasar es que se cree una segunda preferencia.
+      // pasar es que se cree una segunda preferencia: la primera seguiría viva
+      // y se podría pagar desde otra pestaña.
       prisma.payment.findUnique.mockResolvedValue({
         id: 'pay-1',
         status: 'PENDIENTE',
+        mercadopago_preference_id: 'pref-viva',
+      });
+      mercadopago.getPreference.mockResolvedValue({
+        id: 'pref-viva',
+        initPoint: 'https://mp/checkout/prod-viva',
+        sandboxInitPoint: 'https://mp/checkout/sandbox-viva',
+        externalReference: APPOINTMENT,
+        expiresAt: new Date(NOW.getTime() + 10 * MINUTE),
       });
 
+      const link = await service.createCheckout(
+        'jwt',
+        PATIENT,
+        APPOINTMENT,
+        NOW,
+      );
+
+      expect(mercadopago.getPreference).toHaveBeenCalledWith('pref-viva');
+      expect(mercadopago.createPreference).not.toHaveBeenCalled();
+      expect(link.checkoutUrl).toBe('https://mp/checkout/sandbox-viva');
+      expect(prisma.payment.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            mercadopago_preference_id: 'pref-viva',
+          }),
+        }),
+      );
+    });
+
+    it('si la guardada está por vencer crea otra, con una clave nueva', async () => {
+      // Con la misma clave MercadoPago podría devolver la preferencia muerta.
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'pay-1',
+        status: 'PENDIENTE',
+        mercadopago_preference_id: 'pref-vieja',
+      });
+      mercadopago.getPreference.mockResolvedValue({
+        id: 'pref-vieja',
+        initPoint: 'x',
+        sandboxInitPoint: 'x',
+        externalReference: APPOINTMENT,
+        expiresAt: new Date(NOW.getTime() + 30 * 1000),
+      });
+
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
+
+      expect(mercadopago.createPreference).toHaveBeenCalledWith(
+        expect.objectContaining({
+          idempotencyKey: `${APPOINTMENT}:pref-vieja`,
+        }),
+      );
+    });
+
+    it('si MercadoPago ya no conoce la guardada (404) crea otra', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'pay-1',
+        status: 'PENDIENTE',
+        mercadopago_preference_id: 'pref-ajena',
+      });
+      mercadopago.getPreference.mockRejectedValue(
+        new MercadoPagoApiError(404, 502, 'no existe'),
+      );
+
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
+
+      expect(mercadopago.createPreference).toHaveBeenCalledTimes(1);
+    });
+
+    it('un reintento después de un RECHAZADO vuelve la fila a PENDIENTE', async () => {
+      // Si no, la pantalla recibiría un link nuevo junto con el rechazo viejo.
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'pay-1',
+        status: 'RECHAZADO',
+        mercadopago_preference_id: null,
+      });
+      prisma.payment.upsert.mockImplementation(
+        ({ update }: { update: Record<string, unknown> }) =>
+          Promise.resolve({
+            status: update.status,
+            amount: 15000,
+            currency: 'ARS',
+          }),
+      );
+
+      const link = await service.createCheckout(
+        'jwt',
+        PATIENT,
+        APPOINTMENT,
+        NOW,
+      );
+
+      expect(link.status).toBe('PENDIENTE');
+      expect(prisma.payment.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          // Nunca pisa un pago que el webhook cerró entre la lectura y esta
+          // escritura.
+          where: {
+            appointment_id: APPOINTMENT,
+            status: { notIn: ['APROBADO', 'REEMBOLSADO'] },
+          },
+          update: { mercadopago_preference_id: 'pref-1', status: 'PENDIENTE' },
+        }),
+      );
+    });
+
+    it('si el webhook aprobó el pago en el medio, 409 en vez de pisarlo', async () => {
+      prisma.payment.upsert.mockRejectedValue({ code: 'P2002' });
+
       await expect(
-        service.createCheckout('jwt', PATIENT, APPOINTMENT),
-      ).resolves.toMatchObject({ appointmentId: APPOINTMENT });
-      expect(prisma.payment.upsert).toHaveBeenCalledTimes(1);
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
+      ).rejects.toThrow(ConflictException);
     });
 
     it.each(['APROBADO', 'REEMBOLSADO'])(
@@ -199,23 +325,120 @@ describe('AppointmentPaymentService', () => {
         prisma.payment.findUnique.mockResolvedValue({ id: 'pay-1', status });
 
         await expect(
-          service.createCheckout('jwt', PATIENT, APPOINTMENT),
+          service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
         ).rejects.toThrow(ConflictException);
         expect(mercadopago.createPreference).not.toHaveBeenCalled();
       },
     );
   });
 
+  describe('vencimiento del link', () => {
+    it('vence a los 15 minutos', async () => {
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
+
+      expect(mercadopago.createPreference).toHaveBeenCalledWith(
+        expect.objectContaining({
+          expiresAt: new Date(NOW.getTime() + 15 * MINUTE),
+        }),
+      );
+    });
+
+    it('si el turno empieza antes, vence al empezar el turno', async () => {
+      const start = new Date(NOW.getTime() + 5 * MINUTE);
+      build(appointmentRow({ scheduled_at: start.toISOString() }));
+
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
+
+      expect(mercadopago.createPreference).toHaveBeenCalledWith(
+        expect.objectContaining({ expiresAt: start }),
+      );
+    });
+
+    it('un turno que ya pasó no se paga', async () => {
+      // Mientras ENG-101 no lo libere sigue en RESERVADO_SIN_PAGAR, y el
+      // webhook lo pasaría a CONFIRMADO.
+      build(appointmentRow({ scheduled_at: '2026-10-14T11:00:00.000Z' }));
+
+      await expect(
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
+      ).rejects.toThrow(/ya pasó/);
+      expect(mercadopago.createPreference).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('falla de MercadoPago', () => {
+    it('propaga el error y no deja fila en payments', async () => {
+      // El turno sigue RESERVADO_SIN_PAGAR y el paciente puede reintentar.
+      mercadopago.createPreference.mockRejectedValue(
+        new MercadoPagoApiError(
+          503,
+          502,
+          'MercadoPago rechazó la operación (HTTP 503).',
+        ),
+      );
+
+      await expect(
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
+      ).rejects.toBeInstanceOf(MercadoPagoApiError);
+      expect(prisma.payment.upsert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('expireCheckout', () => {
+    it('vence la preferencia de un pago todavía abierto', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        status: 'PENDIENTE',
+        mercadopago_preference_id: 'pref-1',
+      });
+
+      await service.expireCheckout(APPOINTMENT, NOW);
+
+      expect(mercadopago.expirePreference).toHaveBeenCalledWith('pref-1', NOW);
+    });
+
+    it.each(['APROBADO', 'REEMBOLSADO'])(
+      'no toca un pago %s',
+      async (status) => {
+        prisma.payment.findUnique.mockResolvedValue({
+          status,
+          mercadopago_preference_id: 'pref-1',
+        });
+
+        await service.expireCheckout(APPOINTMENT, NOW);
+
+        expect(mercadopago.expirePreference).not.toHaveBeenCalled();
+      },
+    );
+
+    it('sin pago no hace nada', async () => {
+      await service.expireCheckout(APPOINTMENT, NOW);
+
+      expect(mercadopago.expirePreference).not.toHaveBeenCalled();
+    });
+
+    it('si MercadoPago falla no tira: la cancelación ya pasó', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        status: 'PENDIENTE',
+        mercadopago_preference_id: 'pref-1',
+      });
+      mercadopago.expirePreference.mockRejectedValue(new Error('timeout'));
+
+      await expect(
+        service.expireCheckout(APPOINTMENT, NOW),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   describe('quién puede pagar', () => {
     it('el paciente del turno sí', async () => {
       await expect(
-        service.createCheckout('jwt', PATIENT, APPOINTMENT),
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
       ).resolves.toMatchObject({ appointmentId: APPOINTMENT });
     });
 
     it('el profesional no, y no se crea ninguna preferencia', async () => {
       await expect(
-        service.createCheckout('jwt', PROFESSIONAL, APPOINTMENT),
+        service.createCheckout('jwt', PROFESSIONAL, APPOINTMENT, NOW),
       ).rejects.toThrow(ForbiddenException);
       expect(mercadopago.createPreference).not.toHaveBeenCalled();
     });
@@ -224,7 +447,7 @@ describe('AppointmentPaymentService', () => {
       build(null);
 
       await expect(
-        service.createCheckout('jwt', PATIENT, APPOINTMENT),
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
       ).rejects.toThrow(NotFoundException);
     });
   });
@@ -234,7 +457,7 @@ describe('AppointmentPaymentService', () => {
       build(appointmentRow({ status: 'CONFIRMADO' }));
 
       await expect(
-        service.createCheckout('jwt', PATIENT, APPOINTMENT),
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
       ).rejects.toThrow(/ya está pago/);
       expect(mercadopago.createPreference).not.toHaveBeenCalled();
     });
@@ -245,7 +468,7 @@ describe('AppointmentPaymentService', () => {
         build(appointmentRow({ status }));
 
         await expect(
-          service.createCheckout('jwt', PATIENT, APPOINTMENT),
+          service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
         ).rejects.toThrow(ConflictException);
         expect(mercadopago.createPreference).not.toHaveBeenCalled();
       },
@@ -258,7 +481,7 @@ describe('AppointmentPaymentService', () => {
       mercadopago.isConfigured.mockReturnValue(false);
 
       await expect(
-        service.createCheckout('jwt', PATIENT, APPOINTMENT),
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
       ).rejects.toThrow(ServiceUnavailableException);
     });
 
@@ -267,7 +490,48 @@ describe('AppointmentPaymentService', () => {
       env.MERCADOPAGO_NOTIFICATION_URL = undefined;
 
       await expect(
-        service.createCheckout('jwt', PATIENT, APPOINTMENT),
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
+      ).rejects.toThrow(ServiceUnavailableException);
+      expect(mercadopago.createPreference).not.toHaveBeenCalled();
+    });
+
+    it('sin secreto del webhook NO cobra', async () => {
+      // El webhook descartaría todas las notificaciones: mismo caso que sin URL.
+      env.MERCADOPAGO_WEBHOOK_SECRET = undefined;
+
+      await expect(
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
+      ).rejects.toThrow(ServiceUnavailableException);
+      expect(mercadopago.createPreference).not.toHaveBeenCalled();
+    });
+
+    it('sin WEB_ORIGIN en producción NO cobra', async () => {
+      // El paciente volvería de pagar a un localhost que no existe.
+      env.WEB_ORIGIN = undefined;
+      env.NODE_ENV = 'production';
+
+      await expect(
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
+      ).rejects.toThrow(ServiceUnavailableException);
+      expect(mercadopago.createPreference).not.toHaveBeenCalled();
+    });
+
+    it('sin WEB_ORIGIN en desarrollo vuelve a localhost', async () => {
+      env.WEB_ORIGIN = undefined;
+
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
+
+      const { backUrls } = mercadopago.createPreference.mock.calls[0][0] as {
+        backUrls: Record<string, string>;
+      };
+      expect(backUrls.success).toMatch(/^http:\/\/localhost:5173\//);
+    });
+
+    it('un WEB_ORIGIN que es una lista NO cobra', async () => {
+      env.WEB_ORIGIN = 'https://app.test,https://otra.test';
+
+      await expect(
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
       ).rejects.toThrow(ServiceUnavailableException);
       expect(mercadopago.createPreference).not.toHaveBeenCalled();
     });
@@ -276,27 +540,20 @@ describe('AppointmentPaymentService', () => {
       build(appointmentRow({ price: '0' }));
 
       await expect(
-        service.createCheckout('jwt', PATIENT, APPOINTMENT),
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
       ).rejects.toThrow(ConflictException);
       expect(mercadopago.createPreference).not.toHaveBeenCalled();
     });
   });
 
   describe('sandbox', () => {
-    it('MERCADOPAGO_SANDBOX manda sobre el prefijo del token', async () => {
-      // Con credenciales de un usuario de prueba el token es `APP_USR-` igual
-      // que en producción: el prefijo deja de distinguir y la variable es lo
-      // único que lo resuelve sin tocar código.
-      mercadopago.isSandbox.mockReturnValue(true);
-
-      const link = await service.createCheckout('jwt', PATIENT, APPOINTMENT);
-
-      expect(link.sandbox).toBe(true);
-      expect(link.checkoutUrl).toBe('https://mp/checkout/sandbox');
-    });
-
     it('en sandbox devuelve el init point de prueba y lo avisa', async () => {
-      const link = await service.createCheckout('jwt', PATIENT, APPOINTMENT);
+      const link = await service.createCheckout(
+        'jwt',
+        PATIENT,
+        APPOINTMENT,
+        NOW,
+      );
 
       expect(link.checkoutUrl).toBe('https://mp/checkout/sandbox');
       expect(link.sandbox).toBe(true);
@@ -305,7 +562,12 @@ describe('AppointmentPaymentService', () => {
     it('en producción devuelve el init point real', async () => {
       mercadopago.isSandbox.mockReturnValue(false);
 
-      const link = await service.createCheckout('jwt', PATIENT, APPOINTMENT);
+      const link = await service.createCheckout(
+        'jwt',
+        PATIENT,
+        APPOINTMENT,
+        NOW,
+      );
 
       expect(link.checkoutUrl).toBe('https://mp/checkout/prod');
       expect(link.sandbox).toBe(false);
@@ -314,7 +576,7 @@ describe('AppointmentPaymentService', () => {
 
   describe('back urls', () => {
     it('las tres vuelven a la pantalla de pago del turno', async () => {
-      await service.createCheckout('jwt', PATIENT, APPOINTMENT);
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
 
       const { backUrls } = mercadopago.createPreference.mock.calls[0][0] as {
         backUrls: Record<string, string>;

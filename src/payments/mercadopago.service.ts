@@ -45,6 +45,9 @@ export interface Preference {
   /** Lo que se mandó como `external_reference`: es el hilo que ata el pago con
    *  el turno cuando vuelve el webhook. */
   externalReference: string;
+  /** Hasta cuándo se puede pagar. `null` si la preferencia no vence, que con
+   *  las que crea este service no debería pasar nunca. */
+  expiresAt: Date | null;
 }
 
 /**
@@ -73,12 +76,36 @@ export interface MercadoPagoPayment {
   approvedAt: string | null;
 }
 
-/** Respuesta de `POST /checkout/preferences`. Solo se tipa lo que se usa. */
+/** Respuesta de `POST`/`GET /checkout/preferences`. Solo se tipa lo que se usa. */
 interface PreferenceResponse {
   id: string;
   init_point: string;
   sandbox_init_point: string;
   external_reference?: string;
+  expires?: boolean;
+  expiration_date_to?: string | null;
+}
+
+/**
+ * Tipos de medio de pago que no se ofrecen: `ticket` (Rapipago, Pago Fácil) y
+ * `atm` (cajero, Red Link). Los dos quedan `pending` y se acreditan días
+ * después, cuando el turno ya pasó o el horario ya lo tomó otra persona: se
+ * cobraría algo que no se puede confirmar. Un turno se paga en el momento o no
+ * se paga.
+ */
+const EXCLUDED_PAYMENT_TYPES = ['ticket', 'atm'];
+
+/**
+ * Fecha en el formato que pide MercadoPago para `expiration_date_to`
+ * (`yyyy-MM-dd'T'HH:mm:ss.SSSZ`, p. ej. `2026-10-14T12:00:00.000-03:00`).
+ *
+ * Se manda con el offset de Argentina explícito en vez del `Z` de
+ * `toISOString()`: es lo que muestran todos los ejemplos de la documentación, y
+ * Argentina no tiene horario de verano, así que `-03:00` es fijo.
+ */
+export function toMercadoPagoDate(date: Date): string {
+  const local = new Date(date.getTime() - 3 * 60 * 60 * 1000);
+  return local.toISOString().replace('Z', '-03:00');
 }
 
 /** Respuesta de `GET /v1/payments/:id`. Solo se tipa lo que se usa. */
@@ -152,6 +179,11 @@ export class MercadoPagoService {
    * `notificationUrl` es adónde MercadoPago va a mandar el webhook de ENG-64.
    * Tiene que ser pública y HTTPS: en local no alcanza con `localhost`, hace
    * falta un túnel (ver el informe del spike).
+   *
+   * La preferencia **siempre vence** (`expiresAt`) y es **binaria**: el pago se
+   * aprueba o se rechaza en el momento, sin quedar pendiente. Sin las dos cosas,
+   * un link viejo —o un pago en efectivo que se acredita días después— cobra un
+   * turno que ya no se puede confirmar, y no hay reembolso automático.
    */
   async createPreference(params: {
     externalReference: string;
@@ -159,9 +191,11 @@ export class MercadoPagoService {
     item: PreferenceItem;
     /** URLs de vuelta al front después de pagar. */
     backUrls: { success: string; failure: string; pending: string };
-    /** Clave de idempotencia. Dos llamadas con la misma clave devuelven la misma
-     *  preferencia en vez de crear dos: evita cobrar dos veces el mismo turno si
-     *  el paciente hace doble click o el front reintenta. */
+    /** Desde cuándo MercadoPago deja de aceptar pagos de esta preferencia. */
+    expiresAt: Date;
+    /** Clave de idempotencia. Red de seguridad para dos requests simultáneos:
+     *  la defensa principal contra preferencias duplicadas es reutilizar la
+     *  guardada (ver `AppointmentPaymentService`). */
     idempotencyKey?: string;
   }): Promise<Preference> {
     this.assertConfigured();
@@ -185,15 +219,67 @@ export class MercadoPagoService {
         // de confirmación: el back_url lo dispara el navegador del pagador y es
         // trivial de falsificar. Quien confirma es el webhook (ENG-64).
         auto_return: 'approved',
+        expires: true,
+        expiration_date_to: toMercadoPagoDate(params.expiresAt),
+        // Sin estados intermedios: lo que no se aprueba en el momento se
+        // rechaza, y el turno no queda esperando una acreditación que puede
+        // llegar cuando ya no sirve.
+        binary_mode: true,
+        payment_methods: {
+          excluded_payment_types: EXCLUDED_PAYMENT_TYPES.map((id) => ({ id })),
+        },
       },
       params.idempotencyKey,
     );
 
+    return this.toPreference(body, params.externalReference);
+  }
+
+  /**
+   * Preferencia ya creada, para poder reutilizarla en vez de crear otra.
+   *
+   * Una preferencia nueva por cada click deja vivas las anteriores, y cualquiera
+   * de ellas se puede pagar desde una pestaña que quedó abierta.
+   */
+  async getPreference(preferenceId: string): Promise<Preference> {
+    this.assertConfigured();
+
+    const body = await this.request<PreferenceResponse>(
+      'GET',
+      `/checkout/preferences/${encodeURIComponent(preferenceId)}`,
+    );
+
+    return this.toPreference(body, body.external_reference ?? '');
+  }
+
+  /**
+   * Vence una preferencia ya: después de esto MercadoPago no acepta pagos con
+   * ella. Se usa al cancelar el turno, para que el link que el paciente dejó
+   * abierto no cobre un turno que ya no existe.
+   */
+  async expirePreference(preferenceId: string, now: Date): Promise<void> {
+    this.assertConfigured();
+
+    await this.request(
+      'PUT',
+      `/checkout/preferences/${encodeURIComponent(preferenceId)}`,
+      { expires: true, expiration_date_to: toMercadoPagoDate(now) },
+    );
+  }
+
+  private toPreference(
+    body: PreferenceResponse,
+    externalReference: string,
+  ): Preference {
     return {
       id: body.id,
       initPoint: body.init_point,
       sandboxInitPoint: body.sandbox_init_point,
-      externalReference: body.external_reference ?? params.externalReference,
+      externalReference: body.external_reference ?? externalReference,
+      expiresAt:
+        body.expires && body.expiration_date_to
+          ? new Date(body.expiration_date_to)
+          : null,
     };
   }
 
@@ -233,7 +319,7 @@ export class MercadoPagoService {
   }
 
   private async request<T = unknown>(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'PUT',
     path: string,
     body?: unknown,
     idempotencyKey?: string,

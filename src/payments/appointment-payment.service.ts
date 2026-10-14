@@ -10,7 +10,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
-import { MercadoPagoService } from './mercadopago.service';
+import {
+  MercadoPagoApiError,
+  MercadoPagoService,
+  Preference,
+} from './mercadopago.service';
 
 /**
  * Cobro del turno con MercadoPago Checkout Pro (ENG-63).
@@ -35,6 +39,22 @@ import { MercadoPagoService } from './mercadopago.service';
  * `Payment` por `appointment_id` con ese valor. Si acá se mandara otra cosa, el
  * webhook loguearía "pago sin Payment asociado" y el turno no se confirmaría
  * nunca, con la plata ya cobrada. Es el punto de acople de toda la épica.
+ *
+ * ## Por qué la preferencia vence
+ *
+ * Un link de Checkout Pro sigue cobrable mientras no venza, aunque el turno ya
+ * no se pueda confirmar: el paciente cancela y paga desde la pestaña que le
+ * quedó abierta, o el turno pasa y el link sigue vivo. En esos casos el webhook
+ * marca el pago `APROBADO` y contesta `turno-no-confirmable`: se cobra sin dar
+ * nada a cambio, y hasta ENG-65 no hay reembolso automático. Por eso la
+ * preferencia vence a los {@link PREFERENCE_TTL_MS} (o al empezar el turno, lo
+ * que llegue antes), no acepta efectivo ni pagos pendientes, y se vence a mano
+ * al cancelar ({@link AppointmentPaymentService.expireCheckout}).
+ *
+ * Lo que esto **no** cubre: una misma preferencia acepta más de un pago (dos
+ * pestañas, dos tarjetas). Si se aprueban dos, el webhook toma el segundo como
+ * `ya-procesado` y esa plata hay que devolverla a mano. Detectarlo y
+ * reembolsarlo queda para ENG-65.
  */
 
 /** Lo que el front necesita para mandar al paciente a pagar. */
@@ -57,9 +77,26 @@ interface AppointmentRow {
   professional_id: string;
   price: string | number;
   status: string;
+  scheduled_at: string;
 }
 
-const APPOINTMENT_SELECT = 'id, patient_id, professional_id, price, status';
+const APPOINTMENT_SELECT =
+  'id, patient_id, professional_id, price, status, scheduled_at';
+
+/**
+ * Cuánto vive un link de pago. Es la misma ventana con la que ENG-101 libera
+ * los turnos impagos, pero contada desde que se pide el link y no desde la
+ * reserva: un link pedido al minuto 14 vive hasta el 29. Por eso ENG-101, al
+ * liberar, tiene que llamar a `expireCheckout` igual que la cancelación.
+ */
+export const PREFERENCE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Margen mínimo de vida que tiene que tener una preferencia guardada para
+ * reutilizarla. Mandar al paciente a un checkout que vence mientras carga la
+ * tarjeta es peor que crearle uno nuevo.
+ */
+const REUSE_MIN_REMAINING_MS = 2 * 60 * 1000;
 
 /**
  * Estados del turno que admiten pago.
@@ -70,7 +107,22 @@ const APPOINTMENT_SELECT = 'id, patient_id, professional_id, price, status';
 const PAYABLE_APPOINTMENT_STATUS = 'RESERVADO_SIN_PAGAR';
 
 /** Estados del pago que ya cerraron el intento con plata adentro. */
-const SETTLED_PAYMENT_STATUSES = ['APROBADO', 'REEMBOLSADO'];
+const SETTLED_PAYMENT_STATUSES: ('APROBADO' | 'REEMBOLSADO')[] = [
+  'APROBADO',
+  'REEMBOLSADO',
+];
+
+/** Estados del pago con una preferencia que todavía se podría cobrar. */
+const OPEN_PAYMENT_STATUSES: ('PENDIENTE' | 'RECHAZADO')[] = [
+  'PENDIENTE',
+  'RECHAZADO',
+];
+
+/** Código de Prisma para violación de unicidad. */
+const PRISMA_UNIQUE_VIOLATION = 'P2002';
+
+const PAYMENTS_UNAVAILABLE =
+  'Los pagos no están disponibles en este momento. Probá de nuevo más tarde.';
 
 @Injectable()
 export class AppointmentPaymentService {
@@ -86,21 +138,23 @@ export class AppointmentPaymentService {
   /**
    * Crea (o recupera) el link de pago del turno.
    *
-   * Es **idempotente de punta a punta**: la fila de `payments` se busca antes de
-   * crearla y la preferencia se pide con el id del turno como clave de
-   * idempotencia, así que pedir el link dos veces —doble click, volver atrás en
-   * el navegador, reintentar tras un error de red— devuelve el mismo checkout y
-   * nunca genera un segundo cobro.
+   * Pedir el link dos veces —doble click, volver atrás en el navegador,
+   * reintentar tras un error de red— devuelve **la misma preferencia** mientras
+   * siga vigente: la guardada en `payments` se reutiliza en vez de crear otra.
+   * Recién cuando venció se pide una nueva, y la clave de idempotencia cubre a
+   * dos requests simultáneos que todavía no vieron la fila.
+   *
+   * Eso evita links duplicados, no cobros duplicados: una preferencia acepta
+   * más de un pago (ver el comentario del archivo).
    */
   async createCheckout(
     accessToken: string,
     userId: string,
     appointmentId: string,
+    now: Date = new Date(),
   ): Promise<CheckoutLink> {
     if (!this.mercadopago.isConfigured()) {
-      throw new ServiceUnavailableException(
-        'Los pagos no están disponibles en este momento. Probá de nuevo más tarde.',
-      );
+      throw new ServiceUnavailableException(PAYMENTS_UNAVAILABLE);
     }
 
     const appointment = await this.readAppointment(accessToken, appointmentId);
@@ -119,52 +173,66 @@ export class AppointmentPaymentService {
       );
     }
 
+    // Mientras ENG-101 no libere los turnos impagos, uno de ayer sigue en
+    // RESERVADO_SIN_PAGAR y el webhook lo pasaría a CONFIRMADO.
+    const scheduledAt = new Date(appointment.scheduled_at);
+    if (scheduledAt <= now) {
+      throw new ConflictException('Ese turno ya pasó: no se puede pagar.');
+    }
+
+    // Antes de tocar MercadoPago: si falta configuración, mejor no cobrar.
+    const notificationUrl = this.notificationUrl();
+    const backUrls = this.backUrls(appointment.id);
+
     const { amount, currency, professionalName } =
       await this.readChargeDetails(appointment);
 
     const existing = await this.prisma.payment.findUnique({
       where: { appointment_id: appointment.id },
-      select: { id: true, status: true },
+      select: { id: true, status: true, mercadopago_preference_id: true },
     });
 
-    if (existing && SETTLED_PAYMENT_STATUSES.includes(existing.status)) {
+    if (
+      existing &&
+      (SETTLED_PAYMENT_STATUSES as string[]).includes(existing.status)
+    ) {
       // Defensa en profundidad: el estado del turno ya debería haberlo frenado,
       // pero si quedaron desincronizados, la que manda es la fila del pago.
       throw new ConflictException('Ese turno ya tiene un pago registrado.');
     }
 
-    const preference = await this.mercadopago.createPreference({
-      // EL contrato con ENG-64. No tocar sin cambiar el webhook.
-      externalReference: appointment.id,
-      notificationUrl: this.notificationUrl(),
-      item: {
-        title: `Consulta con ${professionalName}`,
-        quantity: 1,
-        unitPrice: amount,
-        currencyId: currency,
-      },
-      backUrls: this.backUrls(appointment.id),
-      // Mismo turno ⇒ misma preferencia. Es lo que impide que un doble click
-      // genere dos checkouts para el mismo horario.
-      idempotencyKey: appointment.id,
-    });
+    const preference =
+      (await this.reusablePreference(
+        existing?.mercadopago_preference_id ?? null,
+        appointment.id,
+        now,
+      )) ??
+      (await this.mercadopago.createPreference({
+        // EL contrato con ENG-64. No tocar sin cambiar el webhook.
+        externalReference: appointment.id,
+        notificationUrl,
+        item: {
+          title: `Consulta con ${professionalName}`,
+          quantity: 1,
+          unitPrice: amount,
+          currencyId: currency,
+        },
+        backUrls,
+        expiresAt: new Date(
+          Math.min(now.getTime() + PREFERENCE_TTL_MS, scheduledAt.getTime()),
+        ),
+        // Atada a la preferencia que se reemplaza: dos requests simultáneos ven
+        // la misma fila y comparten clave, pero una vez vencida la anterior la
+        // clave cambia y MercadoPago no devuelve la preferencia muerta.
+        idempotencyKey: `${appointment.id}:${existing?.mercadopago_preference_id ?? 'inicial'}`,
+      }));
 
-    // El monto se guarda ACÁ y no se vuelve a calcular: el webhook de ENG-64
-    // compara lo que MercadoPago cobró contra esta fila. Si quedara en cero o
-    // desactualizado, un pago legítimo se rechazaría —o peor, uno por menos
-    // plata se aceptaría.
-    const payment = await this.prisma.payment.upsert({
-      where: { appointment_id: appointment.id },
-      create: {
-        appointment_id: appointment.id,
-        amount,
-        currency,
-        status: 'PENDIENTE',
-        mercadopago_preference_id: preference.id,
-      },
-      update: { mercadopago_preference_id: preference.id },
-      select: { status: true, amount: true, currency: true },
-    });
+    const payment = await this.savePayment(
+      appointment.id,
+      amount,
+      currency,
+      preference.id,
+    );
 
     const sandbox = this.mercadopago.isSandbox();
 
@@ -179,6 +247,43 @@ export class AppointmentPaymentService {
       currency: payment.currency,
       status: payment.status,
     };
+  }
+
+  /**
+   * Vence el link de pago del turno, si hay uno que todavía se pueda cobrar.
+   *
+   * Lo llama la cancelación (ENG-55) y lo va a necesitar ENG-101 al liberar el
+   * turno: sin esto, la pestaña de MercadoPago que el paciente dejó abierta
+   * sigue cobrando un turno que ya no existe.
+   *
+   * **Nunca tira.** Cancelar el turno es lo importante y ya pasó; si MercadoPago
+   * no contesta, la preferencia igual vence sola a los {@link PREFERENCE_TTL_MS}
+   * como mucho, y el error queda en el log.
+   */
+  async expireCheckout(appointmentId: string, now: Date = new Date()) {
+    try {
+      const payment = await this.prisma.payment.findUnique({
+        where: { appointment_id: appointmentId },
+        select: { status: true, mercadopago_preference_id: true },
+      });
+
+      if (
+        !payment?.mercadopago_preference_id ||
+        !(OPEN_PAYMENT_STATUSES as string[]).includes(payment.status) ||
+        !this.mercadopago.isConfigured()
+      ) {
+        return;
+      }
+
+      await this.mercadopago.expirePreference(
+        payment.mercadopago_preference_id,
+        now,
+      );
+    } catch (err) {
+      this.logger.error(
+        `No se pudo vencer la preferencia del turno ${appointmentId}: ${String(err)}`,
+      );
+    }
   }
 
   /**
@@ -217,6 +322,90 @@ export class AppointmentPaymentService {
       status: payment?.status ?? 'SIN_INICIAR',
       appointmentStatus: appointment.status,
     };
+  }
+
+  /**
+   * La preferencia guardada, si todavía sirve: es del turno y le queda margen
+   * de vida. `null` si hay que crear otra.
+   *
+   * Un 404 de MercadoPago (la preferencia es de otra cuenta, por ejemplo tras
+   * rotar credenciales) también es "crear otra". Cualquier otro error se
+   * propaga: si MercadoPago no contesta un GET, tampoco va a contestar el POST.
+   */
+  private async reusablePreference(
+    preferenceId: string | null,
+    appointmentId: string,
+    now: Date,
+  ): Promise<Preference | null> {
+    if (!preferenceId) {
+      return null;
+    }
+
+    let preference: Preference;
+    try {
+      preference = await this.mercadopago.getPreference(preferenceId);
+    } catch (err) {
+      if (err instanceof MercadoPagoApiError && err.providerStatus === 404) {
+        return null;
+      }
+      throw err;
+    }
+
+    const vigente =
+      preference.expiresAt !== null &&
+      preference.expiresAt.getTime() - now.getTime() >= REUSE_MIN_REMAINING_MS;
+
+    return vigente && preference.externalReference === appointmentId
+      ? preference
+      : null;
+  }
+
+  /**
+   * Guarda (o actualiza) la fila del pago con la preferencia vigente.
+   *
+   * El monto se guarda ACÁ y no se vuelve a calcular: el webhook de ENG-64
+   * compara lo que MercadoPago cobró contra esta fila. Si quedara en cero o
+   * desactualizado, un pago legítimo se rechazaría —o peor, uno por menos plata
+   * se aceptaría.
+   *
+   * Un reintento después de un pago rechazado vuelve la fila a `PENDIENTE`: hay
+   * un intento nuevo en curso y la pantalla no tiene por qué seguir mostrando el
+   * rechazo anterior. El `where` excluye los estados cerrados por si el webhook
+   * aprobó el pago entre la lectura y esta escritura: ahí el upsert intenta
+   * crear, choca con la unicidad de `appointment_id` y sale como 409 en vez de
+   * pisar un `APROBADO`.
+   */
+  private async savePayment(
+    appointmentId: string,
+    amount: number,
+    currency: string,
+    preferenceId: string,
+  ): Promise<{ status: string; amount: unknown; currency: string }> {
+    try {
+      return await this.prisma.payment.upsert({
+        where: {
+          appointment_id: appointmentId,
+          status: { notIn: SETTLED_PAYMENT_STATUSES },
+        },
+        create: {
+          appointment_id: appointmentId,
+          amount,
+          currency,
+          status: 'PENDIENTE',
+          mercadopago_preference_id: preferenceId,
+        },
+        update: {
+          mercadopago_preference_id: preferenceId,
+          status: 'PENDIENTE',
+        },
+        select: { status: true, amount: true, currency: true },
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code === PRISMA_UNIQUE_VIOLATION) {
+        throw new ConflictException('Ese turno ya tiene un pago registrado.');
+      }
+      throw err;
+    }
   }
 
   /**
@@ -291,16 +480,24 @@ export class AppointmentPaymentService {
     };
   }
 
-  /** Adónde MercadoPago manda el webhook de ENG-64. */
+  /**
+   * Adónde MercadoPago manda el webhook de ENG-64.
+   *
+   * Exige también `MERCADOPAGO_WEBHOOK_SECRET`: sin él el webhook descarta todas
+   * las notificaciones (`sin-secreto-configurado`), que para el paciente es lo
+   * mismo que si no llegaran.
+   */
   private notificationUrl(): string {
     const url = this.config.get<string>('MERCADOPAGO_NOTIFICATION_URL');
+    const secret = this.config.get<string>('MERCADOPAGO_WEBHOOK_SECRET');
 
-    if (!url) {
+    if (!url || !secret) {
       // Sin esto el pago se cobraría y el turno nunca se confirmaría, porque la
       // notificación no llegaría a ningún lado. Es preferible no cobrar.
-      throw new ServiceUnavailableException(
-        'Los pagos no están disponibles en este momento. Probá de nuevo más tarde.',
+      this.logger.error(
+        'Cobro deshabilitado: falta MERCADOPAGO_NOTIFICATION_URL o MERCADOPAGO_WEBHOOK_SECRET.',
       );
+      throw new ServiceUnavailableException(PAYMENTS_UNAVAILABLE);
     }
 
     return url;
@@ -312,14 +509,37 @@ export class AppointmentPaymentService {
    * Las tres apuntan a la misma pantalla con un query param distinto: el
    * resultado real se lee del backend, así que la pantalla solo necesita saber
    * qué contarle al paciente mientras tanto.
+   *
+   * Sale de `WEB_ORIGIN`. En producción tiene que estar y ser **una** URL: el
+   * fallback a `localhost` solo vale en desarrollo, y si `WEB_ORIGIN` pasara a
+   * ser una lista de orígenes para CORS, el paciente que acaba de pagar volvería
+   * a una URL rota. En los dos casos, 503 antes de cobrar.
    */
   private backUrls(appointmentId: string): {
     success: string;
     failure: string;
     pending: string;
   } {
-    const web =
-      this.config.get<string>('WEB_ORIGIN') ?? 'http://localhost:5173';
+    const configured = this.config.get<string>('WEB_ORIGIN');
+    const production = this.config.get<string>('NODE_ENV') === 'production';
+
+    if (!configured && production) {
+      this.logger.error('Cobro deshabilitado: falta WEB_ORIGIN en producción.');
+      throw new ServiceUnavailableException(PAYMENTS_UNAVAILABLE);
+    }
+
+    let web: string;
+    try {
+      // Una lista separada por comas puede parsear como un host raro: se
+      // rechaza antes de que `URL` la acepte.
+      if (configured?.includes(',')) throw new Error('lista');
+      web = new URL(configured ?? 'http://localhost:5173').origin;
+    } catch {
+      this.logger.error(
+        `Cobro deshabilitado: WEB_ORIGIN no es una URL única (${configured}).`,
+      );
+      throw new ServiceUnavailableException(PAYMENTS_UNAVAILABLE);
+    }
     const base = `${web}/turnos/${appointmentId}/pago`;
 
     return {
