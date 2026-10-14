@@ -124,6 +124,12 @@ const MAX_APPEND_ATTEMPTS = 3;
 /** `P2002` de Prisma: violación de una restricción unique. */
 const PRISMA_UNIQUE_VIOLATION = 'P2002';
 
+/**
+ * `P2034` de Prisma: la base devolvió `40001` (serialization_failure). Es lo que
+ * usa el trigger de la cadena cuando la cabeza se movió (ENG-100).
+ */
+const PRISMA_SERIALIZATION_FAILURE = 'P2034';
+
 /** Mensaje del 409 de corregir dos veces la misma entrada (ENG-100). Lo usan el
  *  chequeo previo y la unique de `corrects_entry_id`, que tienen que decir lo
  *  mismo: para el profesional es el mismo error. */
@@ -852,23 +858,25 @@ export class ClinicalRecordsService {
  *     `for update` lo hace esperar, relee la cabeza vieja y deja pasar la fila.
  *     Ahí la frena la unique y llega `P2002`.
  *   - Si corre cuando la primera ya confirmó, ve la cabeza nueva y rechaza la
- *     fila él mismo con `23514`. Prisma lo informa como error desconocido, sin
- *     `code`.
+ *     fila él mismo con `sequence_number no contiguo`.
  *
  * Sin esto, el segundo caso salía como 500 y el integration test de dos
  * correcciones simultáneas (ENG-100) fallaba según cómo se intercalaran.
  *
- * Se reconocen por el texto de los dos `raise` de cabeza del trigger
- * (migración de ENG-126). Los otros `23514` del trigger (cruzar historias,
- * génesis mal formado) no se reintentan: son errores de la entrada.
+ * Ese `raise` usa `40001` (`serialization_failure`, "perdiste la carrera,
+ * reintentá"; migración de ENG-100), que Prisma informa como `P2034`. Se detecta
+ * por `code` y no por el texto del mensaje, así que no depende de la redacción
+ * del `raise` ni del formato interno del engine.
+ *
+ * `previous_hash no coincide` queda afuera a propósito: con el número contiguo,
+ * la cabeza es la misma fila que leyó `headOf()`, así que un hash distinto no es
+ * una carrera sino un bug de sellado o una cadena manipulada. Sigue en `23514` y
+ * sale como 500 con `logger.error`: es justo la señal de integridad que la
+ * cadena tiene que hacer ruidosa. Tampoco se reintentan los otros `23514` del
+ * trigger (cruzar historias, génesis mal formado): son errores de la entrada.
  */
 function lostChainHeadRace(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return (
-    message.includes('23514') &&
-    (message.includes('sequence_number no contiguo') ||
-      message.includes('previous_hash no coincide con la cabeza'))
-  );
+  return (error as { code?: string }).code === PRISMA_SERIALIZATION_FAILURE;
 }
 
 /**
