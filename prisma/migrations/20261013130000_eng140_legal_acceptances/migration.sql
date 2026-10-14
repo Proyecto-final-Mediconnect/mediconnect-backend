@@ -4,19 +4,8 @@
 -- exige el consentimiento expreso e informado del titular. Esta tabla es la
 -- prueba de ese consentimiento: quién aceptó, qué versión de los textos y cuándo.
 --
--- Además de lo mínimo, guarda desde dónde se aceptó: la IP real del cliente
--- (`CF-Connecting-IP`, ENG-84), el user-agent y el canal (`REGISTER` al crear la
--- cuenta, `REACCEPT` desde `POST /me/legal-acceptance`). Ante una disputa es lo
--- que permite reconstruir el contexto, y con la tabla append-only una fila que
--- no los tenga no los va a tener nunca. `ip` y `user_agent` son nullable: si no
--- se pueden determinar, la aceptación se guarda igual.
---
 -- Las líneas `--;;` marcan el corte entre sentencias para los tests de
 -- integración, igual que en las migraciones de ENG-57 y ENG-126.
-
--- CreateEnum
---;;
-CREATE TYPE "legal_acceptance_source" AS ENUM ('REGISTER', 'REACCEPT');
 
 -- CreateTable
 --;;
@@ -25,9 +14,6 @@ CREATE TABLE "legal_acceptances" (
     "profile_id" UUID NOT NULL,
     "version" VARCHAR(20) NOT NULL,
     "accepted_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "source" "legal_acceptance_source" NOT NULL,
-    "ip" INET,
-    "user_agent" VARCHAR(512),
 
     CONSTRAINT "legal_acceptances_pkey" PRIMARY KEY ("id")
 );
@@ -38,25 +24,7 @@ CREATE UNIQUE INDEX "legal_acceptances_profile_id_version_key" ON "legal_accepta
 
 -- AddForeignKey
 -- RESTRICT y no CASCADE: borrar el perfil no puede borrar la prueba de que
--- consintió. Mismo criterio que la HC. `audit_logs.actor_id` va por el mismo
--- lado, pero ojo: en `main` todavía es SET NULL (`20260708000000_ep02_ep10_schema`)
--- y lo pasa a RESTRICT ENG-87, en la PR backend #62.
---
--- Supresión de cuentas (Ley 25.326 art. 16). Consecuencia buscada de RESTRICT +
--- el trigger append-only: una cuenta con aceptación no se puede borrar, ni con
--- `auth.admin.deleteUser` (la cascada `auth.users -> profiles` choca con esta
--- FK). Eso incluye cuentas que nunca confirmaron el email, porque la aceptación
--- se guarda en el `signUp`. El procedimiento ante un pedido de supresión es:
---   1. Anonimizar el perfil: reemplazar email y datos personales de `profiles`,
---      `patients`/`professionals` por valores no identificatorios, y bloquear
---      el login en Supabase Auth (ban o cambio de email/contraseña aleatorios)
---      en lugar de borrar el usuario.
---   2. Conservar las filas de esta tabla: son la prueba de que el tratamiento
---      previo tuvo consentimiento (art. 16 inc. 5: la supresión no procede
---      cuando hay una obligación legal de conservar los datos).
--- Pendiente de decisión del equipo (review de la PR #63): si mantener esto o
--- guardar la aceptación recién al confirmar el email / primer login, para que
--- no queden filas indelebles de cuentas que nunca se usaron.
+-- consintió. Coherente con `audit_logs` (ENG-87) y con la HC.
 --;;
 ALTER TABLE "legal_acceptances" ADD CONSTRAINT "legal_acceptances_profile_id_fkey" FOREIGN KEY ("profile_id") REFERENCES "profiles"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
