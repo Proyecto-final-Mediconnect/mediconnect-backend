@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { SkipLegal } from '../legal/skip-legal.decorator';
 
 /**
  * Health check del backend (doc §3.5.6).
@@ -13,6 +14,8 @@ import { Controller, Get } from '@nestjs/common';
  * TODO(ENG-38): cuando Prisma esté cableado en la app, reportar también el
  * estado de la conexión a la BD, como pide el doc.
  */
+// Pública: sin usuario no hay consentimiento que exigir (ENG-140).
+@SkipLegal()
 @Controller('health')
 export class HealthController {
   @Get()

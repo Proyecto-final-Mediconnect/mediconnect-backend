@@ -70,11 +70,22 @@ describe('UserController', () => {
     acceptLegal.mockResolvedValue({ ...profile, legalAccepted: true });
 
     const result = await controller.acceptLegal(
-      reqWith({ id: 'user-id-123', role: 'authenticated' }),
+      {
+        user: { id: 'user-id-123', role: 'authenticated' },
+        headers: {
+          'cf-connecting-ip': '203.0.113.7',
+          'user-agent': 'Mozilla/5.0 (test)',
+        },
+        ip: '10.0.0.1',
+      } as unknown as Request,
       { version: LEGAL_VERSION },
     );
 
-    expect(acceptLegal).toHaveBeenCalledWith('user-id-123', LEGAL_VERSION);
+    // La IP es la del cliente (Cloudflare), no la del proxy (ENG-84).
+    expect(acceptLegal).toHaveBeenCalledWith('user-id-123', LEGAL_VERSION, {
+      ip: '203.0.113.7',
+      userAgent: 'Mozilla/5.0 (test)',
+    });
     expect(result.legalAccepted).toBe(true);
   });
 });

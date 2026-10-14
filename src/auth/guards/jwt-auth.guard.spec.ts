@@ -1,10 +1,12 @@
 import {
   ExecutionContext,
+  ForbiddenException,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { generateKeyPair, SignJWT } from 'jose';
 import { JWKSTimeout } from 'jose/errors';
+import { LegalAcceptedGuard } from '../../legal/legal-accepted.guard';
 import { SupabaseService } from '../../supabase/supabase.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 
@@ -21,6 +23,12 @@ function makeContext(request: object): ExecutionContext {
 
 describe('JwtAuthGuard', () => {
   let guard: JwtAuthGuard;
+  // La aceptación legal tiene su propio spec: acá solo importa que se invoque
+  // después de autenticar y que su resultado sea el del guard.
+  const legalCanActivate = jest.fn();
+  const legalAccepted = {
+    canActivate: legalCanActivate,
+  } as unknown as LegalAcceptedGuard;
   let publicKey: CryptoKey;
   let privateKey: CryptoKey;
   let rsaPrivateKey: CryptoKey;
@@ -69,7 +77,8 @@ describe('JwtAuthGuard', () => {
       getJWKS: () => publicKey,
       getIssuer: () => ISSUER,
     } as unknown as SupabaseService;
-    guard = new JwtAuthGuard(supabase);
+    legalCanActivate.mockReset().mockResolvedValue(true);
+    guard = new JwtAuthGuard(supabase, legalAccepted);
   });
 
   it('permite el acceso con un token válido en el header Authorization y adjunta el usuario', async () => {
@@ -178,7 +187,7 @@ describe('JwtAuthGuard', () => {
       },
       getIssuer: () => ISSUER,
     } as unknown as SupabaseService;
-    guard = new JwtAuthGuard(supabase);
+    guard = new JwtAuthGuard(supabase, legalAccepted);
 
     const token = await sign();
     const request = { headers: { authorization: `Bearer ${token}` } };
@@ -195,7 +204,7 @@ describe('JwtAuthGuard', () => {
       },
       getIssuer: () => ISSUER,
     } as unknown as SupabaseService;
-    guard = new JwtAuthGuard(supabase);
+    guard = new JwtAuthGuard(supabase, legalAccepted);
 
     const token = await sign();
     const request = { headers: { authorization: `Bearer ${token}` } };
@@ -203,5 +212,33 @@ describe('JwtAuthGuard', () => {
     await expect(guard.canActivate(makeContext(request))).rejects.toThrow(
       ServiceUnavailableException,
     );
+  });
+
+  it('exige la aceptación legal recién después de adjuntar el usuario', async () => {
+    const token = await sign();
+    const request: { headers: Record<string, string>; user?: unknown } = {
+      headers: { authorization: `Bearer ${token}` },
+    };
+    legalCanActivate.mockImplementation(() => {
+      // Cuando corre, el usuario ya está en el request.
+      expect(request.user).toEqual(
+        expect.objectContaining({ id: 'user-id-123' }),
+      );
+      return Promise.reject(new ForbiddenException());
+    });
+
+    await expect(guard.canActivate(makeContext(request))).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(legalCanActivate).toHaveBeenCalledTimes(1);
+  });
+
+  it('no consulta la aceptación legal si el token es inválido (401 antes que 403)', async () => {
+    const request = { headers: { authorization: 'Bearer basura' } };
+
+    await expect(guard.canActivate(makeContext(request))).rejects.toThrow(
+      UnauthorizedException,
+    );
+    expect(legalCanActivate).not.toHaveBeenCalled();
   });
 });

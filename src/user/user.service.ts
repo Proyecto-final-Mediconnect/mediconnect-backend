@@ -1,7 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import type { LegalAcceptanceContext } from '../legal/acceptance-context';
 import { LEGAL_VERSION } from '../legal/legal';
 import { PrismaService } from '../prisma/prisma.service';
 import { MeResponseDto } from './dto/me-response.dto';
+
+/** `P2003` de Prisma: violación de una foreign key. */
+const PRISMA_FOREIGN_KEY_VIOLATION = 'P2003';
 
 @Injectable()
 export class UserService {
@@ -58,11 +62,32 @@ export class UserService {
    * Idempotente: aceptar dos veces la misma versión no es un error, y la tabla es
    * append-only, así que no hay nada que pisar.
    */
-  async acceptLegal(userId: string, version: string): Promise<MeResponseDto> {
-    await this.prisma.legalAcceptance.createMany({
-      data: [{ profile_id: userId, version }],
-      skipDuplicates: true,
-    });
+  async acceptLegal(
+    userId: string,
+    version: string,
+    context: LegalAcceptanceContext,
+  ): Promise<MeResponseDto> {
+    try {
+      await this.prisma.legalAcceptance.createMany({
+        data: [
+          {
+            profile_id: userId,
+            version,
+            source: 'REACCEPT',
+            ip: context.ip,
+            user_agent: context.userAgent,
+          },
+        ],
+        skipDuplicates: true,
+      });
+    } catch (error) {
+      // JWT válido pero sin fila en `profiles` (el mismo caso que `GET /me`
+      // contesta con 404): la FK de `profile_id` falla. Sin esto saldría 500.
+      if ((error as { code?: string }).code === PRISMA_FOREIGN_KEY_VIOLATION) {
+        throw new NotFoundException('Perfil no encontrado');
+      }
+      throw error;
+    }
     return this.getProfile(userId);
   }
 }

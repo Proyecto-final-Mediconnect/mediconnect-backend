@@ -29,10 +29,13 @@ describe('Auth registro (e2e)', () => {
     ({ publicKey } = await generateKeyPair('ES256'));
   });
 
+  const createMany = jest.fn();
+
   beforeEach(async () => {
     signUp.mockReset();
     signInWithPassword.mockReset();
     refreshSession.mockReset();
+    createMany.mockReset().mockResolvedValue({ count: 1 });
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
@@ -51,11 +54,7 @@ describe('Auth registro (e2e)', () => {
       // Auth no usa Prisma, pero el PrismaModule global intentaría conectar a la
       // base real en onModuleInit: lo reemplazamos por un stub sin lifecycle.
       .overrideProvider(PrismaService)
-      .useValue({
-        legalAcceptance: {
-          createMany: jest.fn().mockResolvedValue({ count: 1 }),
-        },
-      })
+      .useValue({ legalAcceptance: { createMany } })
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -86,6 +85,34 @@ describe('Auth registro (e2e)', () => {
       .expect((res) => {
         expect(res.body.message).toContain('Revisá tu email');
       });
+  });
+
+  it('guarda la aceptación con la IP real del cliente y el user-agent (ENG-140)', async () => {
+    signUp.mockResolvedValue({
+      data: { user: { id: 'nuevo-id', identities: [{ id: 'x' }] } },
+      error: null,
+    });
+
+    await request(app.getHttpServer())
+      .post('/auth/register')
+      .set('CF-Connecting-IP', '203.0.113.7')
+      .set('X-Forwarded-For', '198.51.100.1')
+      .set('User-Agent', 'MediConnectTest/1.0')
+      .send(valid)
+      .expect(201);
+
+    expect(createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          profile_id: 'nuevo-id',
+          version: LEGAL_VERSION,
+          source: 'REGISTER',
+          ip: '203.0.113.7',
+          user_agent: 'MediConnectTest/1.0',
+        },
+      ],
+      skipDuplicates: true,
+    });
   });
 
   it('201 con email ya existente y devuelve el mismo mensaje genérico', () => {

@@ -10,6 +10,7 @@ import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { SkipLegal } from '../legal/skip-legal.decorator';
 
 /** Sesión que recibe la app mobile: los mismos tokens que la web recibe en cookies. */
 export interface MobileSessionResponse {
@@ -45,6 +46,8 @@ export interface MobileSessionResponse {
  * `Cache-Control: no-store` porque la respuesta lleva credenciales (RFC 6749
  * §5.1): ningún proxy ni caché del cliente debe guardarla.
  */
+// Pública: sin usuario no hay consentimiento que exigir (ENG-140).
+@SkipLegal()
 @Controller('auth/mobile')
 export class AuthMobileController {
   constructor(private readonly authService: AuthService) {}

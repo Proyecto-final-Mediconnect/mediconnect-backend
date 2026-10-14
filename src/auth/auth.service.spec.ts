@@ -10,6 +10,9 @@ import { RegisterProfessionalDto } from './dto/register-professional.dto';
 import { LoginDto } from './dto/login.dto';
 import { LEGAL_VERSION } from '../legal/legal';
 import { PrismaService } from '../prisma/prisma.service';
+import * as Sentry from '@sentry/nestjs';
+
+jest.mock('@sentry/nestjs', () => ({ captureException: jest.fn() }));
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -32,6 +35,7 @@ describe('AuthService', () => {
     licenseNumber: 'MP-12345',
     acceptedLegalVersion: LEGAL_VERSION,
   };
+  const ctx = { ip: '203.0.113.7', userAgent: 'Mozilla/5.0 (test)' };
   const loginDto: LoginDto = { email: 'user@test.com', password: 'Password1' };
 
   let refreshSession: jest.Mock;
@@ -60,10 +64,18 @@ describe('AuthService', () => {
         error: null,
       });
 
-      await service.registerPatient(dto);
+      await service.registerPatient(dto, ctx);
 
       expect(createMany).toHaveBeenCalledWith({
-        data: [{ profile_id: 'nuevo-id', version: LEGAL_VERSION }],
+        data: [
+          {
+            profile_id: 'nuevo-id',
+            version: LEGAL_VERSION,
+            source: 'REGISTER',
+            ip: '203.0.113.7',
+            user_agent: 'Mozilla/5.0 (test)',
+          },
+        ],
         skipDuplicates: true,
       });
     });
@@ -74,11 +86,17 @@ describe('AuthService', () => {
         error: null,
       });
 
-      await service.registerProfessional(proDto);
+      await service.registerProfessional(proDto, ctx);
 
       expect(createMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: [{ profile_id: 'pro-id', version: LEGAL_VERSION }],
+          data: [
+            expect.objectContaining({
+              profile_id: 'pro-id',
+              version: LEGAL_VERSION,
+              source: 'REGISTER',
+            }),
+          ],
         }),
       );
     });
@@ -91,7 +109,7 @@ describe('AuthService', () => {
         error: null,
       });
 
-      await service.registerPatient(dto);
+      await service.registerPatient(dto, ctx);
 
       expect(createMany).not.toHaveBeenCalled();
     });
@@ -104,10 +122,16 @@ describe('AuthService', () => {
         data: { user: { id: 'nuevo-id', identities: [{ id: 'abc' }] } },
         error: null,
       });
-      createMany.mockRejectedValue(new Error('base caída'));
+      const error = new Error('base caída');
+      createMany.mockRejectedValue(error);
+      (Sentry.captureException as jest.Mock).mockClear();
 
-      await expect(service.registerPatient(dto)).resolves.toMatchObject({
+      await expect(service.registerPatient(dto, ctx)).resolves.toMatchObject({
         message: expect.stringContaining('Revisá tu email'),
+      });
+      // Pero no en silencio: es un consentimiento que no quedó guardado.
+      expect(Sentry.captureException).toHaveBeenCalledWith(error, {
+        tags: { feature: 'eng140', operation: 'record_legal_acceptance' },
       });
     });
   });
@@ -118,7 +142,7 @@ describe('AuthService', () => {
       error: null,
     });
 
-    const result = await service.registerPatient(dto);
+    const result = await service.registerPatient(dto, ctx);
 
     expect(signUp).toHaveBeenCalledWith({
       email: dto.email,
@@ -133,7 +157,7 @@ describe('AuthService', () => {
       error: null,
     });
 
-    const result = await service.registerPatient(dto);
+    const result = await service.registerPatient(dto, ctx);
 
     expect(result.message).toContain('Revisá tu email');
   });
@@ -144,7 +168,7 @@ describe('AuthService', () => {
       error: { status: 429, message: 'email rate limit exceeded' },
     });
 
-    await expect(service.registerPatient(dto)).rejects.toBeInstanceOf(
+    await expect(service.registerPatient(dto, ctx)).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
   });
@@ -155,7 +179,7 @@ describe('AuthService', () => {
       error: { status: 422, message: 'signup disabled' },
     });
 
-    await expect(service.registerPatient(dto)).rejects.toBeInstanceOf(
+    await expect(service.registerPatient(dto, ctx)).rejects.toBeInstanceOf(
       BadRequestException,
     );
   });
@@ -166,7 +190,7 @@ describe('AuthService', () => {
       error: { message: 'fetch failed' },
     });
 
-    await expect(service.registerPatient(dto)).rejects.toMatchObject({
+    await expect(service.registerPatient(dto, ctx)).rejects.toMatchObject({
       constructor: ServiceUnavailableException,
       message: expect.not.stringContaining('fetch failed'),
     });
@@ -178,7 +202,7 @@ describe('AuthService', () => {
       error: null,
     });
 
-    const result = await service.registerProfessional(proDto);
+    const result = await service.registerProfessional(proDto, ctx);
 
     expect(signUp).toHaveBeenCalledWith({
       email: proDto.email,
@@ -202,7 +226,7 @@ describe('AuthService', () => {
       error: null,
     });
 
-    const result = await service.registerProfessional(proDto);
+    const result = await service.registerProfessional(proDto, ctx);
 
     expect(result.message).toContain('Revisá tu email');
   });
@@ -213,9 +237,9 @@ describe('AuthService', () => {
       error: { status: 429, message: 'email rate limit exceeded' },
     });
 
-    await expect(service.registerProfessional(proDto)).rejects.toBeInstanceOf(
-      ServiceUnavailableException,
-    );
+    await expect(
+      service.registerProfessional(proDto, ctx),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it('registro profesional con fallo de red lanza ServiceUnavailable sin filtrar el detalle crudo', async () => {
@@ -224,7 +248,9 @@ describe('AuthService', () => {
       error: { message: 'fetch failed' },
     });
 
-    await expect(service.registerProfessional(proDto)).rejects.toMatchObject({
+    await expect(
+      service.registerProfessional(proDto, ctx),
+    ).rejects.toMatchObject({
       constructor: ServiceUnavailableException,
       message: expect.not.stringContaining('fetch failed'),
     });

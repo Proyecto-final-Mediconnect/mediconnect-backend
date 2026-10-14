@@ -12,6 +12,12 @@ datasource db {
 // Tipos ENUM (ver mediconnect-docs/modelo-de-datos/esquema.md § "Tipos ENUM")
 // ===========================================================================
 
+/// Canal por el que se registró una aceptación legal (ENG-140).
+enum legal_acceptance_source {
+  REGISTER
+  REACCEPT
+}
+
 enum user_role {
   PACIENTE
   PROFESIONAL
@@ -128,10 +134,15 @@ model Profile {
 /// se le vuelve a pedir. Append-only por trigger: es la prueba del
 /// consentimiento, no se edita ni se borra. `profile` es RESTRICT por lo mismo.
 model LegalAcceptance {
-  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  profile_id  String   @db.Uuid
-  version     String   @db.VarChar(20)
-  accepted_at DateTime @default(now()) @db.Timestamptz(6)
+  id          String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  profile_id  String                  @db.Uuid
+  version     String                  @db.VarChar(20)
+  accepted_at DateTime                @default(now()) @db.Timestamptz(6)
+  /// Por dónde se aceptó: al registrarse o desde `POST /me/legal-acceptance`.
+  source      legal_acceptance_source
+  /// IP real del cliente (`CF-Connecting-IP`, ENG-84). Null si no se pudo determinar.
+  ip          String?                 @db.Inet
+  user_agent  String?                 @db.VarChar(512)
 
   profile Profile @relation(fields: [profile_id], references: [id], onDelete: Restrict, onUpdate: Restrict)
 

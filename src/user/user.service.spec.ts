@@ -99,6 +99,7 @@ describe('UserService', () => {
   });
 
   describe('aceptación legal (ENG-140)', () => {
+    const ctx = { ip: '203.0.113.7', userAgent: 'Mozilla/5.0 (test)' };
     const fila = (legal_acceptances: { id: string }[]) => ({
       id: 'uid',
       email: 'paciente@test.com',
@@ -140,13 +141,43 @@ describe('UserService', () => {
       createMany.mockResolvedValue({ count: 1 });
       findUnique.mockResolvedValue(fila([{ id: 'acc-1' }]));
 
-      const result = await service.acceptLegal('uid', LEGAL_VERSION);
+      const result = await service.acceptLegal('uid', LEGAL_VERSION, ctx);
 
       expect(createMany).toHaveBeenCalledWith({
-        data: [{ profile_id: 'uid', version: LEGAL_VERSION }],
+        data: [
+          {
+            profile_id: 'uid',
+            version: LEGAL_VERSION,
+            source: 'REACCEPT',
+            ip: '203.0.113.7',
+            user_agent: 'Mozilla/5.0 (test)',
+          },
+        ],
         skipDuplicates: true,
       });
       expect(result.legalAccepted).toBe(true);
+    });
+
+    it('acceptLegal responde 404 si el usuario no tiene perfil (P2003)', async () => {
+      createMany.mockRejectedValue(
+        Object.assign(new Error('Foreign key constraint violated'), {
+          code: 'P2003',
+        }),
+      );
+
+      await expect(
+        service.acceptLegal('sin-perfil', LEGAL_VERSION, ctx),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(findUnique).not.toHaveBeenCalled();
+    });
+
+    it('acceptLegal propaga cualquier otro error de la base', async () => {
+      const error = new Error('base caída');
+      createMany.mockRejectedValue(error);
+
+      await expect(service.acceptLegal('uid', LEGAL_VERSION, ctx)).rejects.toBe(
+        error,
+      );
     });
   });
 });
