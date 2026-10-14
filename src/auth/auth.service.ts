@@ -6,14 +6,35 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterPatientDto } from './dto/register-patient.dto';
 import { RegisterProfessionalDto } from './dto/register-professional.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 
 /** Respuesta genérica: idéntica exista o no la cuenta (no revela si el email
  *  ya está registrado — criterio de seguridad de ENG-42). */
 const GENERIC_REGISTER_MESSAGE =
   'Registro iniciado. Revisá tu email para verificar tu cuenta.';
+
+/** Respuesta genérica al pedir el enlace de recuperación (ENG-142): la misma
+ *  exista o no la cuenta, para no revelar qué emails están registrados. */
+const GENERIC_FORGOT_PASSWORD_MESSAGE =
+  'Si hay una cuenta con ese email, te mandamos un enlace para elegir una contraseña nueva. Revisá tu correo.';
+
+const INVALID_RECOVERY_LINK_MESSAGE =
+  'El enlace para restablecer la contraseña no es válido o ya venció. Pedí uno nuevo.';
+
+/** Adónde lleva el enlace del mail de recuperación. El template de Supabase
+ *  arma `{{ .RedirectTo }}?token_hash=…&type=recovery` sobre esta URL, que
+ *  tiene que estar en las Redirect URLs del proyecto. */
+function passwordResetRedirectUrl(): string {
+  const webOrigin = (process.env.WEB_ORIGIN ?? 'http://localhost:5173').replace(
+    /\/+$/,
+    '',
+  );
+  return `${webOrigin}/restablecer-contrasena`;
+}
 
 @Injectable()
 export class AuthService {
@@ -153,6 +174,99 @@ export class AuthService {
       accessToken: data.session.access_token,
       refreshToken: data.session.refresh_token,
       user: { id: data.user.id, email: data.user.email },
+    };
+  }
+
+  /**
+   * Manda el mail con el enlace para elegir una contraseña nueva (ENG-142).
+   *
+   * Responde siempre lo mismo, exista o no la cuenta. Supabase tampoco lo
+   * revela, pero además tragamos sus errores "de negocio" —incluido el límite
+   * de un mail por minuto por usuario—, porque un mensaje distinto delataría que
+   * el email está registrado. Solo una caída de Supabase (sin `status`) se
+   * informa: no dice nada sobre la cuenta y el usuario necesita saber que el
+   * mail no salió.
+   */
+  async forgotPassword(dto: ForgotPasswordDto): Promise<{ message: string }> {
+    const { error } = await this.supabase
+      .getClient()
+      .auth.resetPasswordForEmail(dto.email, {
+        redirectTo: passwordResetRedirectUrl(),
+      });
+
+    if (error) {
+      if (!error.status) {
+        throw new ServiceUnavailableException(
+          'No pudimos conectar con el servicio. Probá de nuevo en unos minutos.',
+        );
+      }
+      this.logger.warn(
+        `No se pudo enviar el mail de recuperación (status ${error.status}): ${error.message}`,
+      );
+    }
+
+    return { message: GENERIC_FORGOT_PASSWORD_MESSAGE };
+  }
+
+  /**
+   * Cambia la contraseña con el `token_hash` del enlace del mail (ENG-142).
+   *
+   * 1. `verifyOtp` canjea el token —de un solo uso— por una sesión de
+   *    recuperación. Es lo que prueba que quien pide el cambio controla el email.
+   * 2. Con esa sesión se cambia la contraseña.
+   * 3. Se cierran **todas** las sesiones del usuario (`scope: 'global'`): si
+   *    alguien más había entrado a la cuenta, pierde el refresh token. Los
+   *    access tokens ya emitidos siguen valiendo hasta que vencen (1 h).
+   *
+   * Usa un cliente descartable: la sesión de recuperación no puede quedar en el
+   * cliente compartido.
+   */
+  async resetPassword(dto: ResetPasswordDto): Promise<{ message: string }> {
+    const client = this.supabase.createSessionClient();
+
+    const { data, error: verifyError } = await client.auth.verifyOtp({
+      token_hash: dto.tokenHash,
+      type: 'recovery',
+    });
+
+    if (verifyError || !data.session) {
+      if (verifyError && (!verifyError.status || verifyError.status === 429)) {
+        this.throwAuthError(verifyError);
+      }
+      throw new BadRequestException(INVALID_RECOVERY_LINK_MESSAGE);
+    }
+
+    const { error: updateError } = await client.auth.updateUser({
+      password: dto.password,
+    });
+
+    if (updateError) {
+      if (updateError.code === 'same_password') {
+        throw new BadRequestException(
+          'La contraseña nueva tiene que ser distinta de la anterior.',
+        );
+      }
+      if (updateError.code === 'weak_password') {
+        throw new BadRequestException(
+          'La contraseña es muy débil. Probá con una más larga o menos común.',
+        );
+      }
+      this.throwAuthError(updateError);
+    }
+
+    const { error: signOutError } = await client.auth.signOut({
+      scope: 'global',
+    });
+    if (signOutError) {
+      // La contraseña ya cambió: no fallamos el pedido por esto.
+      this.logger.warn(
+        `No se pudieron cerrar las sesiones tras restablecer la contraseña: ${signOutError.message}`,
+      );
+    }
+
+    return {
+      message:
+        'Listo, cambiaste tu contraseña. Ya podés ingresar con la nueva.',
     };
   }
 }

@@ -85,6 +85,22 @@ export class SupabaseService implements OnModuleInit {
     });
   }
 
+  /**
+   * Cliente nuevo y descartable, con la sesión solo en memoria. Es para flujos
+   * que necesitan **abrir** una sesión del lado del backend y operar con ella
+   * —ej. `verifyOtp` + `updateUser` al restablecer la contraseña (ENG-142)—.
+   * No se puede usar el cliente compartido de `getClient()`: la sesión quedaría
+   * guardada en el singleton y dos requests simultáneos se pisarían.
+   */
+  createSessionClient(): SupabaseAnonClient {
+    const url = this.config.getOrThrow<string>('SUPABASE_URL');
+    const anonKey = this.config.getOrThrow<string>('SUPABASE_ANON_KEY');
+
+    return createClient<LooseDatabase>(url, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+
   getJWKS(): JWTVerifyGetKey {
     return this.jwks;
   }
