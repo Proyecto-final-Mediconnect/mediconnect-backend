@@ -5,6 +5,7 @@ import { generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { legalAcceptedPrismaMock } from './legal-accepted.mock';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
 
@@ -114,6 +115,7 @@ describe('Turnos (e2e)', () => {
         update: jest.fn().mockResolvedValue(CANCELLED_ROW),
       },
       profile: { findUnique: jest.fn() },
+      ...legalAcceptedPrismaMock(),
     };
   }
 

@@ -1,4 +1,5 @@
-import { IsEmail, IsString, Matches, MinLength } from 'class-validator';
+import { Equals, IsEmail, IsString, Matches, MinLength } from 'class-validator';
+import { LEGAL_NOT_ACCEPTED_MESSAGE, LEGAL_VERSION } from '../../legal/legal';
 import { Match } from '../decorators/match.decorator';
 
 export class RegisterPatientDto {
@@ -18,4 +19,19 @@ export class RegisterPatientDto {
   @IsString()
   @Match('password', { message: 'Las contraseñas no coinciden' })
   passwordConfirmation!: string;
+
+  /**
+   * Versión de los textos legales que aceptó al registrarse (ENG-140). Tiene que
+   * ser la vigente: es la prueba del consentimiento para tratar datos de salud
+   * (Ley 25.326, art. 7), y se valida acá además del checkbox de la web.
+   *
+   * Esto cubre el registro **por esta API**, no es la garantía de que nadie se
+   * registre sin aceptar: un `signUp` directo contra Supabase Auth con la anon
+   * key no pasa por acá y el trigger `on_auth_user_created` crea el perfil
+   * igual. Lo que lo cierra es `LegalAcceptedGuard`: sin aceptación vigente,
+   * ninguna ruta autenticada (salvo `GET /me` y `POST /me/legal-acceptance`)
+   * responde otra cosa que 403.
+   */
+  @Equals(LEGAL_VERSION, { message: LEGAL_NOT_ACCEPTED_MESSAGE })
+  acceptedLegalVersion!: string;
 }

@@ -5,6 +5,7 @@ import { generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { legalAcceptedPrismaMock } from './legal-accepted.mock';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
 import { DailyService } from './../src/video/daily.service';
@@ -80,6 +81,7 @@ describe('Videoconsulta desde un turno (e2e)', () => {
 
     const prisma = {
       profile: { findUnique: jest.fn() },
+      ...legalAcceptedPrismaMock(),
       consultation: { upsert: jest.fn().mockResolvedValue({ id: 'cons-1' }) },
       videoSession: {
         upsert: jest.fn().mockResolvedValue({

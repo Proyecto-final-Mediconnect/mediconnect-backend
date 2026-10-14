@@ -8,6 +8,11 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { RegisterPatientDto } from './dto/register-patient.dto';
 import { RegisterProfessionalDto } from './dto/register-professional.dto';
 import { LoginDto } from './dto/login.dto';
+import { LEGAL_VERSION } from '../legal/legal';
+import { PrismaService } from '../prisma/prisma.service';
+import * as Sentry from '@sentry/nestjs';
+
+jest.mock('@sentry/nestjs', () => ({ captureException: jest.fn() }));
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -18,6 +23,7 @@ describe('AuthService', () => {
     email: 'nuevo@test.com',
     password: 'Password1',
     passwordConfirmation: 'Password1',
+    acceptedLegalVersion: LEGAL_VERSION,
   };
   const proDto: RegisterProfessionalDto = {
     email: 'pro@test.com',
@@ -27,21 +33,107 @@ describe('AuthService', () => {
     lastName: 'García',
     specialty: 'Cardiología',
     licenseNumber: 'MP-12345',
+    acceptedLegalVersion: LEGAL_VERSION,
   };
+  const ctx = { ip: '203.0.113.7', userAgent: 'Mozilla/5.0 (test)' };
   const loginDto: LoginDto = { email: 'user@test.com', password: 'Password1' };
 
   let refreshSession: jest.Mock;
+  let createMany: jest.Mock;
 
   beforeEach(() => {
     signUp = jest.fn();
     signInWithPassword = jest.fn();
     refreshSession = jest.fn();
+    createMany = jest.fn().mockResolvedValue({ count: 1 });
     const supabaseMock = {
       getClient: () => ({
         auth: { signUp, signInWithPassword, refreshSession },
       }),
     } as unknown as SupabaseService;
-    service = new AuthService(supabaseMock);
+    const prismaMock = {
+      legalAcceptance: { createMany },
+    } as unknown as PrismaService;
+    service = new AuthService(supabaseMock, prismaMock);
+  });
+
+  describe('aceptación legal (ENG-140)', () => {
+    it('deja constancia de la versión vigente para el usuario nuevo', async () => {
+      signUp.mockResolvedValue({
+        data: { user: { id: 'nuevo-id', identities: [{ id: 'abc' }] } },
+        error: null,
+      });
+
+      await service.registerPatient(dto, ctx);
+
+      expect(createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            profile_id: 'nuevo-id',
+            version: LEGAL_VERSION,
+            source: 'REGISTER',
+            ip: '203.0.113.7',
+            user_agent: 'Mozilla/5.0 (test)',
+          },
+        ],
+        skipDuplicates: true,
+      });
+    });
+
+    it('también al registrar un profesional', async () => {
+      signUp.mockResolvedValue({
+        data: { user: { id: 'pro-id', identities: [{ id: 'abc' }] } },
+        error: null,
+      });
+
+      await service.registerProfessional(proDto, ctx);
+
+      expect(createMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: [
+            expect.objectContaining({
+              profile_id: 'pro-id',
+              version: LEGAL_VERSION,
+              source: 'REGISTER',
+            }),
+          ],
+        }),
+      );
+    });
+
+    it('no registra nada si el email ya existía', async () => {
+      // El user ofuscado de Supabase no es el del dueño de la cuenta: anotarle
+      // una aceptación sería atribuírsela a otra persona.
+      signUp.mockResolvedValue({
+        data: { user: { id: 'ofuscado', identities: [] } },
+        error: null,
+      });
+
+      await service.registerPatient(dto, ctx);
+
+      expect(createMany).not.toHaveBeenCalled();
+    });
+
+    it('si no se puede guardar, el registro responde igual', async () => {
+      // La cuenta ya existe en Supabase: un error acá haría que el usuario
+      // reintente contra un email tomado. La web le vuelve a pedir la
+      // aceptación al entrar.
+      signUp.mockResolvedValue({
+        data: { user: { id: 'nuevo-id', identities: [{ id: 'abc' }] } },
+        error: null,
+      });
+      const error = new Error('base caída');
+      createMany.mockRejectedValue(error);
+      (Sentry.captureException as jest.Mock).mockClear();
+
+      await expect(service.registerPatient(dto, ctx)).resolves.toMatchObject({
+        message: expect.stringContaining('Revisá tu email'),
+      });
+      // Pero no en silencio: es un consentimiento que no quedó guardado.
+      expect(Sentry.captureException).toHaveBeenCalledWith(error, {
+        tags: { feature: 'eng140', operation: 'record_legal_acceptance' },
+      });
+    });
   });
 
   it('registra un usuario nuevo y devuelve el mensaje genérico', async () => {
@@ -50,7 +142,7 @@ describe('AuthService', () => {
       error: null,
     });
 
-    const result = await service.registerPatient(dto);
+    const result = await service.registerPatient(dto, ctx);
 
     expect(signUp).toHaveBeenCalledWith({
       email: dto.email,
@@ -65,7 +157,7 @@ describe('AuthService', () => {
       error: null,
     });
 
-    const result = await service.registerPatient(dto);
+    const result = await service.registerPatient(dto, ctx);
 
     expect(result.message).toContain('Revisá tu email');
   });
@@ -76,7 +168,7 @@ describe('AuthService', () => {
       error: { status: 429, message: 'email rate limit exceeded' },
     });
 
-    await expect(service.registerPatient(dto)).rejects.toBeInstanceOf(
+    await expect(service.registerPatient(dto, ctx)).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
   });
@@ -87,7 +179,7 @@ describe('AuthService', () => {
       error: { status: 422, message: 'signup disabled' },
     });
 
-    await expect(service.registerPatient(dto)).rejects.toBeInstanceOf(
+    await expect(service.registerPatient(dto, ctx)).rejects.toBeInstanceOf(
       BadRequestException,
     );
   });
@@ -98,7 +190,7 @@ describe('AuthService', () => {
       error: { message: 'fetch failed' },
     });
 
-    await expect(service.registerPatient(dto)).rejects.toMatchObject({
+    await expect(service.registerPatient(dto, ctx)).rejects.toMatchObject({
       constructor: ServiceUnavailableException,
       message: expect.not.stringContaining('fetch failed'),
     });
@@ -110,7 +202,7 @@ describe('AuthService', () => {
       error: null,
     });
 
-    const result = await service.registerProfessional(proDto);
+    const result = await service.registerProfessional(proDto, ctx);
 
     expect(signUp).toHaveBeenCalledWith({
       email: proDto.email,
@@ -134,7 +226,7 @@ describe('AuthService', () => {
       error: null,
     });
 
-    const result = await service.registerProfessional(proDto);
+    const result = await service.registerProfessional(proDto, ctx);
 
     expect(result.message).toContain('Revisá tu email');
   });
@@ -145,9 +237,9 @@ describe('AuthService', () => {
       error: { status: 429, message: 'email rate limit exceeded' },
     });
 
-    await expect(service.registerProfessional(proDto)).rejects.toBeInstanceOf(
-      ServiceUnavailableException,
-    );
+    await expect(
+      service.registerProfessional(proDto, ctx),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it('registro profesional con fallo de red lanza ServiceUnavailable sin filtrar el detalle crudo', async () => {
@@ -156,7 +248,9 @@ describe('AuthService', () => {
       error: { message: 'fetch failed' },
     });
 
-    await expect(service.registerProfessional(proDto)).rejects.toMatchObject({
+    await expect(
+      service.registerProfessional(proDto, ctx),
+    ).rejects.toMatchObject({
       constructor: ServiceUnavailableException,
       message: expect.not.stringContaining('fetch failed'),
     });

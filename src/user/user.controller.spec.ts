@@ -4,11 +4,13 @@ import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MeResponseDto } from './dto/me-response.dto';
 import { UserController } from './user.controller';
+import { LEGAL_VERSION } from '../legal/legal';
 import { UserService } from './user.service';
 
 describe('UserController', () => {
   let controller: UserController;
   const getProfile = jest.fn();
+  const acceptLegal = jest.fn();
 
   const profile: MeResponseDto = {
     id: 'user-id-123',
@@ -16,13 +18,18 @@ describe('UserController', () => {
     role: 'PACIENTE',
     firstName: 'Ana',
     lastName: 'García',
+    legalAccepted: false,
+    legalVersion: LEGAL_VERSION,
   };
 
   beforeEach(async () => {
     getProfile.mockReset();
+    acceptLegal.mockReset();
     const module: TestingModule = await Test.createTestingModule({
       controllers: [UserController],
-      providers: [{ provide: UserService, useValue: { getProfile } }],
+      providers: [
+        { provide: UserService, useValue: { getProfile, acceptLegal } },
+      ],
     })
       // El guard depende de SupabaseService; en el unit test del controller lo
       // reemplazamos por uno que siempre deja pasar (su lógica se prueba en
@@ -57,5 +64,28 @@ describe('UserController', () => {
     await expect(
       controller.me(reqWith({ id: 'sin-perfil', role: 'authenticated' })),
     ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('acepta los textos legales del usuario de la sesión (ENG-140)', async () => {
+    acceptLegal.mockResolvedValue({ ...profile, legalAccepted: true });
+
+    const result = await controller.acceptLegal(
+      {
+        user: { id: 'user-id-123', role: 'authenticated' },
+        headers: {
+          'cf-connecting-ip': '203.0.113.7',
+          'user-agent': 'Mozilla/5.0 (test)',
+        },
+        ip: '10.0.0.1',
+      } as unknown as Request,
+      { version: LEGAL_VERSION },
+    );
+
+    // La IP es la del cliente (Cloudflare), no la del proxy (ENG-84).
+    expect(acceptLegal).toHaveBeenCalledWith('user-id-123', LEGAL_VERSION, {
+      ip: '203.0.113.7',
+      userAgent: 'Mozilla/5.0 (test)',
+    });
+    expect(result.legalAccepted).toBe(true);
   });
 });

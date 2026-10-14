@@ -9,6 +9,7 @@ import { generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { legalAcceptedPrismaMock } from './legal-accepted.mock';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
 import { DailyService } from './../src/video/daily.service';
@@ -74,7 +75,10 @@ describe('Spike de Daily.co (e2e)', () => {
       .overrideProvider(SupabaseService)
       .useValue(makeSupabaseMock())
       .overrideProvider(PrismaService)
-      .useValue({ profile: { findUnique: jest.fn() } })
+      .useValue({
+        profile: { findUnique: jest.fn() },
+        ...legalAcceptedPrismaMock(),
+      })
       .overrideProvider(DailyService)
       .useValue(daily)
       .compile();
