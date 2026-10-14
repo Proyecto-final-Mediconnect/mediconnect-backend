@@ -15,6 +15,10 @@ describe('Auth registro (e2e)', () => {
   const signUp = jest.fn();
   const signInWithPassword = jest.fn();
   const refreshSession = jest.fn();
+  const resetPasswordForEmail = jest.fn();
+  const verifyOtp = jest.fn();
+  const updateUser = jest.fn();
+  const signOut = jest.fn();
   let publicKey: CryptoKey;
 
   const valid = {
@@ -31,6 +35,10 @@ describe('Auth registro (e2e)', () => {
     signUp.mockReset();
     signInWithPassword.mockReset();
     refreshSession.mockReset();
+    resetPasswordForEmail.mockReset();
+    verifyOtp.mockReset();
+    updateUser.mockReset();
+    signOut.mockReset().mockResolvedValue({ error: null });
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
@@ -41,7 +49,15 @@ describe('Auth registro (e2e)', () => {
       .overrideProvider(SupabaseService)
       .useValue({
         getClient: () => ({
-          auth: { signUp, signInWithPassword, refreshSession },
+          auth: {
+            signUp,
+            signInWithPassword,
+            refreshSession,
+            resetPasswordForEmail,
+          },
+        }),
+        createSessionClient: () => ({
+          auth: { verifyOtp, updateUser, signOut },
         }),
         getJWKS: () => publicKey,
         getIssuer: () => ISSUER,
@@ -374,5 +390,96 @@ describe('Auth registro (e2e)', () => {
       .post('/auth/refresh')
       .set('X-Forwarded-For', '10.0.0.99')
       .expect(429);
+  });
+
+  describe('recuperar contraseña (ENG-142)', () => {
+    const reset = {
+      tokenHash: 'hash-del-mail',
+      password: 'NuevaClave1',
+      passwordConfirmation: 'NuevaClave1',
+    };
+
+    it('200 POST /auth/password/forgot con el mensaje genérico', async () => {
+      resetPasswordForEmail.mockResolvedValue({ data: {}, error: null });
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/password/forgot')
+        .send({ email: 'a@test.com' })
+        .expect(200);
+
+      expect(res.body).toEqual({
+        message: expect.stringMatching(
+          /Si hay una cuenta con ese email/,
+        ) as string,
+      });
+    });
+
+    it('400 POST /auth/password/forgot con un email inválido', () => {
+      return request(app.getHttpServer())
+        .post('/auth/password/forgot')
+        .send({ email: 'no-es-un-email' })
+        .expect(400);
+    });
+
+    it('429 al pedir más de 3 enlaces por minuto desde la misma IP', async () => {
+      resetPasswordForEmail.mockResolvedValue({ data: {}, error: null });
+      const server = app.getHttpServer();
+      for (let i = 0; i < 3; i++) {
+        await request(server)
+          .post('/auth/password/forgot')
+          .send({ email: 'a@test.com' })
+          .expect(200);
+      }
+
+      return request(server)
+        .post('/auth/password/forgot')
+        .send({ email: 'a@test.com' })
+        .expect(429);
+    });
+
+    it('200 POST /auth/password/reset cambia la contraseña y no setea cookies de sesión', async () => {
+      verifyOtp.mockResolvedValue({
+        data: { session: { access_token: 't' }, user: { id: 'u1' } },
+        error: null,
+      });
+      updateUser.mockResolvedValue({ data: { user: {} }, error: null });
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/password/reset')
+        .send(reset)
+        .expect(200);
+
+      expect(res.headers['set-cookie']).toBeUndefined();
+      expect(signOut).toHaveBeenCalledWith({ scope: 'global' });
+    });
+
+    it('400 POST /auth/password/reset con una contraseña débil, sin llamar a Supabase', async () => {
+      await request(app.getHttpServer())
+        .post('/auth/password/reset')
+        .send({ ...reset, password: 'debil', passwordConfirmation: 'debil' })
+        .expect(400);
+      expect(verifyOtp).not.toHaveBeenCalled();
+    });
+
+    it('400 POST /auth/password/reset si las contraseñas no coinciden', () => {
+      return request(app.getHttpServer())
+        .post('/auth/password/reset')
+        .send({ ...reset, passwordConfirmation: 'OtraClave1' })
+        .expect(400);
+    });
+
+    it('400 POST /auth/password/reset con un enlace vencido', async () => {
+      verifyOtp.mockResolvedValue({
+        data: { session: null, user: null },
+        error: { status: 403, code: 'otp_expired', message: 'expired' },
+      });
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/password/reset')
+        .send(reset)
+        .expect(400);
+
+      expect(res.body.message).toMatch(/no es válido o ya venció/);
+    });
   });
 });

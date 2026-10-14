@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
+  <title>Ya casi está. Confirmá tu email.</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f8fa;">
+  <!-- Texto de vista previa en la bandeja de entrada (no se ve en el mail). -->
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Confirmá tu email para empezar a usar MediConnect.</div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f8fa;">
+    <tr>
+      <td align="center" style="padding:32px 16px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;background-color:#ffffff;border:1px solid #e3ebee;border-radius:14px;overflow:hidden;">
+
+          <!-- Encabezado -->
+          <tr>
+            <td style="background-color:#072d3d;padding:26px 36px;">
+              <img src="https://mediconnect-web-bigz.onrender.com/logo-horizontal-light.png" width="188" height="24" alt="MediConnect" style="display:block;border:0;outline:none;text-decoration:none;height:24px;width:188px;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:20px;font-weight:bold;">
+            </td>
+          </tr>
+
+          <!-- Cuerpo -->
+          <tr>
+            <td style="padding:36px 36px 8px;">
+              <p style="margin:0 0 10px;font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:16px;letter-spacing:1.6px;text-transform:uppercase;font-weight:bold;color:#0e7c7b;">Confirmá tu cuenta</p>
+              <h1 style="margin:0 0 16px;font-family:Georgia,'Times New Roman',serif;font-size:28px;line-height:34px;font-weight:normal;color:#0b4f6c;">Ya casi está. Confirmá tu email.</h1>
+              <p style="margin:0 0 28px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:25px;color:#1e293b;">Gracias por crear tu cuenta en MediConnect. Para activarla, confirmá que este email es tuyo tocando el botón.</p>
+
+              <!-- Botón -->
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="center" bgcolor="#0b4f6c" style="border-radius:9px;">
+                    <a href="{{ .ConfirmationURL }}" target="_blank" style="display:inline-block;padding:14px 28px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:20px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:9px;">Confirmar mi email</a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Recuadro informativo -->
+          <tr>
+            <td style="padding:28px 36px 0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#eef6f5;border-radius:10px;">
+                <tr>
+                  <td style="padding:18px 20px 10px;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                    <tr>
+                      <td width="22" valign="top" style="padding:0 0 8px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:22px;color:#0e7c7b;font-weight:bold;">&#10003;</td>
+                      <td valign="top" style="padding:0 0 8px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:22px;color:#1e293b;">Reservá turnos con profesionales de matrícula verificada.</td>
+                    </tr>
+                    <tr>
+                      <td width="22" valign="top" style="padding:0 0 8px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:22px;color:#0e7c7b;font-weight:bold;">&#10003;</td>
+                      <td valign="top" style="padding:0 0 8px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:22px;color:#1e293b;">Hacé tus consultas por videollamada, sin moverte de tu casa.</td>
+                    </tr>
+                    <tr>
+                      <td width="22" valign="top" style="padding:0 0 8px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:22px;color:#0e7c7b;font-weight:bold;">&#10003;</td>
+                      <td valign="top" style="padding:0 0 8px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:22px;color:#1e293b;">Tené tu historia clínica y tu MediPass siempre a mano.</td>
+                    </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Enlace de respaldo y aviso -->
+          <tr>
+            <td style="padding:24px 36px 32px;">
+              <p style="margin:0 0 6px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:20px;color:#64748b;">Si el botón no funciona, copiá este enlace en tu navegador:</p>
+              <p style="margin:0 0 20px;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;word-break:break-all;"><a href="{{ .ConfirmationURL }}" target="_blank" style="color:#0e7c7b;text-decoration:underline;">{{ .ConfirmationURL }}</a></p>
+              <p style="margin:0;padding-top:18px;border-top:1px solid #eef3f5;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:20px;color:#64748b;">Si no creaste una cuenta en MediConnect, ignorá este mail: sin la confirmación la cuenta no se activa.</p>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Pie -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
+          <tr>
+            <td align="center" style="padding:20px 24px 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:19px;color:#94a3b8;">
+              MediConnect &middot; Turnos, videoconsultas e historia clínica en un solo lugar.<br>
+              Proyecto final de Ingeniería en Sistemas &middot; UTN Facultad Regional Córdoba.<br>
+              Este mail es automático: no hace falta que lo respondas.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

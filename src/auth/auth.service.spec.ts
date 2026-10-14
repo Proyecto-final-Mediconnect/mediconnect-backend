@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  HttpException,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -31,15 +32,33 @@ describe('AuthService', () => {
   const loginDto: LoginDto = { email: 'user@test.com', password: 'Password1' };
 
   let refreshSession: jest.Mock;
+  let resetPasswordForEmail: jest.Mock;
+  let verifyOtp: jest.Mock;
+  let updateUser: jest.Mock;
+  let signOut: jest.Mock;
+  let createSessionClient: jest.Mock;
 
   beforeEach(() => {
     signUp = jest.fn();
     signInWithPassword = jest.fn();
     refreshSession = jest.fn();
+    resetPasswordForEmail = jest.fn();
+    verifyOtp = jest.fn();
+    updateUser = jest.fn();
+    signOut = jest.fn().mockResolvedValue({ error: null });
+    createSessionClient = jest.fn(() => ({
+      auth: { verifyOtp, updateUser, signOut },
+    }));
     const supabaseMock = {
       getClient: () => ({
-        auth: { signUp, signInWithPassword, refreshSession },
+        auth: {
+          signUp,
+          signInWithPassword,
+          refreshSession,
+          resetPasswordForEmail,
+        },
       }),
+      createSessionClient,
     } as unknown as SupabaseService;
     service = new AuthService(supabaseMock);
   });
@@ -282,5 +301,187 @@ describe('AuthService', () => {
     await expect(service.refresh('ref')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
+  });
+
+  describe('recuperar contraseña (ENG-142)', () => {
+    const GENERIC =
+      'Si hay una cuenta con ese email, te mandamos un enlace para elegir una contraseña nueva. Revisá tu correo.';
+    const resetDto = {
+      tokenHash: 'hash-del-mail',
+      password: 'NuevaClave1',
+      passwordConfirmation: 'NuevaClave1',
+    };
+
+    it('pide el mail con el enlace a /restablecer-contrasena de la web', async () => {
+      resetPasswordForEmail.mockResolvedValue({ data: {}, error: null });
+
+      const result = await service.forgotPassword({ email: 'a@test.com' });
+
+      expect(resetPasswordForEmail).toHaveBeenCalledWith('a@test.com', {
+        redirectTo: 'http://localhost:5173/restablecer-contrasena',
+      });
+      expect(result).toEqual({ message: GENERIC });
+    });
+
+    it('responde lo mismo ante un error de Supabase, incluido el límite por usuario', async () => {
+      resetPasswordForEmail.mockResolvedValue({
+        data: null,
+        error: { status: 429, message: 'only request this after 60 seconds' },
+      });
+
+      await expect(
+        service.forgotPassword({ email: 'a@test.com' }),
+      ).resolves.toEqual({ message: GENERIC });
+    });
+
+    it('si Supabase no responde (sin status) avisa con 503', async () => {
+      resetPasswordForEmail.mockResolvedValue({
+        data: null,
+        error: { message: 'fetch failed' },
+      });
+
+      await expect(
+        service.forgotPassword({ email: 'a@test.com' }),
+      ).rejects.toThrow(ServiceUnavailableException);
+    });
+
+    it('canjea el token, cambia la contraseña y cierra todas las sesiones', async () => {
+      verifyOtp.mockResolvedValue({
+        data: { session: { access_token: 't' }, user: { id: 'u1' } },
+        error: null,
+      });
+      updateUser.mockResolvedValue({ data: { user: {} }, error: null });
+
+      const result = await service.resetPassword(resetDto);
+
+      expect(verifyOtp).toHaveBeenCalledWith({
+        token_hash: 'hash-del-mail',
+        type: 'recovery',
+      });
+      expect(updateUser).toHaveBeenCalledWith({ password: 'NuevaClave1' });
+      expect(signOut).toHaveBeenCalledWith({ scope: 'global' });
+      expect(result.message).toMatch(/cambiaste tu contraseña/);
+    });
+
+    it('usa un cliente descartable por pedido, no el compartido', async () => {
+      verifyOtp.mockResolvedValue({
+        data: { session: { access_token: 't' }, user: { id: 'u1' } },
+        error: null,
+      });
+      updateUser.mockResolvedValue({ data: { user: {} }, error: null });
+
+      await service.resetPassword(resetDto);
+      await service.resetPassword(resetDto);
+
+      expect(createSessionClient).toHaveBeenCalledTimes(2);
+    });
+
+    it('con un enlace vencido o ya usado responde 400 y no toca la contraseña', async () => {
+      verifyOtp.mockResolvedValue({
+        data: { session: null, user: null },
+        error: { status: 403, code: 'otp_expired', message: 'expired' },
+      });
+
+      await expect(service.resetPassword(resetDto)).rejects.toThrow(
+        'El enlace para restablecer la contraseña no es válido o ya venció. Pedí uno nuevo.',
+      );
+      expect(updateUser).not.toHaveBeenCalled();
+    });
+
+    it('si Supabase no responde al canjear el token devuelve 503, no "enlace inválido"', async () => {
+      verifyOtp.mockResolvedValue({
+        data: { session: null, user: null },
+        error: { message: 'fetch failed' },
+      });
+
+      await expect(service.resetPassword(resetDto)).rejects.toThrow(
+        ServiceUnavailableException,
+      );
+    });
+
+    it('si Supabase responde 5xx al canjear el token devuelve 503, no "enlace inválido"', async () => {
+      verifyOtp.mockResolvedValue({
+        data: { session: null, user: null },
+        error: { status: 502, message: 'bad gateway' },
+      });
+
+      await expect(service.resetPassword(resetDto)).rejects.toThrow(
+        ServiceUnavailableException,
+      );
+      expect(updateUser).not.toHaveBeenCalled();
+    });
+
+    describe('si falla el cambio de contraseña (el enlace ya se gastó)', () => {
+      beforeEach(() => {
+        verifyOtp.mockResolvedValue({
+          data: { session: { access_token: 't' }, user: { id: 'u1' } },
+          error: null,
+        });
+      });
+
+      async function caught(): Promise<{
+        status: number;
+        body: { message: string; code: string };
+      }> {
+        try {
+          await service.resetPassword(resetDto);
+        } catch (e) {
+          const ex = e as HttpException;
+          return {
+            status: ex.getStatus(),
+            body: ex.getResponse() as { message: string; code: string },
+          };
+        }
+        throw new Error('no lanzó');
+      }
+
+      it.each([
+        ['same_password', /distinta de la anterior/],
+        ['weak_password', /muy débil/],
+        ['otro_error', /boom/],
+      ])(
+        '%s: avisa que pida otro enlace y trae el code estable',
+        async (code, msg) => {
+          updateUser.mockResolvedValue({
+            data: { user: null },
+            error: { status: 422, code, message: 'boom' },
+          });
+
+          const { status, body } = await caught();
+
+          expect(status).toBe(400);
+          expect(body.code).toBe('RECOVERY_LINK_CONSUMED');
+          expect(body.message).toMatch(msg);
+          expect(body.message).toMatch(/pedí uno nuevo/);
+          expect(signOut).not.toHaveBeenCalled();
+        },
+      );
+
+      it('si Supabase no responde al cambiar la contraseña: 503 con el mismo code', async () => {
+        updateUser.mockResolvedValue({
+          data: { user: null },
+          error: { message: 'fetch failed' },
+        });
+
+        const { status, body } = await caught();
+
+        expect(status).toBe(503);
+        expect(body.code).toBe('RECOVERY_LINK_CONSUMED');
+        expect(body.message).toMatch(/pedí uno nuevo/);
+      });
+    });
+
+    it('si no se pueden cerrar las sesiones, la contraseña igual quedó cambiada', async () => {
+      verifyOtp.mockResolvedValue({
+        data: { session: { access_token: 't' }, user: { id: 'u1' } },
+        error: null,
+      });
+      updateUser.mockResolvedValue({ data: { user: {} }, error: null });
+      signOut.mockResolvedValue({ error: { status: 500, message: 'x' } });
+
+      await expect(service.resetPassword(resetDto)).resolves.toEqual({
+        message: expect.stringMatching(/cambiaste tu contraseña/) as string,
+      });
+    });
   });
 });
