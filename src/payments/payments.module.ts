@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { AppointmentPaymentController } from './appointment-payment.controller';
 import { AppointmentPaymentService } from './appointment-payment.service';
 import { MercadoPagoService } from './mercadopago.service';
@@ -19,6 +20,8 @@ import { PaymentsWebhookController } from './payments-webhook.controller';
  * service directo.
  */
 @Module({
+  // El webhook manda el email de confirmación al confirmar el turno (ENG-68).
+  imports: [NotificationsModule],
   controllers: [PaymentsWebhookController, AppointmentPaymentController],
   providers: [
     MercadoPagoService,

@@ -6,6 +6,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { UnpaidReleaseService } from '../appointments/unpaid-release.service';
+import {
+  AppointmentNotificationsService,
+  type SendSummary,
+} from '../notifications/appointment-notifications.service';
 import { JobSecretGuard } from './job-secret.guard';
 
 /**
@@ -20,7 +24,10 @@ import { JobSecretGuard } from './job-secret.guard';
 @Controller('internal/jobs')
 @UseGuards(JobSecretGuard)
 export class JobsController {
-  constructor(private readonly unpaidRelease: UnpaidReleaseService) {}
+  constructor(
+    private readonly unpaidRelease: UnpaidReleaseService,
+    private readonly notifications: AppointmentNotificationsService,
+  ) {}
 
   /** ENG-101: libera los turnos que no se pagaron en 15 minutos. */
   @Post('release-unpaid-appointments')
@@ -28,5 +35,12 @@ export class JobsController {
   async releaseUnpaidAppointments(): Promise<{ released: number }> {
     const ids = await this.unpaidRelease.releaseExpired();
     return { released: ids.length };
+  }
+
+  /** ENG-68: confirmaciones pendientes y recordatorios a 24 h y a 1 h. */
+  @Post('send-appointment-reminders')
+  @HttpCode(HttpStatus.OK)
+  sendAppointmentReminders(): Promise<SendSummary> {
+    return this.notifications.sendDue();
   }
 }

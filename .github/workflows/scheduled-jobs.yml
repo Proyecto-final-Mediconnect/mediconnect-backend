@@ -6,6 +6,8 @@ name: Scheduled Jobs
 #
 # - release-unpaid-appointments (ENG-101): libera los turnos que no se pagaron
 #   en 15 minutos.
+# - send-appointment-reminders (ENG-68): confirmaciones pendientes y
+#   recordatorios a 24 h y a 1 h por email.
 #
 # Secrets que necesita (Settings → Secrets and variables → Actions):
 #   - RENDER_BACKEND_URL  el mismo que usa keepalive.yml.
@@ -43,6 +45,19 @@ jobs:
           curl -fsS --max-time 60 --retry 3 --retry-all-errors
           -X POST -H "Authorization: Bearer $JOBS_SECRET"
           "$RENDER_BACKEND_URL/internal/jobs/release-unpaid-appointments"
+        env:
+          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
+          JOBS_SECRET: ${{ secrets.JOBS_SECRET }}
+
+  send-appointment-reminders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mandar recordatorios de turno
+        run: >-
+          curl -fsS --max-time 60 --retry 3 --retry-all-errors
+          -X POST -H "Authorization: Bearer $JOBS_SECRET"
+          "$RENDER_BACKEND_URL/internal/jobs/send-appointment-reminders"
         env:
           RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
           JOBS_SECRET: ${{ secrets.JOBS_SECRET }}

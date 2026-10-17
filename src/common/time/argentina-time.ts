@@ -14,7 +14,7 @@
  * zona como parámetro.
  */
 
-const AR_TIMEZONE = 'America/Argentina/Buenos_Aires';
+export const AR_TIMEZONE = 'America/Argentina/Buenos_Aires';
 
 /**
  * Offset fijo de Argentina respecto de UTC.
