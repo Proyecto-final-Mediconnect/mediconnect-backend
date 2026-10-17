@@ -34,6 +34,7 @@ type Row = {
   price: string | number;
   status: string;
   scheduled_at: string;
+  created_at: string;
 };
 
 function appointmentRow(overrides: Partial<Row> = {}): Row {
@@ -44,6 +45,8 @@ function appointmentRow(overrides: Partial<Row> = {}): Row {
     price: '15000.00',
     status: 'RESERVADO_SIN_PAGAR',
     scheduled_at: '2026-10-20T13:00:00.000Z',
+    // Recién reservado: la retención de ENG-101 vence a NOW + 15 min.
+    created_at: NOW.toISOString(),
     ...overrides,
   };
 }
@@ -354,9 +357,39 @@ describe('AppointmentPaymentService', () => {
       );
     });
 
+    it('nunca vive más que la retención de la reserva (ENG-101)', async () => {
+      // Reservado hace 14 minutos: la retención vence en 1. Si el link viviera
+      // los 15 completos, el paciente podría pagar un turno ya liberado.
+      const reservedAt = new Date(NOW.getTime() - 14 * MINUTE);
+      build(appointmentRow({ created_at: reservedAt.toISOString() }));
+
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
+
+      expect(mercadopago.createPreference).toHaveBeenCalledWith(
+        expect.objectContaining({
+          expiresAt: new Date(reservedAt.getTime() + 15 * MINUTE),
+        }),
+      );
+    });
+
+    it('con la retención vencida no se paga, aunque el job no la haya liberado', async () => {
+      // El job corre cada 5 minutos: en ese rato el turno sigue
+      // RESERVADO_SIN_PAGAR pero ya no es del paciente.
+      build(
+        appointmentRow({
+          created_at: new Date(NOW.getTime() - 15 * MINUTE).toISOString(),
+        }),
+      );
+
+      await expect(
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW),
+      ).rejects.toThrow(/venció/);
+      expect(mercadopago.createPreference).not.toHaveBeenCalled();
+    });
+
     it('un turno que ya pasó no se paga', async () => {
-      // Mientras ENG-101 no lo libere sigue en RESERVADO_SIN_PAGAR, y el
-      // webhook lo pasaría a CONFIRMADO.
+      // ENG-101 no libera los turnos que ya empezaron: sigue en
+      // RESERVADO_SIN_PAGAR, y el webhook lo pasaría a CONFIRMADO.
       build(appointmentRow({ scheduled_at: '2026-10-14T11:00:00.000Z' }));
 
       await expect(

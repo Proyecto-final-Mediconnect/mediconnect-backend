@@ -1,0 +1,48 @@
+name: Scheduled Jobs
+
+# Tareas periódicas del backend. Corren como endpoints (`/internal/jobs/*`) y no
+# como un cron dentro de Nest porque Render Free duerme el proceso tras 15 min sin
+# requests: este request lo despierta.
+#
+# - release-unpaid-appointments (ENG-101): libera los turnos que no se pagaron
+#   en 15 minutos.
+#
+# Secrets que necesita (Settings → Secrets and variables → Actions):
+#   - RENDER_BACKEND_URL  el mismo que usa keepalive.yml.
+#   - JOBS_SECRET         igual al JOBS_SECRET de Render (mínimo 32 caracteres).
+#
+# Ojo con el cron de GitHub: en horas de mucha carga puede demorarse varios
+# minutos, y se deshabilita solo tras 60 días sin actividad en el repo. El
+# backend no depende de la puntualidad: la disponibilidad y la reserva ya ignoran
+# las retenciones vencidas aunque este job no haya pasado.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+# Dos corridas juntas no se pisan (los endpoints son idempotentes), pero
+# tampoco tiene sentido encolarlas.
+concurrency:
+  group: scheduled-jobs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-unpaid-appointments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Liberar turnos no pagados
+        # --max-time 60: un cold start de Render Free puede tardar ~30-50s.
+        # --retry-all-errors: mientras el server despierta puede devolver 502/503.
+        # -f: un 401/503 deja el job rojo, que es la señal de que falta el secreto.
+        run: >-
+          curl -fsS --max-time 60 --retry 3 --retry-all-errors
+          -X POST -H "Authorization: Bearer $JOBS_SECRET"
+          "$RENDER_BACKEND_URL/internal/jobs/release-unpaid-appointments"
+        env:
+          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
+          JOBS_SECRET: ${{ secrets.JOBS_SECRET }}

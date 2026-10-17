@@ -5,6 +5,7 @@ import {
   IsString,
   IsUrl,
   Matches,
+  MinLength,
   validateSync,
 } from 'class-validator';
 
@@ -98,6 +99,14 @@ class EnvironmentVariables {
   @IsOptional()
   @IsString()
   MERCADOPAGO_WEBHOOK_SECRET?: string;
+
+  // Secreto compartido con el workflow que dispara los jobs (`/internal/jobs/*`,
+  // ENG-101). Opcional: sin él los jobs contestan 503 en vez de quedar abiertos.
+  // Largo mínimo para que no se pueda adivinar.
+  @IsOptional()
+  @IsString()
+  @MinLength(32)
+  JOBS_SECRET?: string;
 
   // Solo para apuntar a un mock de la API en pruebas manuales, igual que
   // DAILY_API_URL. Sin esto se usa el endpoint real de mercadopago.config.
