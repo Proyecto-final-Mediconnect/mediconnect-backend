@@ -237,6 +237,68 @@ describe('ClinicalRecordsService', () => {
       expect(view.previousHash).toBe('d'.repeat(64));
     });
 
+    it('reintenta también cuando la colisión la frena el trigger y no la unique', async () => {
+      // Si la otra escritura ya confirmó, el trigger ve la cabeza nueva y
+      // rechaza con 40001 (P2034) antes de que la unique llegue a mirar la fila.
+      prisma.clinicalRecordEntry.findFirst
+        .mockResolvedValueOnce({
+          sequence_number: BigInt(1),
+          content_hash: 'c'.repeat(64),
+        })
+        .mockResolvedValueOnce({
+          sequence_number: BigInt(2),
+          content_hash: 'd'.repeat(64),
+        });
+      prisma.clinicalRecordEntry.create
+        .mockRejectedValueOnce({ code: 'P2034' })
+        .mockImplementationOnce((args: CreateArgs) => rowFromCreate(args));
+
+      const view = await service.append(newEntry(), NOW);
+
+      expect(view.sequenceNumber).toBe(3);
+      expect(prisma.clinicalRecordEntry.create).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      ['cruzar historias', 'una corrección no puede cruzar historias clínicas'],
+      [
+        'previous_hash distinto con número contiguo',
+        'previous_hash no coincide con la cabeza de la cadena del paciente x',
+      ],
+    ])(
+      'un 23514 del trigger que no es de cabeza no se reintenta (%s)',
+      async (_caso, message) => {
+        prisma.clinicalRecordEntry.create.mockRejectedValue(
+          new Error(`PostgresError { code: "23514", message: "${message}" }`),
+        );
+
+        await expect(service.append(newEntry(), NOW)).rejects.toThrow(
+          InternalServerErrorException,
+        );
+        expect(prisma.clinicalRecordEntry.create).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('cabeza movida y después corrección ya hecha: sale el 409 de ya corregida', async () => {
+      // Escenario de ENG-100: primero frena el trigger de cabeza y, en el
+      // reintento, la unique de `corrects_entry_id`. No tiene que salir el 409
+      // genérico ni un tercer intento.
+      prisma.clinicalRecordEntry.create
+        .mockRejectedValueOnce({ code: 'P2034' })
+        .mockRejectedValueOnce({
+          code: 'P2002',
+          meta: { target: ['corrects_entry_id'] },
+        });
+
+      await expect(
+        service.append(
+          newEntry({ entryType: 'CORRECCION', correctsEntryId: 'vieja-1' }),
+          NOW,
+        ),
+      ).rejects.toThrow('Esa entrada ya tiene una corrección');
+      expect(prisma.clinicalRecordEntry.create).toHaveBeenCalledTimes(2);
+    });
+
     it('se rinde con 409 después de tres colisiones seguidas', async () => {
       prisma.clinicalRecordEntry.create.mockRejectedValue({ code: 'P2002' });
 

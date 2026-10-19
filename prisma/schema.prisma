@@ -665,7 +665,8 @@ model MediPassSession {
   @@map("medipass_sessions")
 }
 
-/// Auditoría de accesos dentro de una sesión MediPass.
+/// Auditoría de accesos dentro de una sesión MediPass. Append-only por trigger
+/// (ENG-87), igual que `audit_logs`.
 model MediPassAccessLog {
   id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   session_id        String   @db.Uuid
@@ -683,7 +684,11 @@ model MediPassAccessLog {
 // EP-10 — Plataforma y Auditoría
 // ===========================================================================
 
-/// Bitácora inmutable (append-only vía RLS) de accesos a HC/MediPass y acciones sensibles.
+/// Bitácora inmutable de accesos a HC/MediPass y acciones sensibles.
+///
+/// Append-only por trigger, TRUNCATE incluido (ENG-87): ni UPDATE ni DELETE,
+/// tampoco para el owner. `actor` es RESTRICT y no SET NULL: borrar un perfil no
+/// puede borrarle a los registros quién accedió.
 model AuditLog {
   id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   actor_id      String?  @db.Uuid
@@ -693,7 +698,7 @@ model AuditLog {
   metadata      Json?    @db.JsonB
   created_at    DateTime @default(now()) @db.Timestamptz(6)
 
-  actor Profile? @relation(fields: [actor_id], references: [id])
+  actor Profile? @relation(fields: [actor_id], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@map("audit_logs")
 }

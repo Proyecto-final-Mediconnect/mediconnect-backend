@@ -11,11 +11,13 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterPatientDto } from './dto/register-patient.dto';
 import { RegisterProfessionalDto } from './dto/register-professional.dto';
 import { legalAcceptanceContext } from '../legal/acceptance-context';
 import { SkipLegal } from '../legal/skip-legal.decorator';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 
 const ACCESS_TOKEN_COOKIE = 'sb-access-token';
 const REFRESH_TOKEN_COOKIE = 'sb-refresh-token';
@@ -151,6 +153,24 @@ export class AuthController {
     this.setSessionCookies(res, session);
 
     return { user: session.user };
+  }
+
+  @Post('password/forgot')
+  @HttpCode(HttpStatus.OK)
+  // ENG-142: cada pedido manda un mail. 3 por IP por minuto alcanza para
+  // reintentar y frena el uso del endpoint para spamear casillas ajenas.
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.authService.forgotPassword(dto);
+  }
+
+  @Post('password/reset')
+  @HttpCode(HttpStatus.OK)
+  // Mismo límite que el login: el token del enlace no se puede adivinar, pero
+  // no hay por qué dejar probar tokens sin freno.
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto);
   }
 
   @Post('logout')

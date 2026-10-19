@@ -136,6 +136,7 @@ async function measureApi(): Promise<void> {
           pending:
             'http://localhost:5173/spike/mercadopago?resultado=pendiente',
         },
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
         idempotencyKey: reference,
       }),
     );
