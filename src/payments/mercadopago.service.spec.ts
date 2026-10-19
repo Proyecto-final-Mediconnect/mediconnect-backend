@@ -55,6 +55,9 @@ describe('MercadoPagoService', () => {
     date_approved: '2026-09-03T12:00:00.000-03:00',
   };
 
+  /** 12:15 en Argentina. */
+  const EXPIRES_AT = new Date('2026-10-14T15:15:00.000Z');
+
   function createPreference(overrides = {}) {
     return service.createPreference({
       externalReference: APPOINTMENT_ID,
@@ -71,6 +74,7 @@ describe('MercadoPagoService', () => {
         failure: 'https://mediconnect.ar/turnos/error',
         pending: 'https://mediconnect.ar/turnos/pendiente',
       },
+      expiresAt: EXPIRES_AT,
       ...overrides,
     });
   }
@@ -121,6 +125,27 @@ describe('MercadoPagoService', () => {
       expect(service.isSandbox()).toBe(false);
     });
 
+    // Con credenciales de un usuario de prueba el token es `APP_USR-` igual que
+    // en producción: el prefijo deja de distinguir y la variable es lo único
+    // que lo resuelve sin tocar código.
+    it('MERCADOPAGO_SANDBOX=true manda sobre un token APP_USR-', () => {
+      env.MERCADOPAGO_ACCESS_TOKEN = 'APP_USR-1234567890';
+      env.MERCADOPAGO_SANDBOX = 'true';
+      expect(service.isSandbox()).toBe(true);
+    });
+
+    it('MERCADOPAGO_SANDBOX=false manda sobre un token TEST-', () => {
+      env.MERCADOPAGO_SANDBOX = 'false';
+      expect(service.isSandbox()).toBe(false);
+    });
+
+    it('MERCADOPAGO_SANDBOX vacía vuelve a mirar el prefijo', () => {
+      env.MERCADOPAGO_SANDBOX = '';
+      expect(service.isSandbox()).toBe(true);
+      env.MERCADOPAGO_ACCESS_TOKEN = 'APP_USR-1234567890';
+      expect(service.isSandbox()).toBe(false);
+    });
+
     it('contesta 503 explicado en vez de dejar que MercadoPago tire 401', async () => {
       env.MERCADOPAGO_ACCESS_TOKEN = undefined;
 
@@ -142,6 +167,28 @@ describe('MercadoPagoService', () => {
         initPoint: PREFERENCE_BODY.init_point,
         sandboxInitPoint: PREFERENCE_BODY.sandbox_init_point,
         externalReference: APPOINTMENT_ID,
+        expiresAt: null,
+      });
+    });
+
+    // Un link que no vence cobra turnos cancelados o que ya pasaron.
+    it('pide que la preferencia venza, con el formato de MercadoPago', async () => {
+      await createPreference();
+
+      expect(bodyOf()).toMatchObject({
+        expires: true,
+        expiration_date_to: '2026-10-14T12:15:00.000-03:00',
+      });
+    });
+
+    it('es binaria y no acepta efectivo ni cajero', async () => {
+      await createPreference();
+
+      expect(bodyOf()).toMatchObject({
+        binary_mode: true,
+        payment_methods: {
+          excluded_payment_types: [{ id: 'ticket' }, { id: 'atm' }],
+        },
       });
     });
 
@@ -184,6 +231,43 @@ describe('MercadoPagoService', () => {
 
       await expect(createPreference()).resolves.toMatchObject({
         externalReference: APPOINTMENT_ID,
+      });
+    });
+  });
+
+  describe('getPreference', () => {
+    it('lee la preferencia guardada con su vencimiento', async () => {
+      fetchMock.mockResolvedValue(
+        ok({
+          ...PREFERENCE_BODY,
+          expires: true,
+          expiration_date_to: '2026-10-14T12:15:00.000-03:00',
+        }),
+      );
+
+      const preference = await service.getPreference(PREFERENCE_BODY.id);
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        `https://api.mercadopago.com/checkout/preferences/${PREFERENCE_BODY.id}`,
+      );
+      expect(preference.expiresAt).toEqual(EXPIRES_AT);
+      expect(preference.externalReference).toBe(APPOINTMENT_ID);
+    });
+  });
+
+  describe('expirePreference', () => {
+    it('vence la preferencia ya, con un PUT', async () => {
+      fetchMock.mockResolvedValue(ok({ ...PREFERENCE_BODY }));
+
+      await service.expirePreference(PREFERENCE_BODY.id, EXPIRES_AT);
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        `https://api.mercadopago.com/checkout/preferences/${PREFERENCE_BODY.id}`,
+      );
+      expect(fetchMock.mock.calls[0][1].method).toBe('PUT');
+      expect(bodyOf()).toEqual({
+        expires: true,
+        expiration_date_to: '2026-10-14T12:15:00.000-03:00',
       });
     });
   });

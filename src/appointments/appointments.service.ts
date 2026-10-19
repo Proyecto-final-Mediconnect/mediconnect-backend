@@ -6,6 +6,7 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { AppointmentPaymentService } from '../payments/appointment-payment.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
@@ -149,6 +150,7 @@ export class AppointmentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly supabase: SupabaseService,
+    private readonly payments: AppointmentPaymentService,
   ) {}
 
   /**
@@ -324,10 +326,12 @@ export class AppointmentsService {
   /**
    * Cancela un turno futuro del paciente (ENG-55).
    *
-   * **Sin reembolso.** No hay pagos todavía —son Release 2—, así que hoy no hay
-   * nada que devolver: cancelar es exactamente la transición de estado. La
-   * política de reembolso (`cancellation_policies`) la agrega ENG-65 encima de
-   * este mismo camino.
+   * **Sin reembolso.** Devolver la plata de un turno ya pago es ENG-65, con la
+   * política de `cancellation_policies`, encima de este mismo camino. Lo que sí
+   * se hace acá es vencer el link de pago (ENG-63): si no, la pestaña de
+   * MercadoPago que el paciente dejó abierta cobraría un turno cancelado. Es
+   * best-effort —si MercadoPago no contesta, el link vence solo a los 15 minutos
+   * como mucho— y no hace fallar la cancelación.
    *
    * Se lee por PostgREST y se escribe por Prisma, y la asimetría es a propósito:
    *
@@ -423,6 +427,9 @@ export class AppointmentsService {
           status: updated.status,
         },
       ]);
+      // Después del update, no antes: si la cancelación falla, el link tiene
+      // que seguir sirviendo. `expireCheckout` nunca tira.
+      await this.payments.expireCheckout(appointmentId, now);
       return view;
     } catch (err) {
       if ((err as { code?: string }).code === PRISMA_RECORD_NOT_FOUND) {
