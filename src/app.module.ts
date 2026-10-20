@@ -20,6 +20,7 @@ import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { JobsModule } from './jobs/jobs.module';
 import { LegalModule } from './legal/legal.module';
+import { MediPassModule } from './medipass/medipass.module';
 import { PatientsModule } from './patients/patients.module';
 import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -53,6 +54,7 @@ import { VideoModule } from './video/video.module';
     SchedulesModule,
     AppointmentsModule,
     ClinicalRecordsModule,
+    MediPassModule,
     PaymentsModule,
     JobsModule,
   ],

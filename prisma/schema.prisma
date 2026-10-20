@@ -646,6 +646,8 @@ model MediPassCode {
   patient  Patient           @relation(fields: [patient_id], references: [profile_id], onDelete: Cascade)
   sessions MediPassSession[]
 
+  @@index([code, expires_at])
+  @@index([patient_id, expires_at])
   @@map("medipass_codes")
 }
 
