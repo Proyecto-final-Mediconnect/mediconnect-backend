@@ -112,4 +112,18 @@ describe('validate (env)', () => {
       ).toThrow(/Configuración de entorno inválida/);
     });
   });
+
+  describe('JOBS_SECRET (ENG-101)', () => {
+    it('vacío cuenta como sin definir: arranca y los jobs quedan apagados', () => {
+      const result = validate({ ...validConfig, JOBS_SECRET: '' });
+
+      expect(result.JOBS_SECRET).toBeUndefined();
+    });
+
+    it('rechaza un secreto de menos de 32 caracteres', () => {
+      expect(() => validate({ ...validConfig, JOBS_SECRET: 'corto' })).toThrow(
+        /Configuración de entorno inválida/,
+      );
+    });
+  });
 });

@@ -1,4 +1,4 @@
-import { plainToInstance } from 'class-transformer';
+import { plainToInstance, Transform } from 'class-transformer';
 import {
   IsIn,
   IsOptional,
@@ -102,7 +102,9 @@ class EnvironmentVariables {
 
   // Secreto compartido con el workflow que dispara los jobs (`/internal/jobs/*`,
   // ENG-101). Opcional: sin él los jobs contestan 503 en vez de quedar abiertos.
-  // Largo mínimo para que no se pueda adivinar.
+  // Largo mínimo para que no se pueda adivinar. El string vacío cuenta como sin
+  // definir: `@IsOptional` no lo saltea y el backend no arrancaría.
+  @Transform(({ value }: { value: unknown }) => value || undefined)
   @IsOptional()
   @IsString()
   @MinLength(32)

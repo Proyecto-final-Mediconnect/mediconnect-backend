@@ -114,6 +114,9 @@ describe('Turnos (e2e)', () => {
         update: jest.fn().mockResolvedValue(CANCELLED_ROW),
       },
       profile: { findUnique: jest.fn() },
+      // El `UPDATE … RETURNING` de `UnpaidReleaseService` (ENG-101), que `book()`
+      // corre antes de reservar. Por defecto no libera nada.
+      $queryRaw: jest.fn().mockResolvedValue([]),
     };
   }
 
@@ -282,6 +285,31 @@ describe('Turnos (e2e)', () => {
         price: 15000,
       });
       expect(inserts[0]).toMatchObject({ patient_id: PATIENT_ID });
+    });
+
+    it('libera las retenciones vencidas antes de insertar el turno (ENG-101)', async () => {
+      // Si se insertara primero, una retención vencida que el job todavía no
+      // liberó haría chocar el índice único y la reserva daría 409.
+      let insertsAtRelease: number | undefined;
+      prisma.$queryRaw.mockImplementation(() => {
+        insertsAtRelease = inserts.length;
+        return Promise.resolve([]);
+      });
+      results = [
+        { data: { profile_id: PATIENT_ID }, error: null },
+        { data: [], error: null },
+        { data: APPOINTMENT_ROW, error: null },
+      ];
+
+      await request(app.getHttpServer())
+        .post('/appointments')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send(VALID)
+        .expect(201);
+
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(insertsAtRelease).toBe(0);
+      expect(inserts).toHaveLength(1);
     });
 
     it('rechaza que el cliente mande precio o estado', async () => {

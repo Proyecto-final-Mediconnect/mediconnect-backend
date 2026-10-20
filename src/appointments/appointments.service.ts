@@ -260,7 +260,9 @@ export class AppointmentsService {
       );
     }
     if (slot.status === 'PAST') {
-      throw new BadRequestException('Ese horario ya pasó.');
+      throw new BadRequestException(
+        'Ese horario ya pasó o empieza en menos de 15 minutos.',
+      );
     }
 
     const scheduledAt = toInstant(dto.date, dto.startTime);
