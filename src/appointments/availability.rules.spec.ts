@@ -185,7 +185,17 @@ describe('buildAvailability', () => {
 
     expect(findSlot([day], MONDAY, '09:00')?.status).toBe('PAST');
     expect(findSlot([day], MONDAY, '09:30')?.status).toBe('PAST');
-    expect(findSlot([day], MONDAY, '10:00')?.status).toBe('AVAILABLE');
+    expect(findSlot([day], MONDAY, '10:30')?.status).toBe('AVAILABLE');
+  });
+
+  it('no ofrece los horarios que empiezan en menos de 15 minutos (ENG-101)', () => {
+    // Si se pudiera reservar, la retención vencería con el turno ya empezado y
+    // el job no lo liberaría nunca.
+    const [day] = build({ now: toInstant(MONDAY, '09:45') });
+    expect(findSlot([day], MONDAY, '10:00')?.status).toBe('PAST');
+
+    const [justInTime] = build({ now: toInstant(MONDAY, '09:44') });
+    expect(findSlot([justInTime], MONDAY, '10:00')?.status).toBe('AVAILABLE');
   });
 
   it('el horario que arranca justo ahora ya no se puede reservar', () => {

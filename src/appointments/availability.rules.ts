@@ -1,4 +1,5 @@
 import { addDays, toInstant, weekdayOf } from '../common/time/argentina-time';
+import { MIN_BOOKING_LEAD_MS } from './unpaid-hold';
 
 /**
  * Cálculo de disponibilidad (ENG-54), como funciones puras: no tocan la base ni
@@ -229,8 +230,9 @@ function statusOf({
 
   // `PAST` no es un estado del dominio: es el reloj. Se distingue de `BLOCKED`
   // porque no dice nada del profesional — el horario de las 09:00 de hoy no está
-  // "bloqueado", simplemente ya pasó.
-  if (instant.getTime() <= now.getTime()) return 'PAST';
+  // "bloqueado", simplemente ya pasó. Incluye los que empiezan dentro de la
+  // anticipación mínima (`MIN_BOOKING_LEAD_MS`): para reservar ya es tarde.
+  if (instant.getTime() <= now.getTime() + MIN_BOOKING_LEAD_MS) return 'PAST';
 
   return 'AVAILABLE';
 }

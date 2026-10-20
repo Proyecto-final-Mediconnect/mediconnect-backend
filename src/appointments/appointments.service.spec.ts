@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { AppointmentPaymentService } from '../payments/appointment-payment.service';
+import { UnpaidReleaseService } from './unpaid-release.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { toInstant } from '../common/time/argentina-time';
@@ -64,6 +65,7 @@ const CANCELLED_PRISMA_ROW = {
 describe('AppointmentsService', () => {
   let service: AppointmentsService;
   let payments: { expireCheckout: jest.Mock };
+  let unpaidRelease: { releaseExpired: jest.Mock };
   let prisma: {
     professional: { findFirst: jest.Mock; findMany: jest.Mock };
     patient: { findMany: jest.Mock };
@@ -128,10 +130,12 @@ describe('AppointmentsService', () => {
     };
 
     payments = { expireCheckout: jest.fn().mockResolvedValue(undefined) };
+    unpaidRelease = { releaseExpired: jest.fn().mockResolvedValue([]) };
     service = new AppointmentsService(
       prisma as unknown as PrismaService,
       makeSupabaseMock(),
       payments as unknown as AppointmentPaymentService,
+      unpaidRelease as unknown as UnpaidReleaseService,
     );
   });
 
@@ -181,14 +185,22 @@ describe('AppointmentsService', () => {
       });
     });
 
-    it('solo cuenta como ocupados los turnos en estado activo', async () => {
-      // Un turno cancelado no bloquea el horario: se tiene que poder revender.
+    it('solo cuenta como ocupados los confirmados y las retenciones vigentes', async () => {
+      // Un turno cancelado o liberado no bloquea el horario: se tiene que poder
+      // revender. Una retención sin pagar de más de 15 minutos tampoco, aunque
+      // el job de ENG-101 todavía no la haya pasado a LIBERADO.
       await service.getAvailability(PRO_ID, { from: MONDAY, to: MONDAY }, NOW);
 
       const where = prisma.appointment.findMany.mock.calls[0][0].where as {
-        status: { in: string[] };
+        OR: unknown[];
       };
-      expect(where.status.in).toEqual(['RESERVADO_SIN_PAGAR', 'CONFIRMADO']);
+      expect(where.OR).toEqual([
+        { status: 'CONFIRMADO' },
+        {
+          status: 'RESERVADO_SIN_PAGAR',
+          created_at: { gt: new Date(NOW.getTime() - 15 * 60 * 1000) },
+        },
+      ]);
     });
 
     it('un profesional sin validar no existe para el paciente', async () => {
@@ -289,6 +301,22 @@ describe('AppointmentsService', () => {
         firstName: 'Ana',
         lastName: 'Médica',
       });
+    });
+
+    it('antes de validar el horario libera las retenciones vencidas del profesional y del paciente', async () => {
+      // La disponibilidad ya no cuenta una retención vencida, pero el índice
+      // único de la base sí: sin liberarla antes, el insert daría 409.
+      results = [PATIENT_EXISTS, NO_COLLISION, INSERT_OK];
+
+      await service.book(TOKEN, PATIENT_ID, VALID, NOW);
+
+      expect(unpaidRelease.releaseExpired).toHaveBeenCalledWith(NOW, {
+        professionalId: PRO_ID,
+        patientId: PATIENT_ID,
+      });
+      expect(
+        unpaidRelease.releaseExpired.mock.invocationCallOrder[0],
+      ).toBeLessThan(prisma.appointment.findMany.mock.invocationCallOrder[0]);
     });
 
     it('el servidor decide precio, duración, paciente y estado', async () => {

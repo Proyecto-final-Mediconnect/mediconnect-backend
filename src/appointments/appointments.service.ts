@@ -26,6 +26,8 @@ import {
 } from './availability.rules';
 import { AvailabilityQueryDto } from './dto/availability-query.dto';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
+import { UNPAID_HOLD_MS } from './unpaid-hold';
+import { UnpaidReleaseService } from './unpaid-release.service';
 
 /**
  * Ver disponibilidad y reservar un turno (ENG-54).
@@ -151,6 +153,7 @@ export class AppointmentsService {
     private readonly prisma: PrismaService,
     private readonly supabase: SupabaseService,
     private readonly payments: AppointmentPaymentService,
+    private readonly unpaidRelease: UnpaidReleaseService,
   ) {}
 
   /**
@@ -169,6 +172,7 @@ export class AppointmentsService {
       professionalId,
       from,
       to,
+      now,
     );
 
     return {
@@ -183,10 +187,9 @@ export class AppointmentsService {
    * Reserva un turno en estado `RESERVADO_SIN_PAGAR`.
    *
    * El estado inicial no es un detalle: el turno **no** queda confirmado al
-   * reservarlo. La confirmación llega con el pago (ENG-63/ENG-64, Release 2) y
-   * hasta entonces el turno es una retención. La liberación automática a los 15
-   * minutos sin pago es ENG-101, también del Release 2: hoy la retención no vence
-   * sola, y eso está asumido y anotado en el ticket.
+   * reservarlo. La confirmación llega con el pago (ENG-63/ENG-64) y hasta
+   * entonces el turno es una retención, que vence a los 15 minutos sin pago
+   * (ENG-101, `UnpaidReleaseService`).
    */
   async book(
     accessToken: string,
@@ -216,12 +219,22 @@ export class AppointmentsService {
       );
     }
 
+    // Las retenciones vencidas que el job todavía no liberó ya no cuentan como
+    // ocupadas en la disponibilidad, pero el índice único de la base sí las ve:
+    // sin esto, reservar ese horario daría 409. Se acota al profesional (el
+    // horario pedido) y al paciente (`assertPatientIsFree`).
+    await this.unpaidRelease.releaseExpired(now, {
+      professionalId: dto.professionalId,
+      patientId: userId,
+    });
+
     // El horario se valida contra la agenda recalculada en el servidor, no contra
     // lo que diga el cliente: el front puede tener la grilla vieja o manipulada.
     const { rules, blocks, busy } = await this.readSchedule(
       dto.professionalId,
       dto.date,
       dto.date,
+      now,
     );
     const days = buildAvailability({
       rules,
@@ -247,7 +260,9 @@ export class AppointmentsService {
       );
     }
     if (slot.status === 'PAST') {
-      throw new BadRequestException('Ese horario ya pasó.');
+      throw new BadRequestException(
+        'Ese horario ya pasó o empieza en menos de 15 minutos.',
+      );
     }
 
     const scheduledAt = toInstant(dto.date, dto.startTime);
@@ -512,6 +527,7 @@ export class AppointmentsService {
     professionalId: string,
     from: string,
     to: string,
+    now: Date,
   ): Promise<{
     rules: AvailabilityRule[];
     blocks: AvailabilityBlock[];
@@ -547,7 +563,15 @@ export class AppointmentsService {
         where: {
           professional_id: professionalId,
           scheduled_at: { gte: rangeStart, lt: rangeEnd },
-          status: { in: [...ACTIVE_STATUSES] },
+          // Una retención vencida (ENG-101) deja de ocupar el horario aunque el
+          // job todavía no la haya pasado a LIBERADO.
+          OR: [
+            { status: 'CONFIRMADO' },
+            {
+              status: 'RESERVADO_SIN_PAGAR',
+              created_at: { gt: new Date(now.getTime() - UNPAID_HOLD_MS) },
+            },
+          ],
         },
         select: { scheduled_at: true, duration_minutes: true },
       }),

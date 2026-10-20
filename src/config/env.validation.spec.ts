@@ -113,6 +113,20 @@ describe('validate (env)', () => {
     });
   });
 
+  describe('JOBS_SECRET (ENG-101)', () => {
+    it('vacío cuenta como sin definir: arranca y los jobs quedan apagados', () => {
+      const result = validate({ ...validConfig, JOBS_SECRET: '' });
+
+      expect(result.JOBS_SECRET).toBeUndefined();
+    });
+
+    it('rechaza un secreto de menos de 32 caracteres', () => {
+      expect(() => validate({ ...validConfig, JOBS_SECRET: 'corto' })).toThrow(
+        /Configuración de entorno inválida/,
+      );
+    });
+  });
+
   describe('consentimiento legal (ENG-140)', () => {
     it('acepta que LEGAL_ENFORCEMENT esté ausente: la barrera queda apagada', () => {
       expect(() => validate({ ...validConfig })).not.toThrow();
@@ -137,7 +151,7 @@ describe('validate (env)', () => {
   // exactamente así, con lo cual copiarlo a `.env` dejaba el backend sin
   // arrancar. Mismo problema que encontró la review de ENG-101 en JOBS_SECRET.
   describe('variables opcionales declaradas pero vacías', () => {
-    it.each(['LEGAL_ENFORCEMENT', 'MERCADOPAGO_SANDBOX'])(
+    it.each(['LEGAL_ENFORCEMENT', 'MERCADOPAGO_SANDBOX', 'JOBS_SECRET'])(
       '%s="" cuenta como ausente y no rompe el arranque',
       (name) => {
         expect(() => validate({ ...validConfig, [name]: '' })).not.toThrow();

@@ -10,6 +10,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import { holdExpiresAt } from '../appointments/unpaid-hold';
 import {
   MercadoPagoApiError,
   MercadoPagoService,
@@ -47,9 +48,10 @@ import {
  * quedó abierta, o el turno pasa y el link sigue vivo. En esos casos el webhook
  * marca el pago `APROBADO` y contesta `turno-no-confirmable`: se cobra sin dar
  * nada a cambio, y hasta ENG-65 no hay reembolso automático. Por eso la
- * preferencia vence a los {@link PREFERENCE_TTL_MS} (o al empezar el turno, lo
- * que llegue antes), no acepta efectivo ni pagos pendientes, y se vence a mano
- * al cancelar ({@link AppointmentPaymentService.expireCheckout}).
+ * preferencia vence a los {@link PREFERENCE_TTL_MS}, al empezar el turno o al
+ * vencer la retención de la reserva (ENG-101), lo que llegue antes. Tampoco
+ * acepta efectivo ni pagos pendientes, y se vence a mano al cancelar o al
+ * liberar el turno ({@link AppointmentPaymentService.expireCheckout}).
  *
  * Lo que esto **no** cubre: una misma preferencia acepta más de un pago (dos
  * pestañas, dos tarjetas). Si se aprueban dos, el webhook toma el segundo como
@@ -78,16 +80,18 @@ interface AppointmentRow {
   price: string | number;
   status: string;
   scheduled_at: string;
+  created_at: string;
 }
 
 const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, price, status, scheduled_at';
+  'id, patient_id, professional_id, price, status, scheduled_at, created_at';
 
 /**
- * Cuánto vive un link de pago. Es la misma ventana con la que ENG-101 libera
- * los turnos impagos, pero contada desde que se pide el link y no desde la
- * reserva: un link pedido al minuto 14 vive hasta el 29. Por eso ENG-101, al
- * liberar, tiene que llamar a `expireCheckout` igual que la cancelación.
+ * Cuánto vive como máximo un link de pago, contado desde que se pide.
+ *
+ * Además nunca vive más que la retención de la reserva (`holdExpiresAt`,
+ * ENG-101): un link pedido al minuto 14 de la reserva vence al 15, no al 29. Si
+ * viviera más, el paciente podría pagar un turno que el job ya liberó.
  */
 export const PREFERENCE_TTL_MS = 15 * 60 * 1000;
 
@@ -173,11 +177,21 @@ export class AppointmentPaymentService {
       );
     }
 
-    // Mientras ENG-101 no libere los turnos impagos, uno de ayer sigue en
-    // RESERVADO_SIN_PAGAR y el webhook lo pasaría a CONFIRMADO.
+    // ENG-101 no libera los turnos que ya empezaron, así que uno de ayer puede
+    // seguir en RESERVADO_SIN_PAGAR y el webhook lo pasaría a CONFIRMADO.
     const scheduledAt = new Date(appointment.scheduled_at);
     if (scheduledAt <= now) {
       throw new ConflictException('Ese turno ya pasó: no se puede pagar.');
+    }
+
+    // La retención venció pero el job todavía no pasó (corre cada 5 minutos).
+    // El turno ya no es del paciente: cobrarlo sería cobrar algo que en minutos
+    // pasa a LIBERADO.
+    const holdEndsAt = holdExpiresAt(new Date(appointment.created_at));
+    if (holdEndsAt <= now) {
+      throw new ConflictException(
+        'La reserva venció porque no se pagó a tiempo. Volvé a reservar el turno.',
+      );
     }
 
     // Antes de tocar MercadoPago: si falta configuración, mejor no cobrar.
@@ -219,7 +233,11 @@ export class AppointmentPaymentService {
         },
         backUrls,
         expiresAt: new Date(
-          Math.min(now.getTime() + PREFERENCE_TTL_MS, scheduledAt.getTime()),
+          Math.min(
+            now.getTime() + PREFERENCE_TTL_MS,
+            scheduledAt.getTime(),
+            holdEndsAt.getTime(),
+          ),
         ),
         // Atada a la preferencia que se reemplaza: dos requests simultáneos ven
         // la misma fila y comparten clave, pero una vez vencida la anterior la
@@ -252,8 +270,8 @@ export class AppointmentPaymentService {
   /**
    * Vence el link de pago del turno, si hay uno que todavía se pueda cobrar.
    *
-   * Lo llama la cancelación (ENG-55) y lo va a necesitar ENG-101 al liberar el
-   * turno: sin esto, la pestaña de MercadoPago que el paciente dejó abierta
+   * Lo llaman la cancelación (ENG-55) y la liberación por falta de pago
+   * (ENG-101): sin esto, la pestaña de MercadoPago que el paciente dejó abierta
    * sigue cobrando un turno que ya no existe.
    *
    * **Nunca tira.** Cancelar el turno es lo importante y ya pasó; si MercadoPago

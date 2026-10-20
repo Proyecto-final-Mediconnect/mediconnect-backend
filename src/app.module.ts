@@ -18,6 +18,7 @@ import { RequestLoggerMiddleware } from './common/middleware/request-logger.midd
 import { ClientIpThrottlerGuard } from './common/throttler/client-ip-throttler.guard';
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
+import { JobsModule } from './jobs/jobs.module';
 import { LegalModule } from './legal/legal.module';
 import { PatientsModule } from './patients/patients.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -53,6 +54,7 @@ import { VideoModule } from './video/video.module';
     AppointmentsModule,
     ClinicalRecordsModule,
     PaymentsModule,
+    JobsModule,
   ],
   controllers: [AppController],
   providers: [
