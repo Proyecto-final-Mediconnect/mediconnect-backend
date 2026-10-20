@@ -1,5 +1,6 @@
 import { Controller, Get, Param, ParseUUIDPipe } from '@nestjs/common';
 import { PublicProfessionalsService } from './public-professionals.service';
+import { SkipLegal } from '../legal/skip-legal.decorator';
 
 /**
  * Perfil público de un profesional (ENG-50). SIN `JwtAuthGuard` a propósito:
@@ -11,6 +12,8 @@ import { PublicProfessionalsService } from './public-professionals.service';
  * `GET /professionals/me` resuelve a la ruta estática antes que a `:id`; además
  * `ParseUUIDPipe` haría 400 si algo no-UUID llegara hasta acá.
  */
+// Pública: sin usuario no hay consentimiento que exigir (ENG-140).
+@SkipLegal()
 @Controller('professionals')
 export class PublicProfessionalsController {
   constructor(

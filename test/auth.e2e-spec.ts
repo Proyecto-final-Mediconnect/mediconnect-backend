@@ -7,6 +7,8 @@ import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
+import { LEGAL_VERSION } from './../src/legal/legal';
+import { LegalEnforcement } from './../src/legal/legal-enforcement';
 
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
 
@@ -25,16 +27,20 @@ describe('Auth registro (e2e)', () => {
     email: 'nuevo@test.com',
     password: 'Password1',
     passwordConfirmation: 'Password1',
+    acceptedLegalVersion: LEGAL_VERSION,
   };
 
   beforeAll(async () => {
     ({ publicKey } = await generateKeyPair('ES256'));
   });
 
+  const createMany = jest.fn();
+
   beforeEach(async () => {
     signUp.mockReset();
     signInWithPassword.mockReset();
     refreshSession.mockReset();
+    createMany.mockReset().mockResolvedValue({ count: 1 });
     resetPasswordForEmail.mockReset();
     verifyOtp.mockReset();
     updateUser.mockReset();
@@ -65,7 +71,14 @@ describe('Auth registro (e2e)', () => {
       // Auth no usa Prisma, pero el PrismaModule global intentaría conectar a la
       // base real en onModuleInit: lo reemplazamos por un stub sin lifecycle.
       .overrideProvider(PrismaService)
-      .useValue({})
+      .useValue({ legalAcceptance: { createMany } })
+      // Este spec prueba el contrato con la aceptación EXIGIDA, que es el
+      // estado final de ENG-140. En producción arranca apagada para poder
+      // desplegar el backend antes que la web; el caso apagado está cubierto en
+      // `auth.service.spec.ts` y en `legal-accepted.e2e-spec.ts`. Ver
+      // `src/legal/legal-enforcement.ts`.
+      .overrideProvider(LegalEnforcement)
+      .useValue({ isEnabled: () => true })
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -98,6 +111,34 @@ describe('Auth registro (e2e)', () => {
       });
   });
 
+  it('guarda la aceptación con la IP real del cliente y el user-agent (ENG-140)', async () => {
+    signUp.mockResolvedValue({
+      data: { user: { id: 'nuevo-id', identities: [{ id: 'x' }] } },
+      error: null,
+    });
+
+    await request(app.getHttpServer())
+      .post('/auth/register')
+      .set('CF-Connecting-IP', '203.0.113.7')
+      .set('X-Forwarded-For', '198.51.100.1')
+      .set('User-Agent', 'MediConnectTest/1.0')
+      .send(valid)
+      .expect(201);
+
+    expect(createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          profile_id: 'nuevo-id',
+          version: LEGAL_VERSION,
+          source: 'REGISTER',
+          ip: '203.0.113.7',
+          user_agent: 'MediConnectTest/1.0',
+        },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
   it('201 con email ya existente y devuelve el mismo mensaje genérico', () => {
     signUp.mockResolvedValue({
       data: { user: { identities: [] } },
@@ -110,6 +151,26 @@ describe('Auth registro (e2e)', () => {
       .expect((res) => {
         expect(res.body.message).toContain('Revisá tu email');
       });
+  });
+
+  it('400 sin aceptar los términos y el consentimiento (ENG-140)', () => {
+    const sinAceptar: Record<string, unknown> = { ...valid };
+    delete sinAceptar.acceptedLegalVersion;
+    return request(app.getHttpServer())
+      .post('/auth/register')
+      .send(sinAceptar)
+      .expect(400)
+      .expect((res) => {
+        expect(JSON.stringify(res.body.message)).toContain('consentimiento');
+        expect(signUp).not.toHaveBeenCalled();
+      });
+  });
+
+  it('400 con una versión vieja de los textos legales (ENG-140)', () => {
+    return request(app.getHttpServer())
+      .post('/auth/register')
+      .send({ ...valid, acceptedLegalVersion: '2020-01-01' })
+      .expect(400);
   });
 
   it('400 con contraseña débil', () => {

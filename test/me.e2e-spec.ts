@@ -7,6 +7,7 @@ import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
+import { LEGAL_VERSION } from './../src/legal/legal';
 
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
 const SUB = 'user-id-123';
@@ -15,6 +16,7 @@ describe('GET /me (e2e)', () => {
   let app: INestApplication<App>;
   // Prisma se mockea a nivel de método usado por UserService: no hay base real.
   const findUnique = jest.fn();
+  const createMany = jest.fn();
   // Par de claves "buenas": el guard verifica contra `publicKey`.
   let publicKey: CryptoKey;
   let privateKey: CryptoKey;
@@ -27,6 +29,7 @@ describe('GET /me (e2e)', () => {
     role: 'PACIENTE',
     patient: { first_name: 'Ana', last_name: 'García' },
     professional: null,
+    legal_acceptances: [],
   };
 
   beforeAll(async () => {
@@ -36,6 +39,7 @@ describe('GET /me (e2e)', () => {
 
   beforeEach(async () => {
     findUnique.mockReset();
+    createMany.mockReset();
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
@@ -46,7 +50,10 @@ describe('GET /me (e2e)', () => {
         getIssuer: () => ISSUER,
       })
       .overrideProvider(PrismaService)
-      .useValue({ profile: { findUnique } })
+      .useValue({
+        profile: { findUnique },
+        legalAcceptance: { createMany, findUnique: jest.fn() },
+      })
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -103,6 +110,8 @@ describe('GET /me (e2e)', () => {
           role: 'PACIENTE',
           firstName: 'Ana',
           lastName: 'García',
+          legalAccepted: false,
+          legalVersion: LEGAL_VERSION,
         });
       });
   });
@@ -169,7 +178,15 @@ describe('GET /me (e2e)', () => {
       .expect(200)
       .expect((res) => {
         expect(Object.keys(res.body as Record<string, unknown>).sort()).toEqual(
-          ['email', 'firstName', 'id', 'lastName', 'role'],
+          [
+            'email',
+            'firstName',
+            'id',
+            'lastName',
+            'legalAccepted',
+            'legalVersion',
+            'role',
+          ],
         );
         expect(res.body.password).toBeUndefined();
         expect(res.body.mfa_enabled).toBeUndefined();
@@ -192,5 +209,105 @@ describe('GET /me (e2e)', () => {
       .expect((res) => {
         expect(res.body.role).toBe('PACIENTE');
       });
+  });
+
+  describe('POST /me/legal-acceptance (ENG-140)', () => {
+    it('401 sin token', () => {
+      return request(app.getHttpServer())
+        .post('/me/legal-acceptance')
+        .send({ version: LEGAL_VERSION })
+        .expect(401)
+        .expect(() => expect(createMany).not.toHaveBeenCalled());
+    });
+
+    it('400 con una versión vieja, sin registrar nada', async () => {
+      const token = await signToken();
+
+      return request(app.getHttpServer())
+        .post('/me/legal-acceptance')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ version: '2000-01-01' })
+        .expect(400)
+        .expect(() => expect(createMany).not.toHaveBeenCalled());
+    });
+
+    it('400 sin versión, sin registrar nada', async () => {
+      const token = await signToken();
+
+      return request(app.getHttpServer())
+        .post('/me/legal-acceptance')
+        .set('Authorization', `Bearer ${token}`)
+        .send({})
+        .expect(400)
+        .expect(() => expect(createMany).not.toHaveBeenCalled());
+    });
+
+    it('400 con un campo extra: no se puede aceptar a nombre de otro', async () => {
+      const token = await signToken();
+
+      return request(app.getHttpServer())
+        .post('/me/legal-acceptance')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ version: LEGAL_VERSION, profile_id: 'otro-usuario' })
+        .expect(400)
+        .expect(() => expect(createMany).not.toHaveBeenCalled());
+    });
+
+    it('200 con la forma de MeResponseDto y legalAccepted: true', async () => {
+      createMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue({
+        ...patientRow,
+        legal_acceptances: [{ id: 'acc-1' }],
+      });
+      const token = await signToken();
+
+      await request(app.getHttpServer())
+        .post('/me/legal-acceptance')
+        .set('Authorization', `Bearer ${token}`)
+        .set('CF-Connecting-IP', '203.0.113.7')
+        .set('User-Agent', 'MediConnectTest/1.0')
+        .send({ version: LEGAL_VERSION })
+        .expect(200)
+        .expect((res) => {
+          expect(res.body).toEqual({
+            id: SUB,
+            email: 'paciente@test.com',
+            role: 'PACIENTE',
+            firstName: 'Ana',
+            lastName: 'García',
+            legalAccepted: true,
+            legalVersion: LEGAL_VERSION,
+          });
+        });
+
+      // Del token, no del body; con la IP del cliente y el canal.
+      expect(createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            profile_id: SUB,
+            version: LEGAL_VERSION,
+            source: 'REACCEPT',
+            ip: '203.0.113.7',
+            user_agent: 'MediConnectTest/1.0',
+          },
+        ],
+        skipDuplicates: true,
+      });
+    });
+
+    it('404 (no 500) con un JWT válido sin perfil', async () => {
+      createMany.mockRejectedValue(
+        Object.assign(new Error('Foreign key constraint violated'), {
+          code: 'P2003',
+        }),
+      );
+      const token = await signToken();
+
+      return request(app.getHttpServer())
+        .post('/me/legal-acceptance')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ version: LEGAL_VERSION })
+        .expect(404);
+    });
   });
 });

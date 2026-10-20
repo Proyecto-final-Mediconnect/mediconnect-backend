@@ -5,6 +5,7 @@ import { generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { legalAcceptedPrismaMock } from './legal-accepted.mock';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
 
@@ -117,6 +118,7 @@ describe('Turnos (e2e)', () => {
       // El `UPDATE … RETURNING` de `UnpaidReleaseService` (ENG-101), que `book()`
       // corre antes de reservar. Por defecto no libera nada.
       $queryRaw: jest.fn().mockResolvedValue([]),
+      ...legalAcceptedPrismaMock(),
     };
   }
 

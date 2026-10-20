@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { PaymentWebhookService } from './payment-webhook.service';
+import { SkipLegal } from '../legal/skip-legal.decorator';
 
 /**
  * ENG-64 — URL que se registra en el panel de MercadoPago (Webhooks, evento
@@ -24,6 +25,8 @@ import { PaymentWebhookService } from './payment-webhook.service';
  * va a aceptar solo llena la cola. El único non-2xx es cuando falla la API de
  * MercadoPago al pedir el pago, que sí es transitorio.
  */
+// Pública: sin usuario no hay consentimiento que exigir (ENG-140).
+@SkipLegal()
 @Controller('payments/webhooks')
 export class PaymentsWebhookController {
   constructor(
