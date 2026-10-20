@@ -72,10 +72,14 @@ describe('RegisterProfessionalDto', () => {
     );
   });
 
-  it('rechaza el registro sin aceptar los textos legales (ENG-140)', async () => {
+  // Igual que en `RegisterPatientDto`: la ausencia la exige `AuthService` con
+  // `LEGAL_ENFORCEMENT`; el DTO sigue rechazando una versión equivocada.
+  it('acepta que falte la versión: la exige el service según el flag (ENG-140)', async () => {
     const sinAceptar: Record<string, unknown> = { ...valid };
     delete sinAceptar.acceptedLegalVersion;
-    expect(await invalidProps(sinAceptar)).toContain('acceptedLegalVersion');
+    expect(await invalidProps(sinAceptar)).not.toContain(
+      'acceptedLegalVersion',
+    );
   });
 
   it('rechaza una versión de los textos que no es la vigente', async () => {

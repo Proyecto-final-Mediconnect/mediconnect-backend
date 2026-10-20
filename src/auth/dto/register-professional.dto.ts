@@ -1,6 +1,7 @@
 import {
   Equals,
   IsEmail,
+  IsOptional,
   IsString,
   Length,
   Matches,
@@ -58,7 +59,13 @@ export class RegisterProfessionalDto {
    * igual. Lo que lo cierra es `LegalAcceptedGuard`: sin aceptación vigente,
    * ninguna ruta autenticada (salvo `GET /me` y `POST /me/legal-acceptance`)
    * responde otra cosa que 403.
+   *
+   * **Opcional en el DTO, obligatorio cuando corresponde**, por el mismo motivo
+   * que en `RegisterPatientDto`: una versión distinta de la vigente se rechaza
+   * siempre, y que pueda faltar es lo que permite desplegar este backend antes
+   * que la web. Con `LEGAL_ENFORCEMENT=true`, `AuthService` exige que esté.
    */
+  @IsOptional()
   @Equals(LEGAL_VERSION, { message: LEGAL_NOT_ACCEPTED_MESSAGE })
-  acceptedLegalVersion!: string;
+  acceptedLegalVersion?: string;
 }

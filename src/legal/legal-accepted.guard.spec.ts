@@ -10,6 +10,7 @@ import {
   LEGAL_NOT_ACCEPTED_CODE,
   LegalAcceptedGuard,
 } from './legal-accepted.guard';
+import { LegalEnforcement } from './legal-enforcement';
 import { SkipLegal } from './skip-legal.decorator';
 
 class Guarded {
@@ -42,10 +43,38 @@ describe('LegalAcceptedGuard', () => {
   const prisma = {
     legalAcceptance: { findUnique },
   } as unknown as PrismaService;
-  const guard = new LegalAcceptedGuard(new Reflector(), prisma);
+  // Los casos de abajo son los de la barrera prendida, que es su estado final.
+  // El apagado (el del despliegue escalonado) tiene su propio caso al final.
+  let enabled = true;
+  const enforcement = {
+    isEnabled: () => enabled,
+  } as unknown as LegalEnforcement;
+  const guard = new LegalAcceptedGuard(new Reflector(), prisma, enforcement);
   const request = { user: { id: 'user-1' } };
 
-  beforeEach(() => findUnique.mockReset());
+  beforeEach(() => {
+    enabled = true;
+    findUnique.mockReset();
+  });
+
+  it('con la aplicación apagada deja pasar sin consultar la base', async () => {
+    enabled = false;
+
+    await expect(
+      guard.canActivate(makeContext(Guarded, request)),
+    ).resolves.toBe(true);
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+
+  it('con la aplicación apagada no exige ni siquiera un usuario autenticado', async () => {
+    // El fail-closed de `!user?.id` protege contra un guard mal registrado, no
+    // contra el usuario: con la barrera apagada no tiene nada que decidir.
+    enabled = false;
+
+    await expect(guard.canActivate(makeContext(Guarded, {}))).resolves.toBe(
+      true,
+    );
+  });
 
   it('deja pasar si el usuario aceptó la versión vigente', async () => {
     findUnique.mockResolvedValue({ id: 'acc-1' });

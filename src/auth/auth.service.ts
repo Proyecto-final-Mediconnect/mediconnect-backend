@@ -7,7 +7,8 @@ import {
 } from '@nestjs/common';
 import * as Sentry from '@sentry/nestjs';
 import type { LegalAcceptanceContext } from '../legal/acceptance-context';
-import { LEGAL_VERSION } from '../legal/legal';
+import { LEGAL_NOT_ACCEPTED_MESSAGE, LEGAL_VERSION } from '../legal/legal';
+import { LegalEnforcement } from '../legal/legal-enforcement';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -54,7 +55,26 @@ export class AuthService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly prisma: PrismaService,
+    private readonly enforcement: LegalEnforcement,
   ) {}
+
+  /**
+   * Exige `acceptedLegalVersion` cuando la aplicación del consentimiento está
+   * prendida (ENG-140).
+   *
+   * El DTO lo deja opcional para poder desplegar este backend antes que la web
+   * —si lo exigiera desde el merge, el registro de la web vieja rompería con
+   * 400—, así que la obligatoriedad se decide acá, con el flag. Que la versión
+   * sea la vigente ya lo valida el DTO: esto solo cubre que falte.
+   *
+   * Se chequea **antes** del `signUp`: si saltara después, la cuenta ya estaría
+   * creada en Supabase y el usuario no podría reintentar con el mismo email.
+   */
+  private requireLegalAcceptance(acceptedLegalVersion?: string): void {
+    if (this.enforcement.isEnabled() && !acceptedLegalVersion) {
+      throw new BadRequestException(LEGAL_NOT_ACCEPTED_MESSAGE);
+    }
+  }
 
   /**
    * Deja constancia de que el usuario recién creado aceptó los textos legales
@@ -123,6 +143,8 @@ export class AuthService {
     dto: RegisterPatientDto,
     context: LegalAcceptanceContext,
   ): Promise<{ message: string }> {
+    this.requireLegalAcceptance(dto.acceptedLegalVersion);
+
     const { data, error } = await this.supabase.getClient().auth.signUp({
       email: dto.email,
       password: dto.password,
@@ -140,7 +162,12 @@ export class AuthService {
       return { message: GENERIC_REGISTER_MESSAGE };
     }
 
-    if (data.user) await this.recordLegalAcceptance(data.user.id, context);
+    // Solo si el cliente mandó la aceptación: con el flag apagado y una web
+    // vieja no viene, y guardar una fila que nadie aceptó sería inventar la
+    // prueba del consentimiento.
+    if (data.user && dto.acceptedLegalVersion) {
+      await this.recordLegalAcceptance(data.user.id, context);
+    }
 
     return { message: GENERIC_REGISTER_MESSAGE };
   }
@@ -149,6 +176,8 @@ export class AuthService {
     dto: RegisterProfessionalDto,
     context: LegalAcceptanceContext,
   ): Promise<{ message: string }> {
+    this.requireLegalAcceptance(dto.acceptedLegalVersion);
+
     // Los datos profesionales viajan en raw_user_meta_data (options.data). El
     // trigger on_auth_user_created los consume para crear el perfil con
     // role=PROFESIONAL y la fila en `professionals` con estado
@@ -178,7 +207,12 @@ export class AuthService {
       return { message: GENERIC_REGISTER_MESSAGE };
     }
 
-    if (data.user) await this.recordLegalAcceptance(data.user.id, context);
+    // Solo si el cliente mandó la aceptación: con el flag apagado y una web
+    // vieja no viene, y guardar una fila que nadie aceptó sería inventar la
+    // prueba del consentimiento.
+    if (data.user && dto.acceptedLegalVersion) {
+      await this.recordLegalAcceptance(data.user.id, context);
+    }
 
     return { message: GENERIC_REGISTER_MESSAGE };
   }

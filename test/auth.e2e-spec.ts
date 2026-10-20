@@ -8,6 +8,7 @@ import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
 import { LEGAL_VERSION } from './../src/legal/legal';
+import { LegalEnforcement } from './../src/legal/legal-enforcement';
 
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
 
@@ -71,6 +72,13 @@ describe('Auth registro (e2e)', () => {
       // base real en onModuleInit: lo reemplazamos por un stub sin lifecycle.
       .overrideProvider(PrismaService)
       .useValue({ legalAcceptance: { createMany } })
+      // Este spec prueba el contrato con la aceptación EXIGIDA, que es el
+      // estado final de ENG-140. En producción arranca apagada para poder
+      // desplegar el backend antes que la web; el caso apagado está cubierto en
+      // `auth.service.spec.ts` y en `legal-accepted.e2e-spec.ts`. Ver
+      // `src/legal/legal-enforcement.ts`.
+      .overrideProvider(LegalEnforcement)
+      .useValue({ isEnabled: () => true })
       .compile();
 
     app = moduleFixture.createNestApplication();

@@ -1,4 +1,11 @@
-import { Equals, IsEmail, IsString, Matches, MinLength } from 'class-validator';
+import {
+  Equals,
+  IsEmail,
+  IsOptional,
+  IsString,
+  Matches,
+  MinLength,
+} from 'class-validator';
 import { LEGAL_NOT_ACCEPTED_MESSAGE, LEGAL_VERSION } from '../../legal/legal';
 import { Match } from '../decorators/match.decorator';
 
@@ -31,7 +38,14 @@ export class RegisterPatientDto {
    * igual. Lo que lo cierra es `LegalAcceptedGuard`: sin aceptación vigente,
    * ninguna ruta autenticada (salvo `GET /me` y `POST /me/legal-acceptance`)
    * responde otra cosa que 403.
+   *
+   * **Opcional en el DTO, obligatorio cuando corresponde.** Si viene, tiene que
+   * ser la vigente: una versión distinta se rechaza siempre, acá. Que pueda
+   * faltar es lo que permite desplegar este backend antes que la web, que es la
+   * que empieza a mandar el campo; con `LEGAL_ENFORCEMENT=true`, `AuthService`
+   * exige que esté. Ver `src/legal/legal-enforcement.ts`.
    */
+  @IsOptional()
   @Equals(LEGAL_VERSION, { message: LEGAL_NOT_ACCEPTED_MESSAGE })
-  acceptedLegalVersion!: string;
+  acceptedLegalVersion?: string;
 }

@@ -64,10 +64,16 @@ describe('RegisterPatientDto', () => {
     ).toContain('passwordConfirmation');
   });
 
-  it('rechaza el registro sin aceptar los textos legales (ENG-140)', async () => {
+  // El DTO ya no rechaza la ausencia del campo: eso pasó a `AuthService`, que
+  // lo exige según `LEGAL_ENFORCEMENT` (ENG-140). El DTO sigue siendo el que
+  // rechaza una versión equivocada, que es la parte que no depende del flag.
+  // Ver `src/legal/legal-enforcement.ts` y el caso del service.
+  it('acepta que falte la versión: la exige el service según el flag (ENG-140)', async () => {
     const sinAceptar: Record<string, unknown> = { ...valid };
     delete sinAceptar.acceptedLegalVersion;
-    expect(await invalidProps(sinAceptar)).toContain('acceptedLegalVersion');
+    expect(await invalidProps(sinAceptar)).not.toContain(
+      'acceptedLegalVersion',
+    );
   });
 
   it('rechaza una versión de los textos que no es la vigente', async () => {

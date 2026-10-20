@@ -112,4 +112,41 @@ describe('validate (env)', () => {
       ).toThrow(/Configuración de entorno inválida/);
     });
   });
+
+  describe('consentimiento legal (ENG-140)', () => {
+    it('acepta que LEGAL_ENFORCEMENT esté ausente: la barrera queda apagada', () => {
+      expect(() => validate({ ...validConfig })).not.toThrow();
+      expect(validate({ ...validConfig }).LEGAL_ENFORCEMENT).toBeUndefined();
+    });
+
+    it.each(['true', 'false'])('acepta el valor %p', (value) => {
+      expect(() =>
+        validate({ ...validConfig, LEGAL_ENFORCEMENT: value }),
+      ).not.toThrow();
+    });
+
+    it('rechaza un valor que no sea true ni false', () => {
+      expect(() =>
+        validate({ ...validConfig, LEGAL_ENFORCEMENT: 'si' }),
+      ).toThrow(/Configuración de entorno inválida/);
+    });
+  });
+
+  // `@IsOptional()` solo saltea null y undefined, así que sin el transform una
+  // variable declarada y vacía rompe el arranque. Y `.env.example` las deja
+  // exactamente así, con lo cual copiarlo a `.env` dejaba el backend sin
+  // arrancar. Mismo problema que encontró la review de ENG-101 en JOBS_SECRET.
+  describe('variables opcionales declaradas pero vacías', () => {
+    it.each(['LEGAL_ENFORCEMENT', 'MERCADOPAGO_SANDBOX'])(
+      '%s="" cuenta como ausente y no rompe el arranque',
+      (name) => {
+        expect(() => validate({ ...validConfig, [name]: '' })).not.toThrow();
+        const result = validate({
+          ...validConfig,
+          [name]: '',
+        }) as unknown as Record<string, unknown>;
+        expect(result[name]).toBeUndefined();
+      },
+    );
+  });
 });

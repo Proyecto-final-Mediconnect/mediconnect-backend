@@ -9,6 +9,7 @@ import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { LEGAL_NOT_ACCEPTED_MESSAGE, LEGAL_VERSION } from './legal';
+import { LegalEnforcement } from './legal-enforcement';
 import { SKIP_LEGAL_KEY } from './skip-legal.decorator';
 
 /** `code` del 403: la web lo usa para mandar al usuario a aceptar los textos. */
@@ -38,9 +39,15 @@ export class LegalAcceptedGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly prisma: PrismaService,
+    private readonly enforcement: LegalEnforcement,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    // Antes que todo lo demás: con el flag apagado no bloquea a nadie y no
+    // gasta una consulta por request. Es el estado en el que este backend se
+    // despliega antes que la web — ver `LegalEnforcement`.
+    if (!this.enforcement.isEnabled()) return true;
+
     const skip = this.reflector.getAllAndOverride<boolean | undefined>(
       SKIP_LEGAL_KEY,
       [context.getHandler(), context.getClass()],
