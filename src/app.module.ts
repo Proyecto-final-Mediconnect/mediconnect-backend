@@ -19,6 +19,7 @@ import { ClientIpThrottlerGuard } from './common/throttler/client-ip-throttler.g
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { JobsModule } from './jobs/jobs.module';
+import { LegalModule } from './legal/legal.module';
 import { PatientsModule } from './patients/patients.module';
 import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -41,6 +42,7 @@ import { VideoModule } from './video/video.module';
     ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 60 }]),
     PrismaModule,
     SupabaseModule,
+    LegalModule,
     AuthModule,
     CatalogModule,
     UserModule,

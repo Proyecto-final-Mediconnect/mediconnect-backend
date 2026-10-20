@@ -15,6 +15,8 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterPatientDto } from './dto/register-patient.dto';
 import { RegisterProfessionalDto } from './dto/register-professional.dto';
+import { legalAcceptanceContext } from '../legal/acceptance-context';
+import { SkipLegal } from '../legal/skip-legal.decorator';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 
 const ACCESS_TOKEN_COOKIE = 'sb-access-token';
@@ -50,6 +52,8 @@ function sessionCookieOptions() {
   };
 }
 
+// Pública: sin usuario no hay consentimiento que exigir (ENG-140).
+@SkipLegal()
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
@@ -77,14 +81,20 @@ export class AuthController {
 
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  registerPatient(@Body() dto: RegisterPatientDto) {
-    return this.authService.registerPatient(dto);
+  registerPatient(@Body() dto: RegisterPatientDto, @Req() req: Request) {
+    return this.authService.registerPatient(dto, legalAcceptanceContext(req));
   }
 
   @Post('register/professional')
   @HttpCode(HttpStatus.CREATED)
-  registerProfessional(@Body() dto: RegisterProfessionalDto) {
-    return this.authService.registerProfessional(dto);
+  registerProfessional(
+    @Body() dto: RegisterProfessionalDto,
+    @Req() req: Request,
+  ) {
+    return this.authService.registerProfessional(
+      dto,
+      legalAcceptanceContext(req),
+    );
   }
 
   @Post('login')

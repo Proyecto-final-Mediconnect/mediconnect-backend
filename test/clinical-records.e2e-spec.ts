@@ -5,6 +5,7 @@ import { generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { legalAcceptedPrismaMock } from './legal-accepted.mock';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
 
@@ -113,7 +114,11 @@ describe('Historia clínica (e2e)', () => {
       .overrideProvider(SupabaseService)
       .useValue(supabase)
       .overrideProvider(PrismaService)
-      .useValue({ profile: { findUnique: jest.fn() }, ...prisma })
+      .useValue({
+        profile: { findUnique: jest.fn() },
+        ...legalAcceptedPrismaMock(),
+        ...prisma,
+      })
       .compile();
 
     app = moduleFixture.createNestApplication();
