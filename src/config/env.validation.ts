@@ -1,4 +1,4 @@
-import { plainToInstance } from 'class-transformer';
+import { plainToInstance, Transform } from 'class-transformer';
 import {
   IsIn,
   IsOptional,
@@ -7,6 +7,24 @@ import {
   Matches,
   validateSync,
 } from 'class-validator';
+
+/**
+ * Trata el string vacío como "no definida".
+ *
+ * `@IsOptional()` solo saltea `null` y `undefined`. Una variable declarada y
+ * vacía —que es exactamente como las deja `.env.example`— llega como `''`, no
+ * la saltea, y rompe la validación y con ella el arranque. Lo encontró la
+ * review de ENG-101 con `JOBS_SECRET=""`; `MERCADOPAGO_SANDBOX=""` tenía el
+ * mismo problema y `.env.example` lo trae así, así que copiar el ejemplo a
+ * `.env` dejaba el backend sin arrancar.
+ *
+ * Va antes de `@IsOptional()` en cada variable opcional cuyo valor vacío tenga
+ * que significar "ausente".
+ */
+const EmptyAsUndefined = (): PropertyDecorator =>
+  Transform(({ value }: { value: unknown }) =>
+    value === '' ? undefined : value,
+  );
 
 class EnvironmentVariables {
   @IsString()
@@ -118,9 +136,20 @@ class EnvironmentVariables {
   // Hace falta con credenciales de un usuario de prueba, que son `APP_USR-`
   // igual que las productivas: ahí el prefijo no distingue nada. Ver
   // `MercadoPagoService.isSandbox`.
+  @EmptyAsUndefined()
   @IsOptional()
   @IsIn(['true', 'false'])
   MERCADOPAGO_SANDBOX?: string;
+
+  // Exige la aceptación de los textos legales en toda ruta autenticada y en el
+  // registro (ENG-140). Opcional y apagada por default: el backend se despliega
+  // antes que la web, y entre los dos deploys exigirla rompería el registro y
+  // dejaría 403 a todos los usuarios existentes. Se prende cuando la web y el
+  // build mobile ya están publicados — ver `docs/security/legal-enforcement.md`.
+  @EmptyAsUndefined()
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  LEGAL_ENFORCEMENT?: string;
 }
 
 /** Falla rápido al bootear si falta o está mal formada una env var requerida,

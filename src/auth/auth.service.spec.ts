@@ -10,6 +10,7 @@ import { RegisterPatientDto } from './dto/register-patient.dto';
 import { RegisterProfessionalDto } from './dto/register-professional.dto';
 import { LoginDto } from './dto/login.dto';
 import { LEGAL_VERSION } from '../legal/legal';
+import { LegalEnforcement } from '../legal/legal-enforcement';
 import { PrismaService } from '../prisma/prisma.service';
 import * as Sentry from '@sentry/nestjs';
 
@@ -19,6 +20,8 @@ describe('AuthService', () => {
   let service: AuthService;
   let signUp: jest.Mock;
   let signInWithPassword: jest.Mock;
+  /** Estado del flag de ENG-140 para cada caso; se resetea en `beforeEach`. */
+  let legalEnforcementEnabled = false;
 
   const dto: RegisterPatientDto = {
     email: 'nuevo@test.com',
@@ -35,6 +38,12 @@ describe('AuthService', () => {
     specialty: 'Cardiología',
     licenseNumber: 'MP-12345',
     acceptedLegalVersion: LEGAL_VERSION,
+  };
+  /** Lo que manda una web anterior a ENG-140: sin el campo de la aceptación. */
+  const dtoSinAceptacion: RegisterPatientDto = {
+    email: dto.email,
+    password: dto.password,
+    passwordConfirmation: dto.passwordConfirmation,
   };
   const ctx = { ip: '203.0.113.7', userAgent: 'Mozilla/5.0 (test)' };
   const loginDto: LoginDto = { email: 'user@test.com', password: 'Password1' };
@@ -73,10 +82,57 @@ describe('AuthService', () => {
     const prismaMock = {
       legalAcceptance: { createMany },
     } as unknown as PrismaService;
-    service = new AuthService(supabaseMock, prismaMock);
+    legalEnforcementEnabled = false;
+    const enforcementMock = {
+      isEnabled: () => legalEnforcementEnabled,
+    } as unknown as LegalEnforcement;
+    service = new AuthService(supabaseMock, prismaMock, enforcementMock);
   });
 
   describe('aceptación legal (ENG-140)', () => {
+    // Los tres casos del despliegue escalonado: ver `LegalEnforcement`.
+    it('con la aplicación prendida rechaza el registro sin la aceptación', async () => {
+      legalEnforcementEnabled = true;
+
+      await expect(
+        service.registerPatient(dtoSinAceptacion, ctx),
+      ).rejects.toThrow(BadRequestException);
+      // Antes del signUp: si no, la cuenta queda creada en Supabase y el
+      // usuario no puede reintentar con el mismo email.
+      expect(signUp).not.toHaveBeenCalled();
+      expect(createMany).not.toHaveBeenCalled();
+    });
+
+    it('con la aplicación apagada deja registrar sin la aceptación', async () => {
+      // Es el caso de la web vieja contra este backend ya desplegado.
+      legalEnforcementEnabled = false;
+      signUp.mockResolvedValue({
+        data: { user: { id: 'nuevo-id', identities: [{ id: 'abc' }] } },
+        error: null,
+      });
+
+      await expect(
+        service.registerPatient(dtoSinAceptacion, ctx),
+      ).resolves.toEqual(
+        expect.objectContaining({ message: expect.any(String) }),
+      );
+      expect(signUp).toHaveBeenCalled();
+      // No se inventa una fila: nadie aceptó nada.
+      expect(createMany).not.toHaveBeenCalled();
+    });
+
+    it('con la aplicación prendida y la aceptación presente, registra normal', async () => {
+      legalEnforcementEnabled = true;
+      signUp.mockResolvedValue({
+        data: { user: { id: 'nuevo-id', identities: [{ id: 'abc' }] } },
+        error: null,
+      });
+
+      await service.registerPatient(dto, ctx);
+
+      expect(createMany).toHaveBeenCalled();
+    });
+
     it('deja constancia de la versión vigente para el usuario nuevo', async () => {
       signUp.mockResolvedValue({
         data: { user: { id: 'nuevo-id', identities: [{ id: 'abc' }] } },
