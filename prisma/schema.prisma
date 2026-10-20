@@ -386,6 +386,7 @@ model Appointment {
   consultation Consultation?
   payment      Payment?
   review       Review?
+  notifications Notification[]
 
   @@index([professional_id, scheduled_at])
   @@index([patient_id, scheduled_at])
@@ -605,8 +606,14 @@ model Notification {
   read_at    DateTime?            @db.Timestamptz(6)
   created_at DateTime             @default(now()) @db.Timestamptz(6)
 
-  user Profile @relation(fields: [user_id], references: [id])
+  /// Turno al que se refiere el aviso (ENG-68). `null` en los que no son de un turno.
+  appointment_id String?   @db.Uuid
 
+  user        Profile      @relation(fields: [user_id], references: [id])
+  appointment Appointment? @relation(fields: [appointment_id], references: [id], onDelete: Cascade)
+
+  /// Un aviso de cada tipo por turno y canal: evita mandar dos veces el mismo email.
+  @@unique([appointment_id, type, channel])
   @@map("notifications")
 }
 

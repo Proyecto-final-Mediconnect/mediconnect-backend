@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, type Payment } from '../../generated/prisma/client';
+import { AppointmentNotificationsService } from '../notifications/appointment-notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { verifyWebhookSignature } from './mercadopago-signature';
 import {
@@ -72,6 +73,7 @@ export class PaymentWebhookService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly mercadopago: MercadoPagoService,
+    private readonly notifications: AppointmentNotificationsService,
   ) {}
 
   async handle(
@@ -243,7 +245,7 @@ export class PaymentWebhookService {
       return 'monto-no-coincide';
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const outcome = await this.prisma.$transaction(async (tx) => {
       // RECHAZADO también es origen válido: un intento rechazado seguido de uno
       // aprobado sobre la misma preferencia.
       const paid = await tx.payment.updateMany({
@@ -275,5 +277,14 @@ export class PaymentWebhookService {
       }
       return 'turno-confirmado' as const;
     });
+
+    // Después del commit: el mail no puede salir por un turno que la
+    // transacción terminó no confirmando. Sin `await`: la respuesta a
+    // MercadoPago no espera a Resend (hasta 10 s de timeout). Nunca tira, y si
+    // falla lo reintenta el job de recordatorios (ENG-68).
+    if (outcome === 'turno-confirmado') {
+      void this.notifications.sendConfirmation(payment.appointment_id, now);
+    }
+    return outcome;
   }
 }

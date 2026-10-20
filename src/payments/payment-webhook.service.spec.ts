@@ -67,6 +67,7 @@ describe('PaymentWebhookService', () => {
     $transaction: jest.Mock;
   };
   let mercadopago: { getPayment: jest.Mock };
+  let notifications: { sendConfirmation: jest.Mock };
   let service: PaymentWebhookService;
 
   beforeEach(() => {
@@ -86,7 +87,14 @@ describe('PaymentWebhookService', () => {
       fn(prisma),
     );
     mercadopago = { getPayment: jest.fn().mockResolvedValue(mpPayment()) };
-    service = new PaymentWebhookService(prisma as never, mercadopago as never);
+    notifications = {
+      sendConfirmation: jest.fn().mockResolvedValue(undefined),
+    };
+    service = new PaymentWebhookService(
+      prisma as never,
+      mercadopago as never,
+      notifications as never,
+    );
   });
 
   it('pago aprobado: marca el Payment APROBADO y confirma el turno', async () => {
@@ -164,6 +172,34 @@ describe('PaymentWebhookService', () => {
     await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
       'turno-no-confirmable',
     );
+    // Y no se le confirma por mail un turno que no se confirmó.
+    expect(notifications.sendConfirmation).not.toHaveBeenCalled();
+  });
+
+  it('al confirmar el turno manda el email de confirmación (ENG-68)', async () => {
+    await service.handle(signed(), SECRET, NOW);
+
+    expect(notifications.sendConfirmation).toHaveBeenCalledWith(
+      APPOINTMENT_ID,
+      NOW,
+    );
+  });
+
+  it('no espera al mail para contestarle a MercadoPago', async () => {
+    notifications.sendConfirmation.mockReturnValue(new Promise(() => {}));
+
+    await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
+      'turno-confirmado',
+    );
+  });
+
+  it('un webhook repetido no vuelve a mandar la confirmación', async () => {
+    prisma.payment.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
+      'ya-procesado',
+    );
+    expect(notifications.sendConfirmation).not.toHaveBeenCalled();
   });
 
   it('monto menor al del turno: no confirma', async () => {

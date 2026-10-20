@@ -128,6 +128,25 @@ class EnvironmentVariables {
   @MinLength(32)
   JOBS_SECRET?: string;
 
+  // Emails de turno con Resend (ENG-68). Opcionales: sin alguno de los dos los
+  // emails quedan apagados y el resto del backend funciona igual.
+  @IsOptional()
+  @IsString()
+  RESEND_API_KEY?: string;
+
+  // Remitente, p. ej. `MediConnect <turnos@mediconnect.ar>`. El dominio tiene
+  // que estar verificado en Resend; sin dominio propio sirve
+  // `onboarding@resend.dev`, que solo entrega a la casilla dueña de la cuenta.
+  @IsOptional()
+  @IsString()
+  EMAIL_FROM?: string;
+
+  // Solo para apuntar a un mock de la API en pruebas manuales, igual que
+  // DAILY_API_URL. Sin esto se usa https://api.resend.com.
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  RESEND_API_URL?: string;
+
   // Solo para apuntar a un mock de la API en pruebas manuales, igual que
   // DAILY_API_URL. Sin esto se usa el endpoint real de mercadopago.config.
   @IsOptional()
