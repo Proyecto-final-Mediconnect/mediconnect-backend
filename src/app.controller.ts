@@ -1,6 +1,9 @@
 import { Controller, Get, Header } from '@nestjs/common';
 import { AppService } from './app.service';
+import { SkipLegal } from './legal/skip-legal.decorator';
 
+// Pública: sin usuario no hay consentimiento que exigir (ENG-140).
+@SkipLegal()
 @Controller()
 export class AppController {
   constructor(private readonly appService: AppService) {}

@@ -8,6 +8,7 @@ import {
 import type { Request } from 'express';
 import { jwtVerify, type JWTPayload } from 'jose';
 import { JOSEError, JWKSTimeout } from 'jose/errors';
+import { LegalAcceptedGuard } from '../../legal/legal-accepted.guard';
 import { SupabaseService } from '../../supabase/supabase.service';
 
 /** Nombre de la cookie httpOnly seteada en `AuthController.login`. */
@@ -28,10 +29,18 @@ function extractToken(request: Request): string | undefined {
  * Verifica JWTs de Supabase Auth localmente contra el JWKS del proyecto
  * (firma ES256 + issuer + audiencia + expiración), sin llamar a Supabase por
  * request (ver ENG-40). Adjunta el usuario autenticado a `request.user`.
+ *
+ * Después exige la aceptación vigente de los textos legales (ENG-140) con
+ * `LegalAcceptedGuard`, salvo en las rutas marcadas con `@SkipLegal()`. Va acá y
+ * no como guard global porque necesita `request.user`, y los globales corren
+ * antes que este.
  */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly legalAccepted: LegalAcceptedGuard,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<Request>();
@@ -78,6 +87,7 @@ export class JwtAuthGuard implements CanActivate {
     // construir un cliente Supabase scopeado al usuario (RLS) en los handlers.
     request.accessToken = token;
 
-    return true;
+    // 401 antes que 403: primero quién sos, después si aceptaste.
+    return this.legalAccepted.canActivate(context);
   }
 }

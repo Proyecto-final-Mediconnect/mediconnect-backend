@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { RegisterPatientDto } from './register-patient.dto';
+import { LEGAL_VERSION } from '../../legal/legal';
 
 async function invalidProps(obj: Record<string, unknown>): Promise<string[]> {
   const dto = plainToInstance(RegisterPatientDto, obj);
@@ -14,6 +15,7 @@ describe('RegisterPatientDto', () => {
     email: 'user@test.com',
     password: 'Password1',
     passwordConfirmation: 'Password1',
+    acceptedLegalVersion: LEGAL_VERSION,
   };
 
   it('acepta datos válidos', async () => {
@@ -60,5 +62,23 @@ describe('RegisterPatientDto', () => {
     expect(
       await invalidProps({ ...valid, passwordConfirmation: 'Password2' }),
     ).toContain('passwordConfirmation');
+  });
+
+  // El DTO ya no rechaza la ausencia del campo: eso pasó a `AuthService`, que
+  // lo exige según `LEGAL_ENFORCEMENT` (ENG-140). El DTO sigue siendo el que
+  // rechaza una versión equivocada, que es la parte que no depende del flag.
+  // Ver `src/legal/legal-enforcement.ts` y el caso del service.
+  it('acepta que falte la versión: la exige el service según el flag (ENG-140)', async () => {
+    const sinAceptar: Record<string, unknown> = { ...valid };
+    delete sinAceptar.acceptedLegalVersion;
+    expect(await invalidProps(sinAceptar)).not.toContain(
+      'acceptedLegalVersion',
+    );
+  });
+
+  it('rechaza una versión de los textos que no es la vigente', async () => {
+    expect(
+      await invalidProps({ ...valid, acceptedLegalVersion: '2020-01-01' }),
+    ).toContain('acceptedLegalVersion');
   });
 });

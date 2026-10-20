@@ -9,6 +9,7 @@ import {
   PAYLOAD_TOO_LARGE_MESSAGE,
   PayloadTooLargeFilter,
 } from './../src/common/filters/payload-too-large.filter';
+import { legalAcceptedPrismaMock } from './legal-accepted.mock';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
 
@@ -102,7 +103,10 @@ describe('Perfil profesional (e2e)', () => {
       .overrideProvider(SupabaseService)
       .useValue(makeSupabaseMock())
       .overrideProvider(PrismaService)
-      .useValue({ profile: { findUnique: jest.fn() } })
+      .useValue({
+        profile: { findUnique: jest.fn() },
+        ...legalAcceptedPrismaMock(),
+      })
       .compile();
 
     app = moduleFixture.createNestApplication();

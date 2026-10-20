@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ThrottlerGuard } from '@nestjs/throttler';
-import { isIP } from 'node:net';
+import { cloudflareClientIp } from '../http/client-ip';
 
 /**
  * Rate limit por IP real del cliente, no por IP del proxy (ENG-84).
@@ -31,14 +31,10 @@ export class ClientIpThrottlerGuard extends ThrottlerGuard {
   protected override async getTracker(
     req: Record<string, unknown>,
   ): Promise<string> {
-    const headers = req.headers as Record<string, unknown> | undefined;
-    const cfIp = headers?.['cf-connecting-ip'];
-
-    // Solo una IP bien formada. Un valor duplicado llega como "a, b" y no pasa
-    // `isIP`: ante cualquier duda se usa `req.ip`, que es lo que hacía antes.
-    if (typeof cfIp === 'string' && isIP(cfIp.trim()) !== 0) {
-      return cfIp.trim();
-    }
+    // Ante cualquier duda (header ausente o mal formado) se usa `req.ip`, que
+    // es lo que hacía antes.
+    const cfIp = cloudflareClientIp(req);
+    if (cfIp) return cfIp;
 
     return super.getTracker(req);
   }
