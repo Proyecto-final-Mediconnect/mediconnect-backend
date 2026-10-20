@@ -124,6 +124,12 @@ class EnvironmentVariables {
   EMAIL_FROM?: string;
 
   // Solo para apuntar a un mock de la API en pruebas manuales, igual que
+  // DAILY_API_URL. Sin esto se usa https://api.resend.com.
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  RESEND_API_URL?: string;
+
+  // Solo para apuntar a un mock de la API en pruebas manuales, igual que
   // DAILY_API_URL. Sin esto se usa el endpoint real de mercadopago.config.
   @IsOptional()
   @IsUrl({ require_tld: false, require_protocol: true })

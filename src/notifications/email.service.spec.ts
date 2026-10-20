@@ -64,6 +64,7 @@ describe('EmailService', () => {
     [422, true],
     [400, true],
     [401, false],
+    [403, false],
     [429, false],
     [500, false],
   ])('un %i es permanente=%s', async (status, permanent) => {
@@ -75,6 +76,57 @@ describe('EmailService', () => {
 
     expect(error).toBeInstanceOf(EmailDeliveryError);
     expect((error as EmailDeliveryError).permanent).toBe(permanent);
+  });
+
+  it('el 403 validation_error (remitente sin dominio verificado) es permanente', async () => {
+    // Lo que responde Resend con `onboarding@resend.dev` a quien no es el dueño
+    // de la cuenta: reintentarlo no cambia nada.
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          name: 'validation_error',
+          message: 'You can only send testing emails to your own email address',
+        }),
+        { status: 403 },
+      ),
+    );
+
+    const error = await serviceWith(CONFIGURED)
+      .send(MESSAGE)
+      .catch((err: unknown) => err);
+
+    expect((error as EmailDeliveryError).permanent).toBe(true);
+  });
+
+  it('el 403 de API key inválida se reintenta: se arregla con un deploy', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          name: 'invalid_api_key',
+          message: 'API key is invalid',
+        }),
+        { status: 403 },
+      ),
+    );
+
+    const error = await serviceWith(CONFIGURED)
+      .send(MESSAGE)
+      .catch((err: unknown) => err);
+
+    expect((error as EmailDeliveryError).permanent).toBe(false);
+  });
+
+  it('RESEND_API_URL apunta el envío a otra URL (mock)', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ id: 'email-1' }), { status: 200 }),
+    );
+
+    await serviceWith({
+      ...CONFIGURED,
+      RESEND_API_URL: 'http://localhost:4010',
+    }).send(MESSAGE);
+
+    expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:4010/emails');
   });
 
   it('una falla de red se reintenta', async () => {

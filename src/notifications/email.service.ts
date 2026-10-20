@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-const RESEND_API_URL = 'https://api.resend.com';
+/** Por defecto; `RESEND_API_URL` lo pisa para apuntar a un mock. */
+const DEFAULT_RESEND_API_URL = 'https://api.resend.com';
 
 /** Tope por request: el job manda de a uno y no puede quedar colgado. */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -23,6 +24,11 @@ export interface EmailMessage {
  * Error de envío. `permanent` dice si reintentar tiene sentido: una dirección
  * inválida (400/422) va a fallar igual mañana, pero una caída de Resend, un 429
  * o una API key mal cargada (401/403) se arreglan solos o con un deploy.
+ *
+ * La excepción es el 403 `validation_error`: es el que da Resend cuando el
+ * remitente no tiene dominio verificado (`onboarding@resend.dev`) y el
+ * destinatario no es el dueño de la cuenta. Ese no se arregla reintentando, y
+ * si se tomara como transitorio el job lo repetiría en cada corrida.
  */
 export class EmailDeliveryError extends Error {
   constructor(
@@ -67,7 +73,9 @@ export class EmailService {
 
     let response: Response;
     try {
-      response = await fetch(`${RESEND_API_URL}/emails`, {
+      const baseUrl =
+        this.config.get<string>('RESEND_API_URL') ?? DEFAULT_RESEND_API_URL;
+      response = await fetch(`${baseUrl}/emails`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -96,11 +104,22 @@ export class EmailService {
       const detail = await response.text().catch(() => '');
       throw new EmailDeliveryError(
         `Resend respondió ${response.status}: ${detail.slice(0, 300)}`,
-        response.status === 400 || response.status === 422,
+        isPermanentFailure(response.status, detail),
       );
     }
 
     const body = (await response.json().catch(() => ({}))) as { id?: string };
     return body.id ?? '';
+  }
+}
+
+function isPermanentFailure(status: number, detail: string): boolean {
+  if (status === 400 || status === 422) return true;
+  if (status !== 403) return false;
+  try {
+    const body = JSON.parse(detail) as { name?: unknown };
+    return body.name === 'validation_error';
+  } catch {
+    return false;
   }
 }

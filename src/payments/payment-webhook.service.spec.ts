@@ -185,6 +185,14 @@ describe('PaymentWebhookService', () => {
     );
   });
 
+  it('no espera al mail para contestarle a MercadoPago', async () => {
+    notifications.sendConfirmation.mockReturnValue(new Promise(() => {}));
+
+    await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
+      'turno-confirmado',
+    );
+  });
+
   it('un webhook repetido no vuelve a mandar la confirmación', async () => {
     prisma.payment.updateMany.mockResolvedValue({ count: 0 });
 

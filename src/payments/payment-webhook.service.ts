@@ -279,10 +279,11 @@ export class PaymentWebhookService {
     });
 
     // Después del commit: el mail no puede salir por un turno que la
-    // transacción terminó no confirmando. Nunca tira, y si falla lo reintenta
-    // el job de recordatorios (ENG-68).
+    // transacción terminó no confirmando. Sin `await`: la respuesta a
+    // MercadoPago no espera a Resend (hasta 10 s de timeout). Nunca tira, y si
+    // falla lo reintenta el job de recordatorios (ENG-68).
     if (outcome === 'turno-confirmado') {
-      await this.notifications.sendConfirmation(payment.appointment_id, now);
+      void this.notifications.sendConfirmation(payment.appointment_id, now);
     }
     return outcome;
   }
