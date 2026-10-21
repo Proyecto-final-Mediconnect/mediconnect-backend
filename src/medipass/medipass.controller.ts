@@ -1,7 +1,8 @@
-import { Controller, Get, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, Req, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
+import { MediPassHistoryQueryDto } from './dto/medipass-history-query.dto';
 import { MediPassService } from './medipass.service';
 
 /**
@@ -38,5 +39,16 @@ export class MediPassController {
   getMyVitalBlock(@Req() req: Request) {
     const { userId } = requireAuth(req);
     return this.medipass.getMyVitalBlock(userId);
+  }
+
+  /**
+   * Quién abrió el MediPass, cuándo y qué miró (HU-38, ENG-76). Es la otra
+   * mitad del control: compartir el código sirve si después se puede ver qué
+   * se hizo con él.
+   */
+  @Get('me/historial')
+  getMyHistory(@Req() req: Request, @Query() query: MediPassHistoryQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.medipass.getMyHistory(userId, query.pagina);
   }
 }

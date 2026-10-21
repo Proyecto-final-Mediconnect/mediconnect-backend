@@ -6,6 +6,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  accessStatus,
+  resourceLabel,
+  type AccessStatus,
+} from './access-history';
 import { OpenEmergencySessionDto } from './dto/open-emergency-session.dto';
 import {
   CODE_ALPHABET,
@@ -39,6 +44,27 @@ export interface EmergencySessionStatusResponse {
   expiraEl: string;
   vital: VitalBlock;
 }
+
+/** Un acceso de un consultante al MediPass, con lo que miró (ENG-76). */
+export interface MediPassAccessView {
+  sesionId: string;
+  consultante: { nombre: string | null; matricula: string | null };
+  inicio: string;
+  vence: string;
+  revocadoEl: string | null;
+  estado: AccessStatus;
+  vistas: { recurso: string | null; etiqueta: string; el: string }[];
+}
+
+/** `GET /medipass/me/historial`: una página de accesos, del más reciente al más viejo. */
+export interface MediPassHistoryResponse {
+  accesos: MediPassAccessView[];
+  pagina: number;
+  hayMas: boolean;
+}
+
+/** Accesos por página del historial. */
+const HISTORY_PAGE_SIZE = 10;
 
 /** Forma de un UUID v4, para no pegarle a la base con cualquier cosa. */
 const UUID_PATTERN =
@@ -248,6 +274,71 @@ export class MediPassService {
     return {
       expiraEl: session.expires_at.toISOString(),
       vital: toVitalBlock(session.patient, ahora),
+    };
+  }
+
+  /**
+   * Historial de accesos al MediPass del paciente (HU-38, ENG-76): quién lo
+   * abrió, cuándo, si sigue abierto, si se cortó, y qué miró.
+   *
+   * Se agrupa por sesión y no se lista fila por fila de la bitácora: lo que el
+   * paciente necesita saber es "el Dr. X entró el martes", y las vistas de esa
+   * visita van adentro. Se pagina por sesión, de la más reciente a la más
+   * vieja; el `id` desempata dos sesiones abiertas en el mismo instante para
+   * que una página nunca repita ni saltee filas.
+   *
+   * Las lecturas de la historia clínica (`audit_logs`, `CLINICAL_RECORD_READ`)
+   * no van acá: son de ENG-165.
+   */
+  async getMyHistory(
+    patientId: string,
+    pagina = 1,
+    now: Date = new Date(),
+  ): Promise<MediPassHistoryResponse> {
+    await this.assertPatientExists(patientId);
+
+    // Uno de más para saber si hay otra página sin un COUNT aparte.
+    const rows = await this.prisma.mediPassSession.findMany({
+      where: { patient_id: patientId },
+      orderBy: [{ started_at: 'desc' }, { id: 'desc' }],
+      skip: (pagina - 1) * HISTORY_PAGE_SIZE,
+      take: HISTORY_PAGE_SIZE + 1,
+      select: {
+        id: true,
+        consultant_name: true,
+        consultant_license: true,
+        started_at: true,
+        expires_at: true,
+        revoked_at: true,
+        access_logs: {
+          // La bitácora es del paciente; el filtro lo repite por si alguna vez
+          // una sesión quedara mal asociada.
+          where: { patient_id: patientId },
+          orderBy: { accessed_at: 'asc' },
+          select: { resource_accessed: true, accessed_at: true },
+        },
+      },
+    });
+
+    return {
+      pagina,
+      hayMas: rows.length > HISTORY_PAGE_SIZE,
+      accesos: rows.slice(0, HISTORY_PAGE_SIZE).map((s) => ({
+        sesionId: s.id,
+        consultante: {
+          nombre: s.consultant_name,
+          matricula: s.consultant_license,
+        },
+        inicio: s.started_at.toISOString(),
+        vence: s.expires_at.toISOString(),
+        revocadoEl: s.revoked_at?.toISOString() ?? null,
+        estado: accessStatus(s, now),
+        vistas: s.access_logs.map((log) => ({
+          recurso: log.resource_accessed,
+          etiqueta: resourceLabel(log.resource_accessed),
+          el: log.accessed_at.toISOString(),
+        })),
+      })),
     };
   }
 
