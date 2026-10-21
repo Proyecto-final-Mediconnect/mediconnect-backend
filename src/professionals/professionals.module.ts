@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { CancellationPolicyService } from './cancellation-policy.service';
 import { ProfessionalsController } from './professionals.controller';
 import { ProfessionalsService } from './professionals.service';
 import { PublicProfessionalsController } from './public-professionals.controller';
@@ -14,6 +15,12 @@ import { SpecialtiesController } from './specialties.controller';
     SpecialtiesController,
     PublicProfessionalsController,
   ],
-  providers: [ProfessionalsService, PublicProfessionalsService],
+  providers: [
+    ProfessionalsService,
+    PublicProfessionalsService,
+    CancellationPolicyService,
+  ],
+  // ENG-65 (reembolsos) necesita la política para saber cuánto devolver.
+  exports: [CancellationPolicyService],
 })
 export class ProfessionalsModule {}
