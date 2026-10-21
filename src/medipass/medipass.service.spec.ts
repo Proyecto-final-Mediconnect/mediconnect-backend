@@ -5,7 +5,11 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { OpenEmergencySessionDto } from './dto/open-emergency-session.dto';
-import { CODE_ALPHABET, CODE_LENGTH } from './medipass.config';
+import {
+  CODE_ALPHABET,
+  CODE_LENGTH,
+  CODE_MAX_ATTEMPTS,
+} from './medipass.config';
 import { MediPassService } from './medipass.service';
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
@@ -318,6 +322,87 @@ describe('MediPassService', () => {
         NotFoundException,
       );
       expect(prisma.mediPassSession.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unicidad del código (ENG-170)', () => {
+    /** El `P2002` que devuelve Prisma cuando choca la unique de `code`. */
+    function colisionDeCodigo() {
+      return Object.assign(new Error('Unique constraint failed'), {
+        code: 'P2002',
+        meta: { target: ['code'] },
+      });
+    }
+
+    beforeEach(() => {
+      // Sin código vigente, así que `getMyCode` entra al camino de creación.
+      prisma.mediPassCode.findFirst.mockResolvedValue(null);
+      prisma.mediPassCode.create.mockImplementation(
+        ({ data }: { data: { code: string; expires_at: Date } }) =>
+          Promise.resolve({ code: data.code, expires_at: data.expires_at }),
+      );
+    });
+
+    it('reintenta con otro código cuando el sorteado ya existía', async () => {
+      // Antes de ENG-170 no había unique y el duplicado entraba: dos pacientes
+      // con el mismo código vigente hacían que el canje devolviera la ficha del
+      // paciente equivocado.
+      prisma.mediPassCode.create
+        .mockRejectedValueOnce(colisionDeCodigo())
+        .mockImplementationOnce(
+          ({ data }: { data: { code: string; expires_at: Date } }) =>
+            Promise.resolve({ code: data.code, expires_at: data.expires_at }),
+        );
+
+      const res = await service.getMyCode(PATIENT);
+
+      expect(prisma.mediPassCode.create).toHaveBeenCalledTimes(2);
+      expect(res.codigo).toHaveLength(CODE_LENGTH);
+    });
+
+    it('el reintento sortea un código distinto del que chocó', async () => {
+      // Reintentar con el mismo valor sería un bucle garantizado.
+      prisma.mediPassCode.create.mockRejectedValueOnce(colisionDeCodigo());
+
+      await service.getMyCode(PATIENT);
+
+      const primero = prisma.mediPassCode.create.mock.calls[0][0] as {
+        data: { code: string };
+      };
+      const segundo = prisma.mediPassCode.create.mock.calls[1][0] as {
+        data: { code: string };
+      };
+      expect(segundo.data.code).not.toBe(primero.data.code);
+    });
+
+    it('no reintenta para siempre', async () => {
+      prisma.mediPassCode.create.mockRejectedValue(colisionDeCodigo());
+
+      await expect(service.getMyCode(PATIENT)).rejects.toThrow();
+      expect(prisma.mediPassCode.create).toHaveBeenCalledTimes(
+        CODE_MAX_ATTEMPTS,
+      );
+    });
+
+    it('una unique de otra columna NO se reintenta', async () => {
+      // Reintentar con un código nuevo no arreglaría una colisión en otra
+      // columna: solo la escondería detrás de tres intentos.
+      prisma.mediPassCode.create.mockRejectedValue(
+        Object.assign(new Error('Unique constraint failed'), {
+          code: 'P2002',
+          meta: { target: ['patient_id'] },
+        }),
+      );
+
+      await expect(service.getMyCode(PATIENT)).rejects.toThrow();
+      expect(prisma.mediPassCode.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('un error que no es de unicidad sale en el primer intento', async () => {
+      prisma.mediPassCode.create.mockRejectedValue(new Error('base caída'));
+
+      await expect(service.getMyCode(PATIENT)).rejects.toThrow('base caída');
+      expect(prisma.mediPassCode.create).toHaveBeenCalledTimes(1);
     });
   });
 });
