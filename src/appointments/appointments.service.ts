@@ -130,6 +130,9 @@ export interface AppointmentView {
   status: string;
   professional: AppointmentParty | null;
   patient: AppointmentParty | null;
+  /** Cuándo se reservó y cuándo se canceló (ISO-8601), para la historia del turno. */
+  createdAt: string | null;
+  cancelledAt: string | null;
 }
 
 /** Fila cruda de `appointments` tal como la devuelve PostgREST. */
@@ -142,10 +145,12 @@ interface AppointmentRow {
   // PostgREST devuelve `numeric` como string; se normaliza a number al salir.
   price: string | number;
   status: string;
+  created_at?: string | null;
+  cancelled_at?: string | null;
 }
 
 const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status';
+  'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status, created_at, cancelled_at';
 
 @Injectable()
 export class AppointmentsService {
@@ -440,6 +445,8 @@ export class AppointmentsService {
           // decimales que un `Number` intermedio podría redondear.
           price: updated.price.toString(),
           status: updated.status,
+          created_at: updated.created_at.toISOString(),
+          cancelled_at: updated.cancelled_at?.toISOString() ?? null,
         },
       ]);
       // Después del update, no antes: si la cancelación falla, el link tiene
@@ -751,9 +758,16 @@ export class AppointmentsService {
         status: row.status,
         professional: professionalById.get(row.professional_id) ?? null,
         patient: patientById.get(row.patient_id) ?? null,
+        createdAt: isoOrNull(row.created_at),
+        cancelledAt: isoOrNull(row.cancelled_at),
       };
     });
   }
+}
+
+/** PostgREST manda `timestamptz` con offset (`+00:00`); se normaliza a ISO en UTC. */
+function isoOrNull(value: string | null | undefined): string | null {
+  return value ? new Date(value).toISOString() : null;
 }
 
 /**
