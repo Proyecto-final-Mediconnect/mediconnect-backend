@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { SkipLegal } from '../legal/skip-legal.decorator';
+import { CanjeGlobalThrottle } from './canje-global-throttle.decorator';
 import { OpenEmergencySessionDto } from './dto/open-emergency-session.dto';
 import { MediPassService } from './medipass.service';
 
@@ -21,9 +22,10 @@ import { MediPassService } from './medipass.service';
  * plataforma; la autorización es el código, que vale cinco minutos.
  *
  * Eso las convierte en la superficie de ataque más expuesta del proyecto, y por
- * eso: el rate limit es más duro que el default, el código se valida y se
- * normaliza del lado del servidor aunque la web ya lo haga, y todo rechazo del
- * código contesta lo mismo (ver `CODIGO_INVALIDO`).
+ * eso: el canje lleva un rate limit más duro que el default **y** un techo
+ * global (ENG-170), el código se valida y se normaliza del lado del servidor
+ * aunque la web ya lo haga, y todo rechazo del código contesta lo mismo (ver
+ * `CODIGO_INVALIDO`).
  *
  * `@SkipLegal()` es declarativo, como en `CatalogController`: sin
  * `JwtAuthGuard` no hay usuario y no hay consentimiento que chequear. Se marca
@@ -38,15 +40,26 @@ export class MediPassSessionsController {
   /**
    * Canjea el código y abre el acceso.
    *
-   * 10 por minuto por IP real del cliente (ENG-84 da la IP correcta detrás de
-   * Cloudflare). El número sale de los dos lados del problema: una guardia
+   * **Dos límites, y hacen falta los dos.**
+   *
+   * 10 por minuto **por IP** real del cliente (ENG-84 da la IP correcta detrás
+   * de Cloudflare). El número sale de los dos lados del problema: una guardia
    * entera detrás de un NAT tiene que poder abrir varias fichas seguidas, y al
    * mismo tiempo 10 intentos por minuto no acercan a nadie a adivinar un código
    * de 28^8 combinaciones que además rota cada cinco minutos. La web traduce el
    * 429 a "Demasiados intentos. Esperá un minuto y probá de nuevo".
+   *
+   * Y `@CanjeGlobalThrottle()`, el techo global (ENG-170, hallazgo 2 de
+   * ENG-105). El límite por IP no frena el ataque que importa: un atacante no
+   * quiere la ficha de alguien en particular sino *una* de cualquiera, así que
+   * reparte los intentos entre muchas IPs y nunca alcanza el límite de ninguna.
+   * Con una botnet de 10.000 IPs son 100.000 intentos por minuto y el 50 % de
+   * probabilidad de sacar una ficha al azar en 1,8 días. Ver
+   * `CANJE_GLOBAL_LIMIT` para el número y el tradeoff.
    */
   @Post()
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @CanjeGlobalThrottle()
   @HttpCode(HttpStatus.CREATED)
   open(@Body() dto: OpenEmergencySessionDto) {
     return this.medipass.openSession(dto);

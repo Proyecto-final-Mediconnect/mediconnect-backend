@@ -12,6 +12,7 @@ import { OpenEmergencySessionDto } from './dto/open-emergency-session.dto';
 import {
   CODE_ALPHABET,
   CODE_LENGTH,
+  CODE_MAX_ATTEMPTS,
   CODE_TTL_MS,
   CODIGO_INVALIDO,
   SESSION_TTL_MS,
@@ -105,28 +106,67 @@ export class MediPassService {
       };
     }
 
-    const creado = await this.prisma.$transaction(async (tx) => {
-      // Vencer lo que quedara vigente antes de insertar: si otra request ganó
-      // la carrera, su código queda cortado acá y sobrevive uno solo.
-      await tx.mediPassCode.updateMany({
-        where: { patient_id: patientId, expires_at: { gt: ahora } },
-        data: { expires_at: ahora },
-      });
-
-      return tx.mediPassCode.create({
-        data: {
-          patient_id: patientId,
-          code: this.generarCodigo(),
-          expires_at: new Date(ahora.getTime() + CODE_TTL_MS),
-        },
-        select: { code: true, expires_at: true },
-      });
-    });
+    const creado = await this.crearCodigo(patientId, ahora);
 
     return {
       codigo: creado.code,
       expiraEl: creado.expires_at.toISOString(),
     };
+  }
+
+  /**
+   * Inserta el código nuevo, reintentando si el sorteo cayó en uno que ya existe.
+   *
+   * Desde ENG-170 `medipass_codes.code` es único (hallazgo 1 de ENG-105): antes,
+   * dos pacientes con el mismo código vigente hacían que el canje resolviera a
+   * uno de los dos y el consultante recibiera la ficha del paciente equivocado,
+   * sin ninguna señal. Ahora la base lo rechaza con `P2002` y el reintento
+   * sortea otro.
+   *
+   * Es el mismo patrón que `ClinicalRecordsService.append` ante una colisión de
+   * `sequence_number`: la operación es válida, solo le tocó otro valor.
+   */
+  private async crearCodigo(
+    patientId: string,
+    ahora: Date,
+  ): Promise<{ code: string; expires_at: Date }> {
+    for (let intento = 1; intento <= CODE_MAX_ATTEMPTS; intento += 1) {
+      try {
+        return await this.prisma.$transaction(async (tx) => {
+          // Vencer lo que quedara vigente antes de insertar: si otra request
+          // ganó la carrera, su código queda cortado acá y sobrevive uno solo.
+          await tx.mediPassCode.updateMany({
+            where: { patient_id: patientId, expires_at: { gt: ahora } },
+            data: { expires_at: ahora },
+          });
+
+          return tx.mediPassCode.create({
+            data: {
+              patient_id: patientId,
+              code: this.generarCodigo(),
+              expires_at: new Date(ahora.getTime() + CODE_TTL_MS),
+            },
+            select: { code: true, expires_at: true },
+          });
+        });
+      } catch (error) {
+        if (!esCodigoRepetido(error) || intento === CODE_MAX_ATTEMPTS)
+          throw error;
+
+        // Con 28^8 combinaciones esto no debería verse nunca. Si aparece en los
+        // logs con alguna frecuencia, el generador está mal, no hubo mala
+        // suerte: vale la pena que quede como warning y no en silencio.
+        this.logger.warn(
+          `Colisión al generar el código MediPass del paciente ${patientId} (intento ${intento}/${CODE_MAX_ATTEMPTS})`,
+        );
+      }
+    }
+
+    // Inalcanzable: la última vuelta del loop relanza. Está por el tipo de
+    // retorno, que TypeScript no puede inferir del `for`.
+    throw new InternalServerErrorException(
+      'No pudimos generar tu código. Probá de nuevo en unos segundos.',
+    );
   }
 
   /** El bloque vital del propio paciente, que es lo que ve en su pantalla. */
@@ -452,4 +492,23 @@ export class MediPassService {
     }
     return codigo;
   }
+}
+
+/**
+ * `P2002` de Prisma sobre la unique de `code` (ENG-170).
+ *
+ * Se mira el `target` y no solo el código de error: `medipass_codes` podría
+ * tener otra unique alguna vez, y reintentar con un código nuevo no arreglaría
+ * una colisión en otra columna —solo la escondería detrás de tres intentos.
+ */
+function esCodigoRepetido(error: unknown): boolean {
+  if ((error as { code?: string }).code !== 'P2002') return false;
+
+  const target = (error as { meta?: { target?: unknown } }).meta?.target;
+  if (Array.isArray(target)) return target.includes('code');
+  if (typeof target === 'string') return target.includes('code');
+
+  // Sin `meta.target` no se puede saber qué unique fue. Se trata como la de
+  // `code`, que hoy es la única de la tabla.
+  return true;
 }

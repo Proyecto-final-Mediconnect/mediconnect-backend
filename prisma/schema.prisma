@@ -634,11 +634,20 @@ model PushToken {
 // EP-09 — MediPass
 // ===========================================================================
 
-/// Código rotatorio de un solo uso, vigente 5 minutos.
+/// Código rotatorio del MediPass, vigente 5 minutos.
+///
+/// **No es de un solo uso**, a diferencia de lo que decía este comentario hasta
+/// ENG-170: cada canje abre su propia sesión y el código sigue sirviendo hasta
+/// que rota (ver `MediPassService.openSession`). Es deliberado —un médico que
+/// recarga la página no puede quedar afuera, y en una guardia puede haber más de
+/// uno mirando— y es lo que hace posible revocar un acceso sin cortar los otros.
+/// `used_at` guarda cuándo se usó por primera vez, no es una traba.
 model MediPassCode {
   id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   patient_id String    @db.Uuid
-  code       String    @db.VarChar(8)
+  /// Único por ENG-170: dos códigos vigentes iguales le entregaban al consultante
+  /// la ficha del paciente equivocado. La generación reintenta ante `P2002`.
+  code       String    @unique @db.VarChar(8)
   expires_at DateTime  @db.Timestamptz(6)
   used_at    DateTime? @db.Timestamptz(6)
   created_at DateTime  @default(now()) @db.Timestamptz(6)
