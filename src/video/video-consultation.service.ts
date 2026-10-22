@@ -11,8 +11,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   DEFAULT_RECORDING_MODE,
-  JOINABLE_STATUSES,
   JOIN_OPENS_MINUTES_BEFORE,
+  isJoinableStatus,
   joinWindowFor,
   type RecordingMode,
 } from './consultation.config';
@@ -67,10 +67,11 @@ interface AppointmentRow {
   scheduled_at: string;
   duration_minutes: number;
   status: string;
+  created_at: string;
 }
 
 const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, scheduled_at, duration_minutes, status';
+  'id, patient_id, professional_id, scheduled_at, duration_minutes, status, created_at';
 
 @Injectable()
 export class VideoConsultationService {
@@ -187,10 +188,13 @@ export class VideoConsultationService {
   /** Estado y ventana horaria. Los mensajes son los que ve el usuario. */
   private assertJoinable(appointment: AppointmentRow, now: Date): void {
     if (
-      !JOINABLE_STATUSES.includes(
-        appointment.status as (typeof JOINABLE_STATUSES)[number],
-      )
+      !isJoinableStatus(appointment.status, new Date(appointment.created_at))
     ) {
+      // El impago tiene salida (pagar), así que el mensaje es otro: es el que
+      // muestran la web y la app.
+      if (appointment.status === 'RESERVADO_SIN_PAGAR') {
+        throw new ConflictException('Pagá el turno para entrar a la consulta.');
+      }
       throw new ConflictException(
         'Ese turno ya no está activo, así que no tiene videoconsulta.',
       );
