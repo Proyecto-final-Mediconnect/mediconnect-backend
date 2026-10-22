@@ -43,6 +43,7 @@ describe('MediPass (e2e)', () => {
   const codeUpdate = jest.fn();
   const sessionCreate = jest.fn();
   const sessionFindUnique = jest.fn();
+  const sessionFindMany = jest.fn();
   const accessLogCreate = jest.fn();
 
   beforeAll(async () => {
@@ -58,6 +59,7 @@ describe('MediPass (e2e)', () => {
       codeUpdate,
       sessionCreate,
       sessionFindUnique,
+      sessionFindMany,
       accessLogCreate,
     ].forEach((fn) => fn.mockReset());
 
@@ -78,6 +80,7 @@ describe('MediPass (e2e)', () => {
       mediPassSession: {
         create: sessionCreate,
         findUnique: sessionFindUnique,
+        findMany: sessionFindMany,
       },
       mediPassAccessLog: { create: accessLogCreate },
       $transaction: (fn: (tx: unknown) => unknown) => fn(prismaMock),
@@ -183,6 +186,69 @@ describe('MediPass (e2e)', () => {
           expect(res.body.grupoSanguineo).toBeNull();
           expect(res.body.contacto).toBeNull();
         });
+    });
+  });
+
+  describe('GET /medipass/me/historial (ENG-76)', () => {
+    it('sin token no devuelve nada', async () => {
+      await request(app.getHttpServer())
+        .get('/medipass/me/historial')
+        .expect(401);
+      expect(sessionFindMany).not.toHaveBeenCalled();
+    });
+
+    it('devuelve los accesos del propio paciente con la forma del contrato', async () => {
+      const inicio = new Date('2026-10-18T14:00:00.000Z');
+      sessionFindMany.mockResolvedValue([
+        {
+          id: SESSION_ID,
+          consultant_name: 'Dra. Paula Ferrer',
+          consultant_license: 'MP-12345',
+          started_at: inicio,
+          expires_at: new Date(inicio.getTime() + 30 * 60_000),
+          revoked_at: null,
+          access_logs: [
+            { resource_accessed: 'medipass.vital', accessed_at: inicio },
+          ],
+        },
+      ]);
+      const token = await signToken();
+
+      await request(app.getHttpServer())
+        .get('/medipass/me/historial')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200)
+        .expect((res) => {
+          expect(res.body).toMatchObject({
+            pagina: 1,
+            hayMas: false,
+            accesos: [
+              {
+                sesionId: SESSION_ID,
+                consultante: {
+                  nombre: 'Dra. Paula Ferrer',
+                  matricula: 'MP-12345',
+                },
+                estado: 'VENCIDO',
+                vistas: [{ recurso: 'medipass.vital' }],
+              },
+            ],
+          });
+        });
+      // El filtro por paciente sale del token, no de la URL.
+      expect(sessionFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { patient_id: SUB } }),
+      );
+    });
+
+    it('una página inválida es 400 y no llega a la base', async () => {
+      const token = await signToken();
+
+      await request(app.getHttpServer())
+        .get('/medipass/me/historial?pagina=0')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+      expect(sessionFindMany).not.toHaveBeenCalled();
     });
   });
 

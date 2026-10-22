@@ -338,6 +338,122 @@ describe('MediPassService', () => {
     });
   });
 
+  describe('getMyHistory (ENG-76)', () => {
+    const NOW = new Date('2026-10-21T15:00:00.000Z');
+    const inicio = new Date('2026-10-18T14:00:00.000Z');
+
+    /** Una sesión como la devuelve Prisma, con sus accesos. */
+    const sesion = (over: Record<string, unknown> = {}) => ({
+      id: SESSION,
+      consultant_name: 'Dra. Paula Ferrer',
+      consultant_license: 'MP-12345',
+      started_at: inicio,
+      expires_at: new Date(inicio.getTime() + 30 * 60_000),
+      revoked_at: null,
+      access_logs: [
+        { resource_accessed: 'medipass.vital', accessed_at: inicio },
+        {
+          resource_accessed: 'alergias',
+          accessed_at: new Date(inicio.getTime() + 60_000),
+        },
+      ],
+      ...over,
+    });
+
+    it('devuelve quién entró, cuándo y qué miró', async () => {
+      prisma.mediPassSession.findMany.mockResolvedValue([sesion()]);
+
+      const res = await service.getMyHistory(PATIENT, 1, NOW);
+
+      expect(res).toEqual({
+        pagina: 1,
+        hayMas: false,
+        accesos: [
+          {
+            sesionId: SESSION,
+            consultante: { nombre: 'Dra. Paula Ferrer', matricula: 'MP-12345' },
+            inicio: inicio.toISOString(),
+            vence: '2026-10-18T14:30:00.000Z',
+            revocadoEl: null,
+            estado: 'VENCIDO',
+            vistas: [
+              {
+                recurso: 'medipass.vital',
+                etiqueta:
+                  'Información vital: alergias, medicación, condiciones y contacto de emergencia',
+                el: inicio.toISOString(),
+              },
+              {
+                recurso: 'alergias',
+                etiqueta: 'Alergias',
+                el: '2026-10-18T14:01:00.000Z',
+              },
+            ],
+          },
+        ],
+      });
+    });
+
+    it('solo lee sesiones y bitácora del propio paciente', async () => {
+      await service.getMyHistory(PATIENT, 1, NOW);
+
+      expect(prisma.mediPassSession.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { patient_id: PATIENT },
+          select: expect.objectContaining({
+            access_logs: expect.objectContaining({
+              where: { patient_id: PATIENT },
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('pagina de a 10, de la más reciente a la más vieja, sin repetir ni saltear', async () => {
+      await service.getMyHistory(PATIENT, 3, NOW);
+
+      expect(prisma.mediPassSession.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderBy: [{ started_at: 'desc' }, { id: 'desc' }],
+          skip: 20,
+          take: 11,
+        }),
+      );
+    });
+
+    it('avisa si hay otra página sin devolver la fila de más', async () => {
+      prisma.mediPassSession.findMany.mockResolvedValue(
+        Array.from({ length: 11 }, (_, i) => sesion({ id: `s-${i}` })),
+      );
+
+      const res = await service.getMyHistory(PATIENT, 1, NOW);
+
+      expect(res.hayMas).toBe(true);
+      expect(res.accesos).toHaveLength(10);
+    });
+
+    it('una sesión revocada se cuenta como revocada', async () => {
+      const revocada = new Date(inicio.getTime() + 5 * 60_000);
+      prisma.mediPassSession.findMany.mockResolvedValue([
+        sesion({ revoked_at: revocada }),
+      ]);
+
+      const [acceso] = (await service.getMyHistory(PATIENT, 1, NOW)).accesos;
+
+      expect(acceso.estado).toBe('REVOCADO');
+      expect(acceso.revocadoEl).toBe(revocada.toISOString());
+    });
+
+    it('sin perfil cargado avisa qué hacer', async () => {
+      prisma.patient.findUnique.mockResolvedValue(null);
+
+      await expect(service.getMyHistory(PATIENT, 1, NOW)).rejects.toThrow(
+        ConflictException,
+      );
+      expect(prisma.mediPassSession.findMany).not.toHaveBeenCalled();
+    });
+  });
+
   describe('unicidad del código (ENG-170)', () => {
     /** El `P2002` que devuelve Prisma cuando choca la unique de `code`. */
     function colisionDeCodigo() {
