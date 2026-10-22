@@ -18,6 +18,11 @@ import {
   SESSION_TTL_MS,
 } from './medipass.config';
 import {
+  ACCESS_SELECT,
+  toMediPassAccess,
+  type MediPassAccess,
+} from './medipass-access';
+import {
   toVitalBlock,
   VITAL_SELECT,
   type PatientVitalSource,
@@ -293,6 +298,157 @@ export class MediPassService {
       expiraEl: session.expires_at.toISOString(),
       vital: toVitalBlock(session.patient, ahora),
     };
+  }
+
+  /**
+   * Los accesos abiertos ahora mismo sobre el MediPass del paciente (HU-35,
+   * ENG-74).
+   *
+   * Es la mitad visible de lo que el MediPass promete: sin esta lista, el
+   * paciente puede tener un acceso abierto y no saberlo, y el control sobre su
+   * información clínica queda escrito en el diseño y en ningún otro lado. La
+   * otra mitad es `revokeAccess`.
+   *
+   * ## El vencimiento se filtra acá, no en la base
+   *
+   * `expires_at: { gt: ahora }` contra el reloj del servidor, igual que
+   * `getSessionStatus` y por el mismo motivo que ENG-101: ninguna lectura
+   * devuelve una sesión vencida aunque el job de ENG-104 todavía no la haya
+   * marcado. Si se confiara en una columna materializada, un job atrasado le
+   * mostraría al paciente accesos abiertos que en realidad ya se cerraron —y,
+   * peor, le dejaría "cortar" accesos que no existen.
+   *
+   * Ordenados por vencimiento ascendente: primero el que se cierra antes. Es el
+   * orden que pide el ticket.
+   */
+  async listMyAccesses(patientId: string): Promise<MediPassAccess[]> {
+    await this.assertPatientExists(patientId);
+
+    const ahora = new Date();
+    const sessions = await this.prisma.mediPassSession.findMany({
+      where: {
+        patient_id: patientId,
+        revoked_at: null,
+        expires_at: { gt: ahora },
+      },
+      orderBy: { expires_at: 'asc' },
+      select: ACCESS_SELECT,
+    });
+
+    return sessions.map((session) => toMediPassAccess(session, ahora));
+  }
+
+  /**
+   * El paciente corta un acceso (HU-36, ENG-75).
+   *
+   * Es **la** propiedad que el proyecto promete sobre el MediPass y la que hay
+   * que poder demostrar en vivo: a partir de acá, el siguiente
+   * `GET /medipass/sessions/:id` de esa sesión devuelve 410 y la ficha de
+   * emergencia se cierra en el próximo poll. No hace falta ningún job: el 410
+   * ya sale de `revoked_at` en `getSessionStatus`.
+   *
+   * Cortar un acceso **no corta los demás**, y eso es consecuencia directa de
+   * que cada canje del código abra su propia sesión (ver `openSession`): en una
+   * guardia con dos médicos mirando, el paciente le saca el acceso a uno sin
+   * dejar al otro afuera.
+   *
+   * ## Por qué es idempotente y no da error si ya estaba cerrado
+   *
+   * Un acceso ya revocado, o que venció solo mientras el paciente apretaba el
+   * botón, termina en el mismo estado que se pedía: cerrado. Devolver un error
+   * ahí sería decirle al paciente que algo falló cuando el resultado es
+   * exactamente el que quería, y un doble click no puede verse como una falla.
+   * Lo que sí devuelve 404 es la sesión de otro paciente, con el mismo criterio
+   * que `CODIGO_INVALIDO`: distinguirla de una inexistente diría si ese id
+   * existe.
+   *
+   * ## Por qué la auditoría va en la misma transacción
+   *
+   * La revocación y su registro en `audit_logs` son un solo hecho. Si el log
+   * fallara y la revocación quedara igual, el paciente vería "acceso cortado"
+   * sin que haya quedado constancia de cuándo lo cortó, que es justo lo que
+   * tendría que poder probar después. Y si se escribiera el log sin revocar,
+   * sería una constancia falsa. Juntas en una transacción, un fallo devuelve
+   * 500 y el paciente sabe que tiene que reintentar: de los tres resultados
+   * posibles, el único inaceptable es que crea que cortó un acceso que sigue
+   * abierto.
+   */
+  async revokeAccess(patientId: string, sessionId: string): Promise<void> {
+    const session = await this.prisma.mediPassSession.findUnique({
+      where: { id: sessionId },
+      select: {
+        patient_id: true,
+        revoked_at: true,
+        expires_at: true,
+        consultant_name: true,
+        consultant_license: true,
+      },
+    });
+
+    if (!session || session.patient_id !== patientId) {
+      throw new NotFoundException('Ese acceso no existe.');
+    }
+
+    const ahora = new Date();
+    const yaCerrado =
+      session.revoked_at !== null ||
+      session.expires_at.getTime() <= ahora.getTime();
+
+    // Ya estaba cerrado: nada que revocar y nada que auditar. El paciente no
+    // cortó este acceso —se cerró solo— y marcarlo como revocado falsearía el
+    // historial de accesos que ENG-76 le va a mostrar.
+    if (yaCerrado) return;
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // `updateMany` con el estado esperado en el `where`, y no `update` por
+        // id: si el job de ENG-104 o otra pestaña ganaron la carrera entre la
+        // lectura de arriba y esto, `count` vuelve en 0 y no se escribe el log
+        // de una revocación que no ocurrió.
+        const { count } = await tx.mediPassSession.updateMany({
+          where: {
+            id: sessionId,
+            patient_id: patientId,
+            revoked_at: null,
+            expires_at: { gt: ahora },
+          },
+          data: { revoked_at: ahora, revoked_by: patientId },
+        });
+
+        if (count === 0) return;
+
+        await tx.auditLog.create({
+          data: {
+            actor_id: patientId,
+            action: 'MEDIPASS_ACCESS_REVOKED',
+            resource_type: 'medipass_sessions',
+            resource_id: sessionId,
+            metadata: {
+              // Quién era, congelado en el log: la sesión se puede borrar alguna
+              // vez por retención, y entonces el log sería el único lugar donde
+              // dice a quién se le cortó el acceso.
+              consultante: session.consultant_name,
+              matricula: session.consultant_license,
+              // Cuánto le quedaba. Es el dato que distingue "le corté el acceso
+              // enseguida" de "lo dejé casi hasta el final".
+              minutosRestantes: Math.max(
+                0,
+                Math.ceil(
+                  (session.expires_at.getTime() - ahora.getTime()) / 60_000,
+                ),
+              ),
+            },
+          },
+        });
+      });
+    } catch (error) {
+      this.logger.error(
+        `No se pudo revocar el acceso ${sessionId} del paciente ${patientId}: ${String(error)}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos cortar el acceso. Probá de nuevo en unos segundos.',
+      );
+    }
   }
 
   /**
