@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { AppointmentPaymentService } from '../payments/appointment-payment.service';
+import { CancellationRefundService } from '../payments/cancellation-refund.service';
 import { UnpaidReleaseService } from './unpaid-release.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -68,6 +69,7 @@ describe('AppointmentsService', () => {
   let payments: { expireCheckout: jest.Mock };
   let unpaidRelease: { releaseExpired: jest.Mock };
   let inApp: { notifyProfessional: jest.Mock };
+  let refunds: { refundCancellation: jest.Mock; quote: jest.Mock };
   let prisma: {
     professional: { findFirst: jest.Mock; findMany: jest.Mock };
     patient: { findMany: jest.Mock };
@@ -134,12 +136,23 @@ describe('AppointmentsService', () => {
     payments = { expireCheckout: jest.fn().mockResolvedValue(undefined) };
     unpaidRelease = { releaseExpired: jest.fn().mockResolvedValue([]) };
     inApp = { notifyProfessional: jest.fn().mockResolvedValue(undefined) };
+    refunds = {
+      refundCancellation: jest.fn().mockResolvedValue({
+        percent: 100,
+        amount: 15000,
+        status: 'PROCESADO',
+      }),
+      quote: jest
+        .fn()
+        .mockResolvedValue({ percent: 50, amount: 7500, status: null }),
+    };
     service = new AppointmentsService(
       prisma as unknown as PrismaService,
       makeSupabaseMock(),
       payments as unknown as AppointmentPaymentService,
       unpaidRelease as unknown as UnpaidReleaseService,
       inApp as unknown as InAppNotificationsService,
+      refunds as unknown as CancellationRefundService,
     );
   });
 
@@ -602,6 +615,43 @@ describe('AppointmentsService', () => {
       expect(inApp.notifyProfessional).not.toHaveBeenCalled();
     });
 
+    it('reembolsa un turno confirmado y devuelve lo reembolsado (ENG-65)', async () => {
+      results = [
+        { data: { ...INSERTED_ROW, status: 'CONFIRMADO' }, error: null },
+      ];
+
+      const view = await cancel();
+
+      expect(refunds.refundCancellation).toHaveBeenCalledWith(
+        APPOINTMENT_ID,
+        NOW,
+      );
+      expect(view.refund).toEqual({
+        percent: 100,
+        amount: 15000,
+        status: 'PROCESADO',
+      });
+    });
+
+    it('una reserva sin pagar no tiene nada que reembolsar', async () => {
+      results = [READ_OK];
+
+      const view = await cancel();
+
+      expect(refunds.refundCancellation).not.toHaveBeenCalled();
+      expect(view.refund).toEqual({ percent: 0, amount: 0, status: null });
+    });
+
+    it('si la cancelación falla, no reembolsa nada', async () => {
+      results = [
+        { data: { ...INSERTED_ROW, status: 'CONFIRMADO' }, error: null },
+      ];
+      prisma.appointment.update.mockRejectedValue({ code: 'P2025' });
+
+      await expect(cancel()).rejects.toBeInstanceOf(ConflictException);
+      expect(refunds.refundCancellation).not.toHaveBeenCalled();
+    });
+
     it('un turno que RLS no devuelve es un 404, no un 403', async () => {
       results = [{ data: null, error: null }];
 
@@ -669,6 +719,42 @@ describe('AppointmentsService', () => {
       await expect(cancel()).rejects.toBeInstanceOf(
         InternalServerErrorException,
       );
+    });
+  });
+  describe('cancellationQuote', () => {
+    const APPOINTMENT_ID = INSERTED_ROW.id;
+    const quote = (userId = PATIENT_ID) =>
+      service.cancellationQuote(TOKEN, userId, APPOINTMENT_ID, NOW);
+
+    it('cotiza el reembolso de un turno confirmado sin cancelarlo', async () => {
+      results = [
+        { data: { ...INSERTED_ROW, status: 'CONFIRMADO' }, error: null },
+      ];
+
+      await expect(quote()).resolves.toEqual({
+        percent: 50,
+        amount: 7500,
+        status: null,
+      });
+      expect(refunds.quote).toHaveBeenCalledWith(APPOINTMENT_ID, NOW);
+      expect(prisma.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('una reserva sin pagar cotiza 0', async () => {
+      results = [{ data: INSERTED_ROW, error: null }];
+
+      await expect(quote()).resolves.toEqual({
+        percent: 0,
+        amount: 0,
+        status: null,
+      });
+      expect(refunds.quote).not.toHaveBeenCalled();
+    });
+
+    it('el profesional no puede cotizar la cancelación', async () => {
+      results = [{ data: INSERTED_ROW, error: null }];
+
+      await expect(quote(PRO_ID)).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 });

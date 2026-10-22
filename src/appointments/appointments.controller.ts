@@ -60,6 +60,19 @@ export class AppointmentsController {
    * (`appointments.cancellation_reason`) no se expone todavía — el criterio de
    * aceptación no lo pide y con `forbidNonWhitelisted` mandarlo daría 400.
    */
+  /**
+   * Cuánto se devolvería si el paciente cancela ahora (ENG-65), para mostrarlo
+   * antes de confirmar. No cancela nada.
+   */
+  @Get(':id/cancellation-quote')
+  cancellationQuote(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.appointments.cancellationQuote(accessToken, userId, id);
+  }
+
   @Patch(':id/cancel')
   cancel(
     @Req() req: Request,

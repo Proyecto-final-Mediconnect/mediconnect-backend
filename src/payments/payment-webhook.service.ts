@@ -40,7 +40,11 @@ export type WebhookOutcome =
   | 'turno-no-confirmable'
   | 'pago-rechazado'
   | 'pago-pendiente'
+  | 'pago-reembolsado'
   | 'estado-no-manejado';
+
+/** Estado de MercadoPago de un pago devuelto entero (ENG-65). */
+const REFUNDED_STATUS = 'refunded';
 
 /** Estados de MercadoPago que significan "este intento no cobró". */
 const REJECTED_STATUSES = ['rejected', 'cancelled'];
@@ -221,8 +225,20 @@ export class PaymentWebhookService {
       return 'pago-pendiente';
     }
 
-    // `refunded` y `charged_back` son de ENG-65 (reembolsos). Quedan en la
-    // bitácora y en el log hasta que ese flujo exista.
+    if (mpPayment.status === REFUNDED_STATUS) {
+      // Llega después de un reembolso total (ENG-65). Normalmente
+      // `CancellationRefundService` ya dejó el pago REEMBOLSADO y esto no
+      // cambia nada; cubre el caso en que la respuesta de MercadoPago se
+      // perdió, o el reembolso se hizo a mano desde su panel.
+      await this.prisma.payment.updateMany({
+        where: { id: payment.id, status: 'APROBADO' },
+        data: { status: 'REEMBOLSADO' },
+      });
+      return 'pago-reembolsado';
+    }
+
+    // `charged_back` (contracargo) no tiene flujo: queda en la bitácora y en el
+    // log para resolverlo a mano.
     this.logger.warn(
       `Estado de MercadoPago no manejado: ${mpPayment.status} (payment_id=${mpPayment.id}).`,
     );
