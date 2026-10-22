@@ -10,6 +10,7 @@ import {
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UpdatePatientProfileDto } from './dto/update-patient-profile.dto';
+import { UpdateVitalInfoDto } from './dto/update-vital-info.dto';
 import { PatientsService } from './patients.service';
 
 /** JwtAuthGuard garantiza `user` y `accessToken`; este helper lo hace explícito
@@ -41,5 +42,25 @@ export class PatientsController {
   updateMyProfile(@Req() req: Request, @Body() dto: UpdatePatientProfileDto) {
     const { userId, accessToken } = requireAuth(req);
     return this.patients.updateMyProfile(accessToken, userId, dto);
+  }
+
+  /**
+   * Los datos vitales del MediPass (ENG-134; los carga ENG-136).
+   *
+   * Endpoint aparte y no parte de `PUT me` porque las reglas son distintas: los
+   * cinco campos del perfil son obligatorios y crean la fila, y estos seis son
+   * opcionales y la suponen. Mezclarlos en un PUT dejaría un cuerpo con dos
+   * contratos adentro, y obligaría a tocar el formulario de ENG-47.
+   *
+   * `PUT` y no `PATCH`: reemplaza el bloque entero, que es lo que permite
+   * borrar una alergia. Ver `UpdateVitalInfoDto`.
+   *
+   * Devuelve el perfil completo, igual que `PUT me`, para que la pantalla se
+   * quede con lo que quedó guardado sin pedirlo de nuevo.
+   */
+  @Put('me/vital')
+  updateMyVitalInfo(@Req() req: Request, @Body() dto: UpdateVitalInfoDto) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.patients.updateMyVitalInfo(accessToken, userId, dto);
   }
 }

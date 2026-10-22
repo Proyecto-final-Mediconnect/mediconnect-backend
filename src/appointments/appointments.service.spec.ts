@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { AppointmentPaymentService } from '../payments/appointment-payment.service';
 import { UnpaidReleaseService } from './unpaid-release.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { toInstant } from '../common/time/argentina-time';
@@ -66,6 +67,7 @@ describe('AppointmentsService', () => {
   let service: AppointmentsService;
   let payments: { expireCheckout: jest.Mock };
   let unpaidRelease: { releaseExpired: jest.Mock };
+  let inApp: { notifyProfessional: jest.Mock };
   let prisma: {
     professional: { findFirst: jest.Mock; findMany: jest.Mock };
     patient: { findMany: jest.Mock };
@@ -131,11 +133,13 @@ describe('AppointmentsService', () => {
 
     payments = { expireCheckout: jest.fn().mockResolvedValue(undefined) };
     unpaidRelease = { releaseExpired: jest.fn().mockResolvedValue([]) };
+    inApp = { notifyProfessional: jest.fn().mockResolvedValue(undefined) };
     service = new AppointmentsService(
       prisma as unknown as PrismaService,
       makeSupabaseMock(),
       payments as unknown as AppointmentPaymentService,
       unpaidRelease as unknown as UnpaidReleaseService,
+      inApp as unknown as InAppNotificationsService,
     );
   });
 
@@ -573,6 +577,29 @@ describe('AppointmentsService', () => {
 
       await expect(cancel()).rejects.toBeInstanceOf(ConflictException);
       expect(payments.expireCheckout).not.toHaveBeenCalled();
+      expect(inApp.notifyProfessional).not.toHaveBeenCalled();
+    });
+
+    it('avisa al profesional cuando se cancela un turno confirmado (ENG-69)', async () => {
+      results = [
+        { data: { ...INSERTED_ROW, status: 'CONFIRMADO' }, error: null },
+      ];
+
+      await cancel();
+
+      expect(inApp.notifyProfessional).toHaveBeenCalledWith(
+        APPOINTMENT_ID,
+        'TURNO_CANCELADO',
+        NOW,
+      );
+    });
+
+    it('no avisa la cancelación de una reserva sin pagar, que nunca se le anunció', async () => {
+      results = [READ_OK];
+
+      await cancel();
+
+      expect(inApp.notifyProfessional).not.toHaveBeenCalled();
     });
 
     it('un turno que RLS no devuelve es un 404, no un 403', async () => {

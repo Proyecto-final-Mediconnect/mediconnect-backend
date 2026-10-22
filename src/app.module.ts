@@ -16,6 +16,7 @@ import { CatalogModule } from './catalog/catalog.module';
 import { ClinicalRecordsModule } from './clinical-records/clinical-records.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { ClientIpThrottlerGuard } from './common/throttler/client-ip-throttler.guard';
+import { canjeGlobalThrottler } from './medipass/canje-global-throttle.decorator';
 import { validate } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { JobsModule } from './jobs/jobs.module';
@@ -40,7 +41,14 @@ import { VideoModule } from './video/video.module';
     // como POST /auth/refresh lo endurecen con @Throttle — ver
     // docs/security/refresh-token-reuse-risk-plan.md (mitigación de reuso de
     // refresh tokens no detectado por Supabase).
-    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 60 }]),
+    ThrottlerModule.forRoot([
+      { name: 'default', ttl: 60_000, limit: 60 },
+      // Techo **global** del canje del MediPass (ENG-170, hallazgo 2 de
+      // ENG-105). El límite de 10/min del canje es por IP, y el ataque que
+      // importa es distribuido: con una botnet de 10.000 IPs son 100.000
+      // intentos por minuto. El detalle está en el módulo.
+      canjeGlobalThrottler,
+    ]),
     PrismaModule,
     SupabaseModule,
     LegalModule,
