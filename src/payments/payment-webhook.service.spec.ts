@@ -68,6 +68,7 @@ describe('PaymentWebhookService', () => {
   };
   let mercadopago: { getPayment: jest.Mock };
   let notifications: { sendConfirmation: jest.Mock };
+  let inApp: { notifyProfessional: jest.Mock };
   let service: PaymentWebhookService;
 
   beforeEach(() => {
@@ -90,10 +91,12 @@ describe('PaymentWebhookService', () => {
     notifications = {
       sendConfirmation: jest.fn().mockResolvedValue(undefined),
     };
+    inApp = { notifyProfessional: jest.fn().mockResolvedValue(undefined) };
     service = new PaymentWebhookService(
       prisma as never,
       mercadopago as never,
       notifications as never,
+      inApp as never,
     );
   });
 
@@ -174,6 +177,17 @@ describe('PaymentWebhookService', () => {
     );
     // Y no se le confirma por mail un turno que no se confirmó.
     expect(notifications.sendConfirmation).not.toHaveBeenCalled();
+    expect(inApp.notifyProfessional).not.toHaveBeenCalled();
+  });
+
+  it('al confirmar el turno avisa in-app al profesional (ENG-69)', async () => {
+    await service.handle(signed(), SECRET, NOW);
+
+    expect(inApp.notifyProfessional).toHaveBeenCalledWith(
+      APPOINTMENT_ID,
+      'PAGO_CONFIRMADO',
+      NOW,
+    );
   });
 
   it('al confirmar el turno manda el email de confirmación (ENG-68)', async () => {
@@ -200,6 +214,7 @@ describe('PaymentWebhookService', () => {
       'ya-procesado',
     );
     expect(notifications.sendConfirmation).not.toHaveBeenCalled();
+    expect(inApp.notifyProfessional).not.toHaveBeenCalled();
   });
 
   it('monto menor al del turno: no confirma', async () => {

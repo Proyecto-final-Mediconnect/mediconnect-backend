@@ -28,6 +28,7 @@ import { AvailabilityQueryDto } from './dto/availability-query.dto';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { UNPAID_HOLD_MS } from './unpaid-hold';
 import { UnpaidReleaseService } from './unpaid-release.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 
 /**
  * Ver disponibilidad y reservar un turno (ENG-54).
@@ -154,6 +155,7 @@ export class AppointmentsService {
     private readonly supabase: SupabaseService,
     private readonly payments: AppointmentPaymentService,
     private readonly unpaidRelease: UnpaidReleaseService,
+    private readonly inApp: InAppNotificationsService,
   ) {}
 
   /**
@@ -445,6 +447,17 @@ export class AppointmentsService {
       // Después del update, no antes: si la cancelación falla, el link tiene
       // que seguir sirviendo. `expireCheckout` nunca tira.
       await this.payments.expireCheckout(appointmentId, now);
+      // El horario quedó libre: el profesional se entera por la campanita
+      // (ENG-69). Solo si el turno estaba confirmado: de una reserva sin pagar
+      // nunca se le avisó, y "te cancelaron" sería de un turno que no conoce.
+      // Nunca tira.
+      if (row.status === 'CONFIRMADO') {
+        await this.inApp.notifyProfessional(
+          appointmentId,
+          'TURNO_CANCELADO',
+          now,
+        );
+      }
       return view;
     } catch (err) {
       if ((err as { code?: string }).code === PRISMA_RECORD_NOT_FOUND) {

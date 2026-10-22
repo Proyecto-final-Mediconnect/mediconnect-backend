@@ -89,6 +89,7 @@ enum notification_type {
   NUEVO_MENSAJE
   PAGO_CONFIRMADO
   RESENA_MODERADA
+  TURNO_CANCELADO
 }
 
 enum notification_channel {

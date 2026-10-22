@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, type Payment } from '../../generated/prisma/client';
 import { AppointmentNotificationsService } from '../notifications/appointment-notifications.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { verifyWebhookSignature } from './mercadopago-signature';
 import {
@@ -74,6 +75,7 @@ export class PaymentWebhookService {
     private readonly prisma: PrismaService,
     private readonly mercadopago: MercadoPagoService,
     private readonly notifications: AppointmentNotificationsService,
+    private readonly inApp: InAppNotificationsService,
   ) {}
 
   async handle(
@@ -284,6 +286,13 @@ export class PaymentWebhookService {
     // falla lo reintenta el job de recordatorios (ENG-68).
     if (outcome === 'turno-confirmado') {
       void this.notifications.sendConfirmation(payment.appointment_id, now);
+      // El aviso in-app al profesional sí se espera: es un INSERT local, no
+      // una API externa. También nunca tira (ENG-69).
+      await this.inApp.notifyProfessional(
+        payment.appointment_id,
+        'PAGO_CONFIRMADO',
+        now,
+      );
     }
     return outcome;
   }
