@@ -66,6 +66,8 @@ describe('Turnos (e2e)', () => {
     scheduled_at: new Date(APPOINTMENT_ROW.scheduled_at),
     price: { toString: () => '15000.00' },
     status: 'CANCELADO',
+    created_at: new Date('2026-10-01T12:00:00.000Z'),
+    cancelled_at: new Date('2026-10-02T12:00:00.000Z'),
   };
 
   function makeSupabaseMock() {
@@ -424,6 +426,8 @@ describe('Turnos (e2e)', () => {
         status: 'CANCELADO',
         date: MONDAY,
         startTime: '10:00',
+        createdAt: '2026-10-01T12:00:00.000Z',
+        cancelledAt: '2026-10-02T12:00:00.000Z',
       });
     });
 
