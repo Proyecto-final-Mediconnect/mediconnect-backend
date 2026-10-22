@@ -321,6 +321,8 @@ export class AppointmentPaymentService {
     appointmentId: string;
     status: string;
     appointmentStatus: string;
+    /** Cuándo se acreditó, para la historia del turno; `null` si no se acreditó. */
+    confirmedAt: string | null;
   }> {
     const appointment = await this.readAppointment(accessToken, appointmentId);
 
@@ -330,7 +332,7 @@ export class AppointmentPaymentService {
 
     const payment = await this.prisma.payment.findUnique({
       where: { appointment_id: appointment.id },
-      select: { status: true },
+      select: { status: true, confirmed_at: true },
     });
 
     return {
@@ -339,6 +341,7 @@ export class AppointmentPaymentService {
       // pantalla de pago sin haber generado el link.
       status: payment?.status ?? 'SIN_INICIAR',
       appointmentStatus: appointment.status,
+      confirmedAt: payment?.confirmed_at?.toISOString() ?? null,
     };
   }
 

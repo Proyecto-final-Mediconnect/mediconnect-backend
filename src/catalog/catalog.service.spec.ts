@@ -31,10 +31,12 @@ describe('CatalogService', () => {
   let service: CatalogService;
   const findMany = jest.fn();
   const count = jest.fn();
+  const queryRaw = jest.fn();
 
   beforeEach(async () => {
     findMany.mockReset().mockResolvedValue([]);
     count.mockReset().mockResolvedValue(0);
+    queryRaw.mockReset().mockResolvedValue([]);
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -43,6 +45,7 @@ describe('CatalogService', () => {
           provide: PrismaService,
           useValue: {
             professional: { findMany, count },
+            $queryRaw: queryRaw,
             // El service envuelve findMany + count en $transaction para que
             // ambos vean el mismo snapshot; el mock resuelve las promesas que
             // ya se ejecutaron al armarse el array.
@@ -296,6 +299,60 @@ describe('CatalogService', () => {
       expect(select).toMatchObject({
         specialties: { orderBy: { specialty: { name: 'asc' } } },
       });
+    });
+  });
+
+  describe('listProfessionals — búsqueda por nombre o especialidad', () => {
+    it('sin búsqueda no va a la base a buscar ids', async () => {
+      await service.listProfessionals(query());
+
+      expect(queryRaw).not.toHaveBeenCalled();
+      const args = findMany.mock.calls[0][0] as FindManyArgs;
+      expect(args.where).not.toHaveProperty('profile_id');
+    });
+
+    it('limita la página y el total a los que coinciden', async () => {
+      queryRaw.mockResolvedValue([{ profile_id: 'a' }, { profile_id: 'b' }]);
+
+      await service.listProfessionals(query({ search: 'Martín' }));
+
+      const args = findMany.mock.calls[0][0] as FindManyArgs;
+      expect(args.where).toMatchObject({ profile_id: { in: ['a', 'b'] } });
+      expect((count.mock.calls[0][0] as FindManyArgs).where).toMatchObject({
+        profile_id: { in: ['a', 'b'] },
+      });
+    });
+
+    it('busca sin tildes ni mayúsculas, y el texto viaja como parámetro', async () => {
+      await service.listProfessionals(query({ search: 'MARTÍN' }));
+
+      // Tagged template: el primer argumento son los pedazos de SQL fijos y el
+      // resto, los valores. El texto buscado tiene que estar entre los valores.
+      const [sql, ...valores] = queryRaw.mock.calls[0] as [
+        TemplateStringsArray,
+        ...unknown[],
+      ];
+      expect(sql.join('')).not.toContain('martin');
+      expect(valores).toContain('%martin%');
+    });
+
+    it('escapa los comodines de LIKE', async () => {
+      await service.listProfessionals(query({ search: '50%_x' }));
+
+      const [, ...valores] = queryRaw.mock.calls[0] as [
+        TemplateStringsArray,
+        ...unknown[],
+      ];
+      expect(valores).toContain('%50\\%\\_x%');
+    });
+
+    it('sin coincidencias devuelve la lista vacía, no el catálogo entero', async () => {
+      queryRaw.mockResolvedValue([]);
+
+      await service.listProfessionals(query({ search: 'nadie' }));
+
+      const args = findMany.mock.calls[0][0] as FindManyArgs;
+      expect(args.where).toMatchObject({ profile_id: { in: [] } });
     });
   });
 });

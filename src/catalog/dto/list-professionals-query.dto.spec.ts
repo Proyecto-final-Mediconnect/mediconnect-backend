@@ -137,4 +137,23 @@ describe('ListProfessionalsQueryDto', () => {
     expect(propertiesWithErrors({ minPrice: '5000' })).toHaveLength(0);
     expect(propertiesWithErrors({ maxPrice: '5000' })).toHaveLength(0);
   });
+
+  describe('search', () => {
+    it('recorta los espacios', () => {
+      const { dto, errors } = validate({ search: '  martín  ' });
+
+      expect(errors).toHaveLength(0);
+      expect(dto.search).toBe('martín');
+    });
+
+    it('vacía o solo espacios es "sin búsqueda"', () => {
+      expect(validate({ search: '   ' }).dto.search).toBeUndefined();
+    });
+
+    it('rechaza una búsqueda demasiado larga', () => {
+      expect(propertiesWithErrors({ search: 'a'.repeat(81) })).toContain(
+        'search',
+      );
+    });
+  });
 });
