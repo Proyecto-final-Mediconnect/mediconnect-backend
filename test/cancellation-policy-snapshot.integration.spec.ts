@@ -95,6 +95,14 @@ describe('Política de cancelación congelada en el turno (integration)', () => 
   });
 
   afterAll(async () => {
+    // El trigger se va con el spec: la base local se comparte entre ramas, y en
+    // una sin las columnas de ENG-65 rompería todos los INSERT de appointments.
+    await prisma.$executeRawUnsafe(
+      'drop trigger if exists appointments_snapshot_cancellation_policy on public.appointments',
+    );
+    await prisma.$executeRawUnsafe(
+      'drop function if exists public.appointments_snapshot_cancellation_policy()',
+    );
     const pros = [withPolicy, withoutPolicy];
     await prisma.appointment.deleteMany({ where: { patient_id: patientId } });
     await prisma.cancellationPolicy.deleteMany({
