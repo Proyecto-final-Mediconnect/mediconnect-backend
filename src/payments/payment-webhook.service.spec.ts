@@ -251,6 +251,19 @@ describe('PaymentWebhookService', () => {
     expect(prisma.appointment.updateMany).not.toHaveBeenCalled();
   });
 
+  it('pago reembolsado: marca REEMBOLSADO solo si estaba APROBADO (ENG-65)', async () => {
+    mercadopago.getPayment.mockResolvedValue(mpPayment({ status: 'refunded' }));
+
+    await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
+      'pago-reembolsado',
+    );
+    expect(prisma.payment.updateMany).toHaveBeenCalledWith({
+      where: { id: 'pay-1', status: 'APROBADO' },
+      data: { status: 'REEMBOLSADO' },
+    });
+    expect(prisma.appointment.updateMany).not.toHaveBeenCalled();
+  });
+
   it('pago pendiente: solo queda en la bitácora', async () => {
     mercadopago.getPayment.mockResolvedValue(
       mpPayment({ status: 'in_process', approvedAt: null }),

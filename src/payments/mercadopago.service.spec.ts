@@ -272,6 +272,24 @@ describe('MercadoPagoService', () => {
     });
   });
 
+  describe('refundPayment', () => {
+    it('pide el reembolso del monto con la clave de idempotencia', async () => {
+      fetchMock.mockResolvedValue(
+        ok({ id: 9001, status: 'approved', amount: 7500 }),
+      );
+
+      const refund = await service.refundPayment('123', 7500, 'refund-abc');
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        'https://api.mercadopago.com/v1/payments/123/refunds',
+      );
+      expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+      expect(bodyOf()).toEqual({ amount: 7500 });
+      expect(headersOf()['X-Idempotency-Key']).toBe('refund-abc');
+      expect(refund).toEqual({ id: '9001', status: 'approved', amount: 7500 });
+    });
+  });
+
   describe('getPayment', () => {
     it('normaliza la respuesta de MercadoPago', async () => {
       fetchMock.mockResolvedValue(ok(PAYMENT_BODY));
