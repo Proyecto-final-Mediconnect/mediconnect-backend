@@ -3,6 +3,7 @@ import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { AvailabilityQueryDto } from './availability-query.dto';
 import { CreateAppointmentDto } from './create-appointment.dto';
+import { RescheduleAppointmentDto } from './reschedule-appointment.dto';
 
 /** Propiedades que fallaron la validación, para afirmar el QUÉ y no el mensaje. */
 function failedProps(dto: object): string[] {
@@ -72,5 +73,27 @@ describe('AvailabilityQueryDto', () => {
     const dto = plainToInstance(AvailabilityQueryDto, {});
 
     expect(failedProps(dto).sort()).toEqual(['from', 'to']);
+  });
+});
+
+describe('RescheduleAppointmentDto (ENG-66)', () => {
+  it('acepta fecha y hora bien formadas', () => {
+    const dto = plainToInstance(RescheduleAppointmentDto, {
+      date: '2026-08-24',
+      startTime: '09:30',
+    });
+    expect(failedProps(dto)).toEqual([]);
+  });
+
+  it.each([
+    ['date', '24/08/2026'],
+    ['startTime', '9:30'],
+  ])('rechaza %s = %p', (prop, value) => {
+    const dto = plainToInstance(RescheduleAppointmentDto, {
+      date: '2026-08-24',
+      startTime: '09:30',
+      [prop]: value,
+    });
+    expect(failedProps(dto)).toContain(prop);
   });
 });

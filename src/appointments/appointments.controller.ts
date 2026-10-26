@@ -17,6 +17,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { AppointmentsService } from './appointments.service';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
+import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
 
 /** Turnos del usuario autenticado (ENG-54). */
 @Controller('appointments')
@@ -67,5 +68,21 @@ export class AppointmentsController {
   ) {
     const { userId, accessToken } = requireAuth(req);
     return this.appointments.cancel(accessToken, userId, id);
+  }
+
+  /**
+   * Mueve un turno futuro propio a otro horario del mismo profesional (ENG-66).
+   * Es el mismo turno, con el mismo pago: no se vuelve a cobrar. Las reglas
+   * están en `AppointmentsService.reschedule`.
+   */
+  @Patch(':id/reschedule')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  reschedule(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Body() dto: RescheduleAppointmentDto,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.appointments.reschedule(accessToken, userId, id, dto);
   }
 }

@@ -14,7 +14,8 @@ const INBOX_LIMIT = 30;
 /** Avisos al profesional sobre sus turnos (ENG-69). */
 export type ProfessionalAppointmentNotice =
   | 'PAGO_CONFIRMADO'
-  | 'TURNO_CANCELADO';
+  | 'TURNO_CANCELADO'
+  | 'TURNO_REPROGRAMADO';
 
 export interface InAppNotificationView extends InAppNotificationText {
   id: string;
@@ -61,6 +62,8 @@ export class InAppNotificationsService {
     appointmentId: string,
     type: ProfessionalAppointmentNotice,
     now: Date = new Date(),
+    /** Datos propios del aviso: para la reprogramación, de qué horario venía. */
+    extra: Record<string, string> = {},
   ): Promise<void> {
     try {
       const appointment = await this.prisma.appointment.findUnique({
@@ -86,6 +89,7 @@ export class InAppNotificationsService {
             patient:
               `${appointment.patient.first_name} ${appointment.patient.last_name}`.trim(),
             scheduledAt: appointment.scheduled_at.toISOString(),
+            ...extra,
           },
           sent_at: now,
         },

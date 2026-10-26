@@ -26,7 +26,10 @@ import {
 } from './availability.rules';
 import { AvailabilityQueryDto } from './dto/availability-query.dto';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
-import { UNPAID_HOLD_MS } from './unpaid-hold';
+import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
+import { holdExpiresAt, UNPAID_HOLD_MS } from './unpaid-hold';
+import { CancellationPolicyService } from '../professionals/cancellation-policy.service';
+import { refundPercentFor } from '../professionals/cancellation-policy';
 import { UnpaidReleaseService } from './unpaid-release.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 
@@ -93,6 +96,8 @@ const UNIQUE_VIOLATION = '23505';
 
 /** `P2025` de Prisma: el `where` del update no encontró ninguna fila. */
 const PRISMA_RECORD_NOT_FOUND = 'P2025';
+/** El índice único de la base rechazó el UPDATE: el horario lo tomó otro turno. */
+const PRISMA_UNIQUE_VIOLATION = 'P2002';
 
 /** Datos del profesional que ve el paciente en la pantalla de reserva. */
 export interface BookableProfessional {
@@ -131,6 +136,8 @@ export interface AppointmentView {
   status: string;
   professional: AppointmentParty | null;
   patient: AppointmentParty | null;
+  /** Cuándo se movió de horario (ENG-66), o `null` si nunca. Se reprograma una sola vez. */
+  rescheduledAt: string | null;
 }
 
 /** Fila cruda de `appointments` tal como la devuelve PostgREST. */
@@ -143,10 +150,11 @@ interface AppointmentRow {
   // PostgREST devuelve `numeric` como string; se normaliza a number al salir.
   price: string | number;
   status: string;
+  rescheduled_at?: string | null;
 }
 
 const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status';
+  'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status, rescheduled_at';
 
 @Injectable()
 export class AppointmentsService {
@@ -156,6 +164,7 @@ export class AppointmentsService {
     private readonly payments: AppointmentPaymentService,
     private readonly unpaidRelease: UnpaidReleaseService,
     private readonly inApp: InAppNotificationsService,
+    private readonly policies: CancellationPolicyService,
   ) {}
 
   /**
@@ -199,14 +208,7 @@ export class AppointmentsService {
     dto: CreateAppointmentDto,
     now: Date = new Date(),
   ): Promise<AppointmentView> {
-    const today = todayInArgentina(now);
-    const horizon = addDays(today, BOOKING_HORIZON_DAYS - 1);
-
-    if (dto.date < today || dto.date > horizon) {
-      throw new BadRequestException(
-        `Solo se pueden reservar turnos dentro de los próximos ${BOOKING_HORIZON_DAYS} días.`,
-      );
-    }
+    assertWithinHorizon(dto.date, now);
 
     const professional = await this.findBookableProfessional(
       dto.professionalId,
@@ -230,42 +232,12 @@ export class AppointmentsService {
       patientId: userId,
     });
 
-    // El horario se valida contra la agenda recalculada en el servidor, no contra
-    // lo que diga el cliente: el front puede tener la grilla vieja o manipulada.
-    const { rules, blocks, busy } = await this.readSchedule(
+    const slot = await this.assertSlotBookable(
       dto.professionalId,
       dto.date,
-      dto.date,
+      dto.startTime,
       now,
     );
-    const days = buildAvailability({
-      rules,
-      blocks,
-      busy,
-      from: dto.date,
-      to: dto.date,
-      now,
-    });
-    const slot = findSlot(days, dto.date, dto.startTime);
-
-    if (!slot) {
-      throw new BadRequestException(
-        'Ese horario no está en la agenda del profesional.',
-      );
-    }
-    if (slot.status === 'BOOKED') {
-      throw new ConflictException('Ese turno ya está reservado.');
-    }
-    if (slot.status === 'BLOCKED') {
-      throw new ConflictException(
-        'El profesional no atiende en ese horario ese día.',
-      );
-    }
-    if (slot.status === 'PAST') {
-      throw new BadRequestException(
-        'Ese horario ya pasó o empieza en menos de 15 minutos.',
-      );
-    }
 
     const scheduledAt = toInstant(dto.date, dto.startTime);
     const client = this.supabase.getClientForToken(accessToken);
@@ -442,6 +414,7 @@ export class AppointmentsService {
           // decimales que un `Number` intermedio podría redondear.
           price: updated.price.toString(),
           status: updated.status,
+          rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
         },
       ]);
       // Después del update, no antes: si la cancelación falla, el link tiene
@@ -469,6 +442,243 @@ export class AppointmentsService {
         'No pudimos cancelar el turno. Probá de nuevo en unos minutos.',
       );
     }
+  }
+
+  /**
+   * Mueve un turno futuro propio a otro horario del mismo profesional (ENG-66).
+   *
+   * Es el **mismo turno**: se actualiza la fila, así que el pago, la preferencia
+   * de MercadoPago y el precio congelado siguen atados a él y no se vuelve a
+   * cobrar.
+   *
+   * Reglas, además de las de una reserva nueva (agenda, bloqueos, 15 minutos de
+   * anticipación, que el paciente no tenga otro turno superpuesto):
+   *
+   * - **Una sola vez por turno** (`rescheduled_at`). Sin tope, una reserva sin
+   *   pagar se podría ir corriendo para retener horarios, y el profesional
+   *   recibiría un aviso por cada vuelta.
+   * - **Un turno pagado respeta la política de cancelación:** solo se reprograma
+   *   mientras al paciente le correspondería la devolución total. Con menos
+   *   anticipación, reprogramar sería cancelar sin la penalidad que la política
+   *   aplica, así que se le dice que cancele (con el porcentaje que le toque) y
+   *   reserve de nuevo.
+   * - **Una reserva sin pagar** se puede mover mientras su retención de 15
+   *   minutos no venció, y la retención **no se reinicia**: cuenta desde que se
+   *   reservó.
+   *
+   * La política es la vigente del profesional. Cuando entre ENG-65 (backend#78),
+   * que la congela en el turno al reservar, hay que leer esa.
+   */
+  async reschedule(
+    accessToken: string,
+    userId: string,
+    appointmentId: string,
+    dto: RescheduleAppointmentDto,
+    now: Date = new Date(),
+  ): Promise<AppointmentView> {
+    const client = this.supabase.getClientForToken(accessToken);
+
+    const { data, error } = await client
+      .from('appointments')
+      .select(`${APPOINTMENT_SELECT}, created_at`)
+      .eq('id', appointmentId)
+      .maybeSingle();
+
+    if (error) {
+      throw new InternalServerErrorException(
+        'No pudimos reprogramar el turno. Probá de nuevo en unos minutos.',
+      );
+    }
+    // Igual que al cancelar: el turno de otra persona no existe para este usuario.
+    if (!data) {
+      throw new NotFoundException('Ese turno no existe.');
+    }
+
+    const row = data as unknown as AppointmentRow & { created_at: string };
+
+    if (row.patient_id !== userId) {
+      throw new ForbiddenException(
+        'Solo el paciente puede reprogramar el turno desde acá.',
+      );
+    }
+
+    const currentStart = new Date(row.scheduled_at);
+    if (currentStart <= now) {
+      throw new BadRequestException(
+        'Ese turno ya pasó: no se puede reprogramar.',
+      );
+    }
+
+    if (
+      !ACTIVE_STATUSES.includes(row.status as (typeof ACTIVE_STATUSES)[number])
+    ) {
+      throw new ConflictException('Ese turno ya no está activo.');
+    }
+
+    if (row.rescheduled_at) {
+      throw new ConflictException(
+        'Este turno ya se reprogramó una vez. Si necesitás otro horario, cancelalo y reservá uno nuevo.',
+      );
+    }
+
+    if (row.status === 'CONFIRMADO') {
+      const policy = await this.policies.policyFor(row.professional_id);
+      const percent = refundPercentFor(policy, currentStart, now);
+      if (percent < 100) {
+        const devolucion =
+          percent === 0
+            ? 'no te corresponde devolución'
+            : `te corresponde el ${percent} % de devolución`;
+        throw new ConflictException(
+          `Un turno pagado se puede reprogramar hasta ${policy.hoursFullRefund} horas antes. ` +
+            `Si necesitás otro horario, cancelalo (${devolucion}) y reservá uno nuevo.`,
+        );
+      }
+    } else if (holdExpiresAt(new Date(row.created_at)) <= now) {
+      throw new ConflictException(
+        'La reserva venció porque no se pagó a tiempo. Volvé a reservar el turno.',
+      );
+    }
+
+    assertWithinHorizon(dto.date, now);
+
+    const newStart = toInstant(dto.date, dto.startTime);
+    if (newStart.getTime() === currentStart.getTime()) {
+      throw new BadRequestException('Ese ya es el horario de tu turno.');
+    }
+
+    await this.unpaidRelease.releaseExpired(now, {
+      professionalId: row.professional_id,
+      patientId: userId,
+    });
+
+    const slot = await this.assertSlotBookable(
+      row.professional_id,
+      dto.date,
+      dto.startTime,
+      now,
+    );
+
+    await this.assertPatientIsFree(
+      client,
+      userId,
+      newStart,
+      slot.durationMinutes,
+      appointmentId,
+    );
+
+    try {
+      const updated = await this.prisma.appointment.update({
+        // Las mismas condiciones que se validaron, revalidadas en el `where`:
+        // entre la lectura y la escritura el turno pudo cambiar (lo cancelaron,
+        // el job lo liberó, otro click ya lo reprogramó).
+        where: {
+          id: appointmentId,
+          patient_id: userId,
+          status: { in: [...ACTIVE_STATUSES] },
+          scheduled_at: currentStart,
+          rescheduled_at: null,
+        },
+        data: {
+          scheduled_at: newStart,
+          duration_minutes: slot.durationMinutes,
+          rescheduled_at: now,
+          updated_at: now,
+        },
+      });
+
+      const [view] = await this.toViews([
+        {
+          id: updated.id,
+          patient_id: updated.patient_id,
+          professional_id: updated.professional_id,
+          scheduled_at: updated.scheduled_at.toISOString(),
+          duration_minutes: updated.duration_minutes,
+          price: updated.price.toString(),
+          status: updated.status,
+          rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
+        },
+      ]);
+
+      // Solo de un turno confirmado: de una reserva sin pagar el profesional
+      // todavía no se enteró. Nunca tira.
+      if (row.status === 'CONFIRMADO') {
+        await this.inApp.notifyProfessional(
+          appointmentId,
+          'TURNO_REPROGRAMADO',
+          now,
+          { previousScheduledAt: currentStart.toISOString() },
+        );
+      }
+      return view;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      // La carrera con otra reserva del mismo horario: el árbitro es el índice
+      // parcial `appointments_professional_active_slot_key`, como al reservar.
+      if (code === PRISMA_UNIQUE_VIOLATION) {
+        throw new ConflictException(
+          'Ese horario lo acaba de reservar otra persona. Elegí otro.',
+        );
+      }
+      if (code === PRISMA_RECORD_NOT_FOUND) {
+        throw new ConflictException(
+          'El turno cambió mientras lo reprogramabas. Actualizá la lista.',
+        );
+      }
+      throw new InternalServerErrorException(
+        'No pudimos reprogramar el turno. Probá de nuevo en unos minutos.',
+      );
+    }
+  }
+
+  /**
+   * Que el horario exista en la agenda del profesional y esté libre, contra la
+   * agenda recalculada en el servidor y no contra lo que diga el cliente: el
+   * front puede tener la grilla vieja o manipulada. Lo comparten la reserva y
+   * la reprogramación.
+   */
+  private async assertSlotBookable(
+    professionalId: string,
+    date: string,
+    startTime: string,
+    now: Date,
+  ) {
+    const { rules, blocks, busy } = await this.readSchedule(
+      professionalId,
+      date,
+      date,
+      now,
+    );
+    const days = buildAvailability({
+      rules,
+      blocks,
+      busy,
+      from: date,
+      to: date,
+      now,
+    });
+    const slot = findSlot(days, date, startTime);
+
+    if (!slot) {
+      throw new BadRequestException(
+        'Ese horario no está en la agenda del profesional.',
+      );
+    }
+    if (slot.status === 'BOOKED') {
+      throw new ConflictException('Ese turno ya está reservado.');
+    }
+    if (slot.status === 'BLOCKED') {
+      throw new ConflictException(
+        'El profesional no atiende en ese horario ese día.',
+      );
+    }
+    if (slot.status === 'PAST') {
+      throw new BadRequestException(
+        'Ese horario ya pasó o empieza en menos de 15 minutos.',
+      );
+    }
+
+    return slot;
   }
 
   /** Valida el rango pedido: coherente, acotado y dentro del horizonte. */
@@ -652,6 +862,8 @@ export class AppointmentsService {
     userId: string,
     scheduledAt: Date,
     durationMinutes: number,
+    /** Al reprogramar, el propio turno no cuenta como superpuesto. */
+    excludeAppointmentId?: string,
   ): Promise<void> {
     const newEnd = new Date(scheduledAt.getTime() + durationMinutes * 60_000);
 
@@ -661,7 +873,7 @@ export class AppointmentsService {
     const windowStart = new Date(scheduledAt.getTime() - 24 * 60 * 60_000);
     const { data, error } = await client
       .from('appointments')
-      .select('scheduled_at, duration_minutes')
+      .select('id, scheduled_at, duration_minutes')
       .eq('patient_id', userId)
       .in('status', [...ACTIVE_STATUSES])
       .gte('scheduled_at', windowStart.toISOString())
@@ -673,10 +885,16 @@ export class AppointmentsService {
       );
     }
 
-    const rows = (data ?? []) as unknown as {
-      scheduled_at: string;
-      duration_minutes: number;
-    }[];
+    const rows = (
+      (data ?? []) as unknown as {
+        id: string;
+        scheduled_at: string;
+        duration_minutes: number;
+      }[]
+    ).filter(
+      (row) =>
+        excludeAppointmentId === undefined || row.id !== excludeAppointmentId,
+    );
 
     const collides = rows.some((row) => {
       const start = new Date(row.scheduled_at).getTime();
@@ -764,6 +982,9 @@ export class AppointmentsService {
         status: row.status,
         professional: professionalById.get(row.professional_id) ?? null,
         patient: patientById.get(row.patient_id) ?? null,
+        rescheduledAt: row.rescheduled_at
+          ? new Date(row.rescheduled_at).toISOString()
+          : null,
       };
     });
   }
@@ -777,4 +998,16 @@ export class AppointmentsService {
  */
 function toHHMM(time: Date): string {
   return time.toISOString().slice(11, 16);
+}
+
+/** La fecha pedida tiene que estar entre hoy y el horizonte publicado de la agenda. */
+function assertWithinHorizon(date: string, now: Date): void {
+  const today = todayInArgentina(now);
+  const horizon = addDays(today, BOOKING_HORIZON_DAYS - 1);
+
+  if (date < today || date > horizon) {
+    throw new BadRequestException(
+      `Solo se pueden reservar turnos dentro de los próximos ${BOOKING_HORIZON_DAYS} días.`,
+    );
+  }
 }

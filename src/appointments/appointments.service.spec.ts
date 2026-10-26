@@ -8,6 +8,7 @@ import {
 import { AppointmentPaymentService } from '../payments/appointment-payment.service';
 import { UnpaidReleaseService } from './unpaid-release.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
+import { CancellationPolicyService } from '../professionals/cancellation-policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { toInstant } from '../common/time/argentina-time';
@@ -68,6 +69,7 @@ describe('AppointmentsService', () => {
   let payments: { expireCheckout: jest.Mock };
   let unpaidRelease: { releaseExpired: jest.Mock };
   let inApp: { notifyProfessional: jest.Mock };
+  let policies: { policyFor: jest.Mock };
   let prisma: {
     professional: { findFirst: jest.Mock; findMany: jest.Mock };
     patient: { findMany: jest.Mock };
@@ -134,12 +136,21 @@ describe('AppointmentsService', () => {
     payments = { expireCheckout: jest.fn().mockResolvedValue(undefined) };
     unpaidRelease = { releaseExpired: jest.fn().mockResolvedValue([]) };
     inApp = { notifyProfessional: jest.fn().mockResolvedValue(undefined) };
+    // El default de ENG-67: 24 h → 100 %, 6 h → 50 %, menos → 0 %.
+    policies = {
+      policyFor: jest.fn().mockResolvedValue({
+        hoursFullRefund: 24,
+        hoursPartialRefund: 6,
+        partialRefundPercent: 50,
+      }),
+    };
     service = new AppointmentsService(
       prisma as unknown as PrismaService,
       makeSupabaseMock(),
       payments as unknown as AppointmentPaymentService,
       unpaidRelease as unknown as UnpaidReleaseService,
       inApp as unknown as InAppNotificationsService,
+      policies as unknown as CancellationPolicyService,
     );
   });
 
@@ -513,6 +524,235 @@ describe('AppointmentsService', () => {
 
       await expect(service.listMine(TOKEN, PATIENT_ID)).rejects.toBeInstanceOf(
         InternalServerErrorException,
+      );
+    });
+  });
+
+  describe('reschedule (ENG-66)', () => {
+    const APPOINTMENT_ID = INSERTED_ROW.id;
+    /** El lunes que viene: 7 días después de NOW, misma franja de 09:00 a 11:00. */
+    const NEXT_MONDAY = '2026-08-24';
+
+    /** Reserva sin pagar de hoy a las 10:00, hecha hace 10 minutos. */
+    const UNPAID = {
+      ...INSERTED_ROW,
+      rescheduled_at: null,
+      created_at: '2026-08-17T10:50:00.000Z',
+    };
+    /** Turno pagado del lunes que viene a las 10:00: faltan 7 días. */
+    const PAID = {
+      ...UNPAID,
+      scheduled_at: '2026-08-24T13:00:00.000Z',
+      status: 'CONFIRMADO',
+    };
+
+    const read = (row: unknown) => ({ data: row, error: null });
+    const updatedTo = (
+      row: typeof UNPAID,
+      date: string,
+      startTime: string,
+    ) => ({
+      ...row,
+      scheduled_at: toInstant(date, startTime),
+      price: { toString: () => '15000.00' },
+      rescheduled_at: NOW,
+    });
+
+    const reschedule = (date: string, startTime: string, userId = PATIENT_ID) =>
+      service.reschedule(
+        TOKEN,
+        userId,
+        APPOINTMENT_ID,
+        { date, startTime },
+        NOW,
+      );
+
+    it('mueve una reserva sin pagar a otro horario y lo marca reprogramado', async () => {
+      results = [read(UNPAID), NO_COLLISION];
+      prisma.appointment.update.mockResolvedValue(
+        updatedTo(UNPAID, MONDAY, '09:30'),
+      );
+
+      const view = await reschedule(MONDAY, '09:30');
+
+      expect(view).toMatchObject({
+        id: APPOINTMENT_ID,
+        startTime: '09:30',
+        status: 'RESERVADO_SIN_PAGAR',
+        rescheduledAt: NOW.toISOString(),
+      });
+      expect(prisma.appointment.update).toHaveBeenCalledWith({
+        where: {
+          id: APPOINTMENT_ID,
+          patient_id: PATIENT_ID,
+          status: { in: ['RESERVADO_SIN_PAGAR', 'CONFIRMADO'] },
+          scheduled_at: new Date(UNPAID.scheduled_at),
+          rescheduled_at: null,
+        },
+        data: {
+          scheduled_at: toInstant(MONDAY, '09:30'),
+          duration_minutes: 30,
+          rescheduled_at: NOW,
+          updated_at: NOW,
+        },
+      });
+      // De una reserva sin pagar el profesional todavía no se enteró.
+      expect(inApp.notifyProfessional).not.toHaveBeenCalled();
+    });
+
+    it('un turno pagado se reprograma con anticipación y el profesional se entera', async () => {
+      results = [read(PAID), NO_COLLISION];
+      prisma.appointment.update.mockResolvedValue(
+        updatedTo(PAID, NEXT_MONDAY, '09:30'),
+      );
+
+      const view = await reschedule(NEXT_MONDAY, '09:30');
+
+      expect(view).toMatchObject({ status: 'CONFIRMADO', startTime: '09:30' });
+      expect(policies.policyFor).toHaveBeenCalledWith(PRO_ID);
+      expect(inApp.notifyProfessional).toHaveBeenCalledWith(
+        APPOINTMENT_ID,
+        'TURNO_REPROGRAMADO',
+        NOW,
+        { previousScheduledAt: PAID.scheduled_at },
+      );
+    });
+
+    it('un turno pagado sin la anticipación de la devolución total no se reprograma', async () => {
+      // Faltan 2 horas: cancelarlo hoy no devuelve nada.
+      results = [read({ ...PAID, scheduled_at: UNPAID.scheduled_at })];
+
+      await expect(reschedule(MONDAY, '10:30')).rejects.toThrow(
+        /hasta 24 horas antes.*no te corresponde devolución/,
+      );
+      expect(prisma.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('con devolución parcial lo dice en el mensaje', async () => {
+      // Faltan 10 horas: le correspondería el 50 %.
+      results = [read({ ...PAID, scheduled_at: '2026-08-17T21:00:00.000Z' })];
+
+      await expect(reschedule(MONDAY, '10:30')).rejects.toThrow(
+        /te corresponde el 50 % de devolución/,
+      );
+    });
+
+    it('se reprograma una sola vez', async () => {
+      results = [
+        read({ ...UNPAID, rescheduled_at: '2026-08-17T10:55:00.000Z' }),
+      ];
+
+      await expect(reschedule(MONDAY, '09:30')).rejects.toThrow(
+        /ya se reprogramó una vez/,
+      );
+    });
+
+    it('una reserva sin pagar con la retención vencida no se mueve', async () => {
+      results = [read({ ...UNPAID, created_at: '2026-08-17T10:30:00.000Z' })];
+
+      await expect(reschedule(MONDAY, '09:30')).rejects.toThrow(
+        /no se pagó a tiempo/,
+      );
+    });
+
+    it('el mismo horario no es una reprogramación', async () => {
+      results = [read(UNPAID)];
+
+      await expect(reschedule(MONDAY, '10:00')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
+    it('solo el paciente reprograma, y un turno ajeno no existe', async () => {
+      results = [read(UNPAID)];
+      await expect(reschedule(MONDAY, '09:30', PRO_ID)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+
+      results = [read(null)];
+      await expect(reschedule(MONDAY, '09:30')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('un turno ya cancelado no se reprograma', async () => {
+      results = [read({ ...UNPAID, status: 'CANCELADO' })];
+
+      await expect(reschedule(MONDAY, '09:30')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+    });
+
+    it('un horario ocupado no se puede elegir', async () => {
+      results = [read(UNPAID)];
+      prisma.appointment.findMany.mockResolvedValue([
+        {
+          scheduled_at: toInstant(MONDAY, '09:30'),
+          duration_minutes: 30,
+        },
+      ]);
+
+      await expect(reschedule(MONDAY, '09:30')).rejects.toThrow(
+        /ya está reservado/,
+      );
+    });
+
+    it('el propio turno no cuenta como superpuesto para el paciente', async () => {
+      results = [
+        read(UNPAID),
+        {
+          data: [
+            {
+              id: APPOINTMENT_ID,
+              scheduled_at: toInstant(MONDAY, '09:30').toISOString(),
+              duration_minutes: 30,
+            },
+          ],
+          error: null,
+        },
+      ];
+      prisma.appointment.update.mockResolvedValue(
+        updatedTo(UNPAID, MONDAY, '09:30'),
+      );
+
+      await expect(reschedule(MONDAY, '09:30')).resolves.toMatchObject({
+        startTime: '09:30',
+      });
+    });
+
+    it('otro turno del paciente en ese horario sí lo impide', async () => {
+      results = [
+        read(UNPAID),
+        {
+          data: [
+            {
+              id: 'otro-turno',
+              scheduled_at: toInstant(MONDAY, '09:30').toISOString(),
+              duration_minutes: 30,
+            },
+          ],
+          error: null,
+        },
+      ];
+
+      await expect(reschedule(MONDAY, '09:30')).rejects.toThrow(/se superpone/);
+    });
+
+    it('si otro lo reservó en el medio, 409 sin pisar nada', async () => {
+      results = [read(UNPAID), NO_COLLISION];
+      prisma.appointment.update.mockRejectedValue({ code: 'P2002' });
+
+      await expect(reschedule(MONDAY, '09:30')).rejects.toThrow(
+        /lo acaba de reservar otra persona/,
+      );
+    });
+
+    it('si el turno cambió entre la lectura y la escritura, 409', async () => {
+      results = [read(UNPAID), NO_COLLISION];
+      prisma.appointment.update.mockRejectedValue({ code: 'P2025' });
+
+      await expect(reschedule(MONDAY, '09:30')).rejects.toThrow(
+        /cambió mientras lo reprogramabas/,
       );
     });
   });

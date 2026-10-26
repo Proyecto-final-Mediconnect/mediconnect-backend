@@ -49,6 +49,13 @@ export function renderInAppNotification(
         title: 'Turno cancelado',
         body: `${patient ?? 'Un paciente'} canceló su turno${when ? ` del ${when}` : ''}. El horario quedó libre.`,
       };
+    case 'TURNO_REPROGRAMADO': {
+      const before = formatWhen(text(p.previousScheduledAt));
+      return {
+        title: 'Turno reprogramado',
+        body: `${patient ?? 'Un paciente'} movió su turno${before ? ` del ${before}` : ''}${when ? ` al ${when}` : ''}.`,
+      };
+    }
     case 'TURNO_RESERVADO':
       return { title: 'Turno reservado', body: 'Tenés un turno reservado.' };
     case 'RECORDATORIO_24H':

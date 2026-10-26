@@ -27,6 +27,19 @@ describe('renderInAppNotification', () => {
     );
   });
 
+  it('turno reprogramado: dice de qué horario a qué horario (ENG-66)', () => {
+    expect(
+      renderInAppNotification('TURNO_REPROGRAMADO', {
+        patient: 'Julián Pérez',
+        previousScheduledAt: SCHEDULED,
+        scheduledAt: '2026-10-26T13:30:00.000Z',
+      }),
+    ).toEqual({
+      title: 'Turno reprogramado',
+      body: 'Julián Pérez movió su turno del viernes, 23 de octubre a las 10:30 al lunes, 26 de octubre a las 10:30.',
+    });
+  });
+
   it('el pago confirmado del lado del paciente (seed de demo) no inventa un nombre', () => {
     expect(
       renderInAppNotification('PAGO_CONFIRMADO', { amount: 16000 }),
