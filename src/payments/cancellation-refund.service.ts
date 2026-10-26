@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import * as Sentry from '@sentry/nestjs';
 import { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -62,6 +63,17 @@ const REFUNDABLE_SELECT = {
 const CANCELLATION_REASON = 'CANCELACION_PACIENTE';
 
 /**
+ * Por qué se devuelve un pago que no se pudo aplicar a un turno (ENG-144). Va en
+ * `refunds.reason` junto con el id del pago de MercadoPago, que es lo que hace
+ * idempotente el reembolso cuando el webhook se repite.
+ */
+export type UnappliedPaymentReason =
+  /** Un segundo pago aprobado sobre un turno que ya estaba pagado. */
+  | 'PAGO_DUPLICADO'
+  /** El pago se aprobó cuando el turno ya estaba cancelado o liberado. */
+  | 'PAGO_SOBRE_TURNO_INACTIVO';
+
+/**
  * Reembolso al cancelar un turno pagado (ENG-65).
  *
  * El porcentaje sale de la política **congelada en el turno** al reservar (la
@@ -119,6 +131,115 @@ export class CancellationRefundService {
       );
       return { percent: 0, amount: 0, status: 'PENDIENTE' };
     }
+  }
+
+  /**
+   * Devuelve **entero** un pago aprobado que no se pudo aplicar a ningún turno
+   * (ENG-144): un segundo pago sobre un turno ya pagado, o un pago que llegó
+   * cuando el turno ya estaba cancelado o liberado. No hay política que aplicar:
+   * no se prestó ningún servicio a cambio.
+   *
+   * - **Idempotente:** el webhook se repite. Si ya hay un reembolso registrado
+   *   para ese pago de MercadoPago, no se pide otro; y la clave de idempotencia
+   *   de MercadoPago es el id del pago, así que tampoco duplica si la fila se
+   *   llegó a crear pero la respuesta se perdió.
+   * - Con `markPaymentRefunded`, un reembolso procesado deja la fila de
+   *   `payments` en `REEMBOLSADO`. Para el duplicado no: esa fila es del primer
+   *   pago, que sigue valiendo.
+   * - Si no se puede, queda en Sentry con el id del pago para devolverlo a mano.
+   *
+   * **Nunca tira:** lo llama el webhook, que no puede contestarle un 5xx a
+   * MercadoPago por esto.
+   */
+  async refundUnappliedPayment(
+    params: {
+      paymentId: string;
+      mpPaymentId: string;
+      amount: number;
+      reason: UnappliedPaymentReason;
+      markPaymentRefunded: boolean;
+    },
+    now: Date,
+  ): Promise<RefundOutcome> {
+    const { paymentId, mpPaymentId, reason, markPaymentRefunded } = params;
+    const reasonText = `${reason}:${mpPaymentId}`;
+
+    try {
+      const existing = await this.prisma.refund.findFirst({
+        where: { payment_id: paymentId, reason: reasonText },
+        select: { status: true },
+      });
+      if (existing) return existing.status;
+
+      const amount = new Prisma.Decimal(params.amount);
+      const refund = await this.prisma.refund.create({
+        data: { payment_id: paymentId, amount, reason: reasonText },
+      });
+
+      let status: RefundOutcome = 'PENDIENTE';
+      try {
+        const mp = await this.mercadoPago.refundPayment(
+          mpPaymentId,
+          amount.toNumber(),
+          `unapplied-${mpPaymentId}`,
+        );
+        status =
+          mp.status === 'approved'
+            ? 'PROCESADO'
+            : mp.status === 'rejected' || mp.status === 'cancelled'
+              ? 'RECHAZADO'
+              : 'PENDIENTE';
+
+        await this.prisma.refund.update({
+          where: { id: refund.id },
+          data: {
+            status,
+            mercadopago_refund_id: mp.id,
+            processed_at: status === 'PENDIENTE' ? null : now,
+          },
+        });
+
+        if (status === 'PROCESADO' && markPaymentRefunded) {
+          await this.prisma.payment.update({
+            where: { id: paymentId },
+            data: { status: 'REEMBOLSADO' },
+          });
+        }
+      } catch (err) {
+        this.logger.error(
+          `No se pudo devolver el pago ${mpPaymentId} (${reason}, refund ${refund.id}): ${String(err)}`,
+        );
+      }
+
+      if (status !== 'PROCESADO') {
+        this.alertManualRefund(mpPaymentId, reason, status);
+      }
+      return status;
+    } catch (err) {
+      this.logger.error(
+        `No se pudo registrar la devolución del pago ${mpPaymentId} (${reason}): ${String(err)}`,
+      );
+      this.alertManualRefund(mpPaymentId, reason, 'PENDIENTE');
+      return 'PENDIENTE';
+    }
+  }
+
+  private alertManualRefund(
+    mpPaymentId: string,
+    reason: UnappliedPaymentReason,
+    status: RefundOutcome,
+  ): void {
+    this.logger.warn(
+      `Pago ${mpPaymentId} (${reason}) sin devolver: quedó ${status}. Devolverlo a mano desde MercadoPago.`,
+    );
+    Sentry.captureMessage(
+      `Pago de MercadoPago sin devolver (${reason}): hay que devolverlo a mano`,
+      {
+        level: 'error',
+        tags: { area: 'pagos', reason },
+        extra: { mpPaymentId, status },
+      },
+    );
   }
 
   private async refund(

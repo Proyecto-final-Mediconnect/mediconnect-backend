@@ -69,6 +69,7 @@ describe('PaymentWebhookService', () => {
   let mercadopago: { getPayment: jest.Mock };
   let notifications: { sendConfirmation: jest.Mock };
   let inApp: { notifyProfessional: jest.Mock };
+  let refunds: { refundUnappliedPayment: jest.Mock };
   let service: PaymentWebhookService;
 
   beforeEach(() => {
@@ -92,11 +93,15 @@ describe('PaymentWebhookService', () => {
       sendConfirmation: jest.fn().mockResolvedValue(undefined),
     };
     inApp = { notifyProfessional: jest.fn().mockResolvedValue(undefined) };
+    refunds = {
+      refundUnappliedPayment: jest.fn().mockResolvedValue('PROCESADO'),
+    };
     service = new PaymentWebhookService(
       prisma as never,
       mercadopago as never,
       notifications as never,
       inApp as never,
+      refunds as never,
     );
   });
 
@@ -180,6 +185,72 @@ describe('PaymentWebhookService', () => {
     expect(inApp.notifyProfessional).not.toHaveBeenCalled();
   });
 
+  describe('pagos que no se aplican a un turno (ENG-144)', () => {
+    it('pago aprobado de un turno ya cancelado: se devuelve entero y la fila queda REEMBOLSADO', async () => {
+      prisma.appointment.updateMany.mockResolvedValue({ count: 0 });
+
+      await service.handle(signed(), SECRET, NOW);
+
+      expect(refunds.refundUnappliedPayment).toHaveBeenCalledWith(
+        {
+          paymentId: 'pay-1',
+          mpPaymentId: MP_PAYMENT_ID,
+          amount: 15000,
+          reason: 'PAGO_SOBRE_TURNO_INACTIVO',
+          markPaymentRefunded: true,
+        },
+        NOW,
+      );
+    });
+
+    it('un segundo pago aprobado con otro id es un duplicado: se devuelve sin tocar el primero', async () => {
+      // La fila ya quedó APROBADO con el primer pago.
+      prisma.payment.updateMany.mockResolvedValue({ count: 0 });
+      prisma.payment.findUnique
+        .mockResolvedValueOnce(PAYMENT_ROW)
+        .mockResolvedValueOnce({
+          status: 'APROBADO',
+          mercadopago_payment_id: 'primer-pago',
+        });
+
+      await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
+        'pago-duplicado',
+      );
+
+      expect(prisma.appointment.updateMany).not.toHaveBeenCalled();
+      expect(refunds.refundUnappliedPayment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mpPaymentId: MP_PAYMENT_ID,
+          reason: 'PAGO_DUPLICADO',
+          markPaymentRefunded: false,
+        }),
+        NOW,
+      );
+      expect(notifications.sendConfirmation).not.toHaveBeenCalled();
+    });
+
+    it('la misma notificación repetida sigue siendo idempotente: no es un duplicado', async () => {
+      prisma.payment.updateMany.mockResolvedValue({ count: 0 });
+      prisma.payment.findUnique
+        .mockResolvedValueOnce(PAYMENT_ROW)
+        .mockResolvedValueOnce({
+          status: 'APROBADO',
+          mercadopago_payment_id: MP_PAYMENT_ID,
+        });
+
+      await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
+        'ya-procesado',
+      );
+      expect(refunds.refundUnappliedPayment).not.toHaveBeenCalled();
+    });
+
+    it('un turno confirmado normal no devuelve nada', async () => {
+      await service.handle(signed(), SECRET, NOW);
+
+      expect(refunds.refundUnappliedPayment).not.toHaveBeenCalled();
+    });
+  });
+
   it('al confirmar el turno avisa in-app al profesional (ENG-69)', async () => {
     await service.handle(signed(), SECRET, NOW);
 
@@ -258,7 +329,11 @@ describe('PaymentWebhookService', () => {
       'pago-reembolsado',
     );
     expect(prisma.payment.updateMany).toHaveBeenCalledWith({
-      where: { id: 'pay-1', status: 'APROBADO' },
+      where: {
+        id: 'pay-1',
+        status: 'APROBADO',
+        mercadopago_payment_id: MP_PAYMENT_ID,
+      },
       data: { status: 'REEMBOLSADO' },
     });
     expect(prisma.appointment.updateMany).not.toHaveBeenCalled();
