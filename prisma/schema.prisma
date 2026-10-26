@@ -584,11 +584,16 @@ model Conversation {
   professional_id String   @db.Uuid
   created_at      DateTime @default(now()) @db.Timestamptz(6)
 
+  /// "Borrar chat" de cada lado (ENG-70): lo oculta solo de esa bandeja. Un mensaje nuevo limpia las dos.
+  patient_hidden_at      DateTime? @db.Timestamptz(6)
+  professional_hidden_at DateTime? @db.Timestamptz(6)
+
   patient      Patient      @relation(fields: [patient_id], references: [profile_id])
   professional Professional @relation(fields: [professional_id], references: [profile_id])
   messages     Message[]
 
   @@unique([patient_id, professional_id])
+  @@index([professional_id])
   @@map("conversations")
 }
 
