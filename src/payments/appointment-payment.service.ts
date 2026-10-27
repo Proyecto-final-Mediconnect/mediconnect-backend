@@ -231,7 +231,10 @@ export class AppointmentPaymentService {
     );
 
     // Se empezó a pagar desde la otra punta: la misma preferencia, pero que
-    // vuelva adonde está el paciente ahora.
+    // vuelva adonde está el paciente ahora. Si tiene el checkout abierto en las
+    // dos puntas, el último en llamar decide adónde vuelve la preferencia (la
+    // pestaña web podría terminar en `mediconnect://`); el estado igual sale
+    // del webhook, no del retorno.
     if (reusable && reusable.backUrlSuccess !== backUrls.success) {
       await this.mercadopago.updateBackUrls(reusable.id, backUrls);
     }

@@ -257,11 +257,6 @@ export class MercadoPagoService {
   }
 
   /**
-   * Vence una preferencia ya: después de esto MercadoPago no acepta pagos con
-   * ella. Se usa al cancelar el turno, para que el link que el paciente dejó
-   * abierto no cobre un turno que ya no existe.
-   */
-  /**
    * Cambia adónde vuelve el navegador después de pagar (ENG-172).
    *
    * Se usa cuando un turno que ya tiene preferencia se paga desde la otra punta
@@ -282,6 +277,11 @@ export class MercadoPagoService {
     );
   }
 
+  /**
+   * Vence una preferencia ya: después de esto MercadoPago no acepta pagos con
+   * ella. Se usa al cancelar el turno, para que el link que el paciente dejó
+   * abierto no cobre un turno que ya no existe.
+   */
   async expirePreference(preferenceId: string, now: Date): Promise<void> {
     this.assertConfigured();
 
