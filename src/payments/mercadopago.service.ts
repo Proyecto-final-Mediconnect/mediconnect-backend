@@ -48,6 +48,9 @@ export interface Preference {
   /** Hasta cuándo se puede pagar. `null` si la preferencia no vence, que con
    *  las que crea este service no debería pasar nunca. */
   expiresAt: Date | null;
+  /** Adónde vuelve el navegador al aprobarse el pago. Sirve para saber si una
+   *  preferencia que se va a reutilizar vuelve a la web o a la app (ENG-172). */
+  backUrlSuccess: string | null;
 }
 
 /**
@@ -84,6 +87,7 @@ interface PreferenceResponse {
   external_reference?: string;
   expires?: boolean;
   expiration_date_to?: string | null;
+  back_urls?: { success?: string };
 }
 
 /**
@@ -253,6 +257,27 @@ export class MercadoPagoService {
   }
 
   /**
+   * Cambia adónde vuelve el navegador después de pagar (ENG-172).
+   *
+   * Se usa cuando un turno que ya tiene preferencia se paga desde la otra punta
+   * —empezó en la web y sigue en la app, o al revés—. Crear otra dejaría viva la
+   * anterior y el turno tendría dos links pagables; actualizar la misma no.
+   * MercadoPago conserva el `auto_return` y el vencimiento.
+   */
+  async updateBackUrls(
+    preferenceId: string,
+    backUrls: { success: string; failure: string; pending: string },
+  ): Promise<void> {
+    this.assertConfigured();
+
+    await this.request(
+      'PUT',
+      `/checkout/preferences/${encodeURIComponent(preferenceId)}`,
+      { back_urls: backUrls },
+    );
+  }
+
+  /**
    * Vence una preferencia ya: después de esto MercadoPago no acepta pagos con
    * ella. Se usa al cancelar el turno, para que el link que el paciente dejó
    * abierto no cobre un turno que ya no existe.
@@ -280,6 +305,7 @@ export class MercadoPagoService {
         body.expires && body.expiration_date_to
           ? new Date(body.expiration_date_to)
           : null,
+      backUrlSuccess: body.back_urls?.success || null,
     };
   }
 
