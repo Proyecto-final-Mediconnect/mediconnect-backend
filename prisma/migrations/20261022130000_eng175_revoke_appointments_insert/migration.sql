@@ -18,15 +18,20 @@
 -- El SELECT queda: es como cada uno lee sus turnos, y la policy
 -- `appointments_select_own` sigue siendo la autorización de esa lectura.
 --
--- De paso se sacan TRUNCATE, REFERENCES y TRIGGER, que `anon` y `authenticated`
--- tenían por los default privileges de Supabase y nadie usa. PostgREST no
--- expone TRUNCATE, pero un permiso que no hace falta es uno menos que auditar.
+-- De paso se sacan TRUNCATE, REFERENCES, TRIGGER y MAINTAIN (Postgres 17), que
+-- `anon` y `authenticated` tenían por los default privileges de Supabase y
+-- nadie usa. PostgREST no expone TRUNCATE, pero un permiso que no hace falta es
+-- uno menos que auditar. Se hace con `REVOKE ALL` + re-conceder SELECT (como
+-- ENG-85/87/140), así no depende de la versión de Postgres ni de qué sumen los
+-- defaults a futuro.
 -- `anon` se queda sin nada: la tabla nunca se lee sin sesión.
 --
 -- Las líneas `--;;` marcan el corte entre sentencias para el spec de
 -- integración, igual que en ENG-63.
 --;;
-REVOKE INSERT, TRUNCATE, REFERENCES, TRIGGER ON public.appointments FROM authenticated;
+REVOKE ALL ON public.appointments FROM authenticated;
+--;;
+GRANT SELECT ON public.appointments TO authenticated;
 --;;
 REVOKE ALL ON public.appointments FROM anon;
 --;;

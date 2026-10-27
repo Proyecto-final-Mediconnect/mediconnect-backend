@@ -108,10 +108,22 @@ describe('INSERT directo sobre appointments (integration)', () => {
       'grant usage on schema public to authenticated',
     );
 
-    // El estado que dejó ENG-54.
+    // El estado que dejó ENG-54, más los default privileges de Supabase
+    // (MAINTAIN sólo existe desde Postgres 17).
     await prisma.$executeRawUnsafe(
       'grant select, insert on public.appointments to authenticated',
     );
+    await prisma.$executeRawUnsafe(
+      'grant truncate, references, trigger on public.appointments to authenticated, anon',
+    );
+    const [{ pg_version }] = await prisma.$queryRaw<
+      { pg_version: number }[]
+    >`select current_setting('server_version_num')::int as pg_version`;
+    if (pg_version >= 170000) {
+      await prisma.$executeRawUnsafe(
+        'grant maintain on public.appointments to authenticated, anon',
+      );
+    }
     await prisma.$executeRawUnsafe(
       'alter table public.appointments enable row level security',
     );
@@ -134,7 +146,7 @@ describe('INSERT directo sobre appointments (integration)', () => {
       'drop policy if exists appointments_select_own on public.appointments',
       'drop policy if exists appointments_insert_own_patient on public.appointments',
       'alter table public.appointments disable row level security',
-      'revoke select, insert on public.appointments from authenticated',
+      'revoke all on public.appointments from authenticated, anon',
     ]) {
       await prisma.$executeRawUnsafe(sql);
     }
