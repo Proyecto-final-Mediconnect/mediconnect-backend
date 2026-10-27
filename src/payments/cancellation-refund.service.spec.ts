@@ -55,6 +55,7 @@ describe('CancellationRefundService', () => {
     payment: { update: jest.Mock };
   };
   let mercadoPago: { refundPayment: jest.Mock };
+  let loggerError: jest.SpyInstance;
 
   beforeEach(() => {
     prisma = {
@@ -74,7 +75,9 @@ describe('CancellationRefundService', () => {
       prisma as unknown as PrismaService,
       mercadoPago as unknown as MercadoPagoService,
     );
-    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    loggerError = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   });
 
@@ -181,12 +184,39 @@ describe('CancellationRefundService', () => {
       expect(prisma.payment.update).not.toHaveBeenCalled();
     });
 
-    it('si la base falla, no tira', async () => {
+    it('si la base falla al registrar, no tira y devuelve el monto calculado', async () => {
       prisma.refund.create.mockRejectedValue(new Error('connection lost'));
 
       await expect(
         service.refundCancellation(APPOINTMENT_ID, NOW),
+      ).resolves.toEqual({ percent: 100, amount: 15000, status: 'PENDIENTE' });
+      expect(loggerError).toHaveBeenCalledWith(
+        expect.stringContaining('REFUND_LOST'),
+      );
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+    });
+
+    it('si falla la lectura, no tira', async () => {
+      prisma.appointment.findUnique.mockRejectedValue(new Error('down'));
+
+      await expect(
+        service.refundCancellation(APPOINTMENT_ID, NOW),
       ).resolves.toMatchObject({ status: 'PENDIENTE' });
+    });
+
+    it('un pago aprobado sin id de MercadoPago queda PENDIENTE y registrado', async () => {
+      prisma.appointment.findUnique.mockResolvedValue(
+        appointment({ payment: { mercadopago_payment_id: null } }),
+      );
+
+      await expect(
+        service.refundCancellation(APPOINTMENT_ID, NOW),
+      ).resolves.toEqual({ percent: 100, amount: 15000, status: 'PENDIENTE' });
+      expect(prisma.refund.create).toHaveBeenCalled();
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(loggerError).toHaveBeenCalledWith(
+        expect.stringContaining('REFUND_LOST'),
+      );
     });
   });
 
