@@ -1,4 +1,7 @@
 import { Logger } from '@nestjs/common';
+import * as Sentry from '@sentry/nestjs';
+
+jest.mock('@sentry/nestjs', () => ({ captureMessage: jest.fn() }));
 import { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CancellationRefundService } from './cancellation-refund.service';
@@ -51,7 +54,7 @@ describe('CancellationRefundService', () => {
   let service: CancellationRefundService;
   let prisma: {
     appointment: { findUnique: jest.Mock };
-    refund: { create: jest.Mock; update: jest.Mock };
+    refund: { create: jest.Mock; update: jest.Mock; findFirst: jest.Mock };
     payment: { update: jest.Mock };
   };
   let mercadoPago: { refundPayment: jest.Mock };
@@ -63,6 +66,7 @@ describe('CancellationRefundService', () => {
       refund: {
         create: jest.fn().mockResolvedValue({ id: 'ref-1' }),
         update: jest.fn().mockResolvedValue({}),
+        findFirst: jest.fn().mockResolvedValue(null),
       },
       payment: { update: jest.fn().mockResolvedValue({}) },
     };
@@ -233,6 +237,165 @@ describe('CancellationRefundService', () => {
       });
       expect(prisma.refund.create).not.toHaveBeenCalled();
       expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('refundUnappliedPayment (ENG-144)', () => {
+    const DUPLICATE = {
+      paymentId: 'pay-1',
+      mpPaymentId: 'mp-segundo',
+      amount: 15000,
+      reason: 'PAGO_DUPLICADO' as const,
+      markPaymentRefunded: false,
+    };
+
+    beforeEach(() => {
+      (Sentry.captureMessage as jest.Mock).mockClear();
+    });
+
+    it('devuelve el pago entero, con una clave fija por pago de MercadoPago', async () => {
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PROCESADO');
+
+      expect(prisma.refund.create).toHaveBeenCalledWith({
+        data: {
+          payment_id: 'pay-1',
+          amount: new Prisma.Decimal(15000),
+          reason: 'PAGO_DUPLICADO:mp-segundo',
+        },
+        select: expect.any(Object),
+      });
+      expect(mercadoPago.refundPayment).toHaveBeenCalledWith(
+        'mp-segundo',
+        15000,
+        'unapplied-mp-segundo',
+      );
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-1' },
+        data: {
+          status: 'PROCESADO',
+          mercadopago_refund_id: '9001',
+          processed_at: NOW,
+        },
+      });
+    });
+
+    it('el duplicado no toca la fila del turno: es del primer pago, que sigue valiendo', async () => {
+      await service.refundUnappliedPayment(DUPLICATE, NOW);
+
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+
+    it('el pago sobre un turno inactivo sí deja la fila REEMBOLSADO', async () => {
+      await service.refundUnappliedPayment(
+        {
+          ...DUPLICATE,
+          reason: 'PAGO_SOBRE_TURNO_INACTIVO',
+          markPaymentRefunded: true,
+        },
+        NOW,
+      );
+
+      expect(prisma.payment.update).toHaveBeenCalledWith({
+        where: { id: 'pay-1' },
+        data: { status: 'REEMBOLSADO' },
+      });
+    });
+
+    it('si el webhook se repite no pide otra devolución', async () => {
+      prisma.refund.findFirst.mockResolvedValue({
+        id: 'ref-1',
+        status: 'PROCESADO',
+        created_at: NOW,
+      });
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PROCESADO');
+
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+    });
+
+    it('una fila PENDIENTE se reintenta con la misma fila y la misma clave', async () => {
+      prisma.refund.findFirst.mockResolvedValue({
+        id: 'ref-viejo',
+        status: 'PENDIENTE',
+        created_at: new Date(NOW.getTime() - 3_600_000),
+      });
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PROCESADO');
+
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+      expect(mercadoPago.refundPayment).toHaveBeenCalledWith(
+        'mp-segundo',
+        15000,
+        'unapplied-mp-segundo',
+      );
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-viejo' },
+        data: expect.objectContaining({ status: 'PROCESADO' }),
+      });
+    });
+
+    it('pasadas las 24 h de la clave no reintenta: avisa para devolverlo a mano', async () => {
+      prisma.refund.findFirst.mockResolvedValue({
+        id: 'ref-viejo',
+        status: 'PENDIENTE',
+        created_at: new Date(NOW.getTime() - 25 * 3_600_000),
+      });
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PENDIENTE');
+
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(Sentry.captureMessage).toHaveBeenCalled();
+    });
+
+    it('dos entregas concurrentes: la que pierde el índice único sigue con la fila de la otra', async () => {
+      prisma.refund.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: 'ref-otra',
+          status: 'PROCESADO',
+          created_at: NOW,
+        });
+      prisma.refund.create.mockRejectedValue({ code: 'P2002' });
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PROCESADO');
+
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(prisma.refund.update).not.toHaveBeenCalled();
+    });
+
+    it('si MercadoPago falla queda PENDIENTE y avisa a Sentry para devolverlo a mano, sin tirar', async () => {
+      mercadoPago.refundPayment.mockRejectedValue(new Error('mp caído'));
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PENDIENTE');
+
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+        expect.stringContaining('PAGO_DUPLICADO'),
+        expect.objectContaining({
+          extra: { mpPaymentId: 'mp-segundo', status: 'PENDIENTE' },
+        }),
+      );
+    });
+
+    it('si ni siquiera puede escribir la fila, igual avisa y no tira', async () => {
+      prisma.refund.findFirst.mockRejectedValue(new Error('base caída'));
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PENDIENTE');
+      expect(Sentry.captureMessage).toHaveBeenCalled();
     });
   });
 });
