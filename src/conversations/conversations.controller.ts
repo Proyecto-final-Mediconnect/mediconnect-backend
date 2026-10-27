@@ -46,8 +46,13 @@ export class ConversationsController {
    * concesión consciente: un XSS podría leer este token mientras dure (1 h). El
    * refresh token **no** sale nunca de la cookie, así que no se puede estirar la
    * sesión desde afuera. La app mobile ya tiene el token y no lo necesita.
+   *
+   * Deuda: un token dedicado de vida corta (5–10 min, con refresco por este
+   * mismo endpoint) apenas se pueda firmar uno que Realtime acepte. CORS ya
+   * limita la lectura cross-origin a `WEB_ORIGIN`.
    */
   @Get('realtime-token')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Header('Cache-Control', 'no-store')
   realtimeToken(@Req() req: Request): RealtimeToken {
     const { accessToken } = requireAuth(req);

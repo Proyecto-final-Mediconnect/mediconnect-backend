@@ -141,13 +141,21 @@ export class ConversationsService {
         created_at: true,
         patient: { select: PERSON_SELECT },
         professional: { select: PERSON_SELECT },
-        messages: {
-          orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
-          take: 1,
-          select: MESSAGE_SELECT,
-        },
       },
     });
+
+    // El último mensaje de cada una, resuelto en la base: un `take: 1` anidado
+    // de Prisma trae todos los mensajes de las conversaciones y recorta en Node.
+    // Usa el índice `(conversation_id, created_at)`.
+    const lastRows = rows.length
+      ? await this.prisma.$queryRaw<MessageRow[]>`
+          select distinct on (conversation_id)
+                 id, conversation_id, sender_id, content, created_at, read_at
+            from messages
+           where conversation_id = any(${rows.map((row) => row.id)}::uuid[])
+           order by conversation_id, created_at desc, id desc`
+      : [];
+    const lastBy = new Map(lastRows.map((m) => [m.conversation_id, m]));
 
     const unread = rows.length
       ? await this.prisma.message.groupBy({
@@ -166,7 +174,7 @@ export class ConversationsService {
 
     const conversaciones = rows
       .map((row) => {
-        const last = row.messages[0];
+        const last = lastBy.get(row.id);
         return {
           id: row.id,
           contraparte:
@@ -422,27 +430,35 @@ export class ConversationsService {
     userId: string,
     role: ChatRole,
   ): Promise<ChatCounterpart[]> {
-    const appointments = await this.prisma.appointment.findMany({
-      where: {
-        ...(role === 'PACIENTE'
-          ? { patient_id: userId }
-          : { professional_id: userId }),
-        status: { in: CHAT_ENABLING_STATUSES },
-      },
-      distinct: [role === 'PACIENTE' ? 'professional_id' : 'patient_id'],
-      select: {
-        patient: { select: PERSON_SELECT },
-        professional: { select: PERSON_SELECT },
-      },
+    // Deduplica en la base: `distinct` de Prisma trae todos los turnos y lo hace en Node.
+    const mine =
+      role === 'PACIENTE'
+        ? { patient_id: userId }
+        : { professional_id: userId };
+    const counterpartField =
+      role === 'PACIENTE' ? 'professional_id' : 'patient_id';
+    const grouped = await this.prisma.appointment.groupBy({
+      by: [counterpartField],
+      where: { ...mine, status: { in: CHAT_ENABLING_STATUSES } },
     });
+    if (grouped.length === 0) return [];
+    const ids = grouped.map((g) => g[counterpartField]);
 
-    return appointments
-      .map((a) =>
-        role === 'PACIENTE'
-          ? toCounterpart(a.professional, 'PROFESIONAL')
-          : toCounterpart(a.patient, 'PACIENTE'),
-      )
-      .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    const people =
+      role === 'PACIENTE'
+        ? (
+            await this.prisma.professional.findMany({
+              where: { profile_id: { in: ids } },
+              select: PERSON_SELECT,
+            })
+          ).map((p) => toCounterpart(p, 'PROFESIONAL'))
+        : (
+            await this.prisma.patient.findMany({
+              where: { profile_id: { in: ids } },
+              select: PERSON_SELECT,
+            })
+          ).map((p) => toCounterpart(p, 'PACIENTE'));
+    return people.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
   }
 
   /** Cómo se presenta quien escribe en el aviso de la otra persona. */

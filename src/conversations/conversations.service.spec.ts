@@ -60,9 +60,10 @@ describe('ConversationsService', () => {
       create: jest.Mock;
       updateMany: jest.Mock;
     };
-    appointment: { count: jest.Mock; findMany: jest.Mock };
-    patient: { findUnique: jest.Mock };
-    professional: { findUnique: jest.Mock };
+    appointment: { count: jest.Mock; groupBy: jest.Mock };
+    patient: { findUnique: jest.Mock; findMany: jest.Mock };
+    professional: { findUnique: jest.Mock; findMany: jest.Mock };
+    $queryRaw: jest.Mock;
   };
   let notifications: {
     notifyNewMessage: jest.Mock;
@@ -97,10 +98,17 @@ describe('ConversationsService', () => {
       },
       appointment: {
         count: jest.fn().mockResolvedValue(1),
+        groupBy: jest.fn().mockResolvedValue([]),
+      },
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      patient: {
+        findUnique: jest.fn().mockResolvedValue(PATIENT),
         findMany: jest.fn().mockResolvedValue([]),
       },
-      patient: { findUnique: jest.fn().mockResolvedValue(PATIENT) },
-      professional: { findUnique: jest.fn().mockResolvedValue(PRO) },
+      professional: {
+        findUnique: jest.fn().mockResolvedValue(PRO),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
     };
     notifications = {
       notifyNewMessage: jest.fn().mockResolvedValue(undefined),
@@ -121,16 +129,18 @@ describe('ConversationsService', () => {
           created_at: new Date('2026-10-01T10:00:00.000Z'),
           patient: PATIENT,
           professional: OTHER_PRO,
-          messages: [
-            messageRow('m-1', OTHER_PRO_ID, '2026-10-02T10:00:00.000Z'),
-          ],
         },
         {
           id: CONVERSATION_ID,
           created_at: new Date('2026-10-20T10:00:00.000Z'),
           patient: PATIENT,
           professional: PRO,
-          messages: [],
+        },
+      ]);
+      prisma.$queryRaw.mockResolvedValue([
+        {
+          ...messageRow('m-1', OTHER_PRO_ID, '2026-10-02T10:00:00.000Z'),
+          conversation_id: 'vieja',
         },
       ]);
       prisma.message.groupBy.mockResolvedValue([
@@ -167,7 +177,7 @@ describe('ConversationsService', () => {
         },
         ultimoMensaje: {
           id: 'm-1',
-          conversacionId: CONVERSATION_ID,
+          conversacionId: 'vieja',
           autorId: OTHER_PRO_ID,
           contenido: 'mensaje m-1',
           enviadoEl: '2026-10-02T10:00:00.000Z',
@@ -187,7 +197,6 @@ describe('ConversationsService', () => {
           created_at: NOW,
           patient: PATIENT,
           professional: PRO,
-          messages: [],
         },
       ]);
 
@@ -212,23 +221,28 @@ describe('ConversationsService', () => {
           created_at: NOW,
           patient: PATIENT,
           professional: PRO,
-          messages: [],
         },
       ]);
-      prisma.appointment.findMany.mockResolvedValue([
-        { patient: PATIENT, professional: PRO },
-        { patient: PATIENT, professional: OTHER_PRO },
+      prisma.appointment.groupBy.mockResolvedValue([
+        { professional_id: PRO_ID },
+        { professional_id: OTHER_PRO_ID },
       ]);
+      prisma.professional.findMany.mockResolvedValue([PRO, OTHER_PRO]);
 
       const { disponibles } = await service.listMine(PATIENT_ID);
 
-      expect(prisma.appointment.findMany).toHaveBeenCalledWith(
+      expect(prisma.appointment.groupBy).toHaveBeenCalledWith(
         expect.objectContaining({
+          by: ['professional_id'],
           where: {
             patient_id: PATIENT_ID,
             status: { in: CHAT_ENABLING_STATUSES },
           },
-          distinct: ['professional_id'],
+        }),
+      );
+      expect(prisma.professional.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { profile_id: { in: [PRO_ID, OTHER_PRO_ID] } },
         }),
       );
       expect(disponibles).toEqual([
@@ -239,6 +253,7 @@ describe('ConversationsService', () => {
     it('sin conversaciones no consulta los no leídos', async () => {
       await service.listMine(PATIENT_ID);
       expect(prisma.message.groupBy).not.toHaveBeenCalled();
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
     });
 
     it('un moderador o un perfil inexistente no tiene chat (409)', async () => {
@@ -275,7 +290,6 @@ describe('ConversationsService', () => {
           created_at: NOW,
           patient: PATIENT,
           professional: PRO,
-          messages: [],
         },
       ]);
 
@@ -303,7 +317,6 @@ describe('ConversationsService', () => {
           created_at: NOW,
           patient: PATIENT,
           professional: PRO,
-          messages: [],
         },
       ]);
 

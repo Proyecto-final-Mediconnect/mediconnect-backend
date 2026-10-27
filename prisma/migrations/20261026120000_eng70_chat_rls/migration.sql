@@ -14,6 +14,9 @@
 -- las tablas (RLS no se le aplica) y valida que haya un turno entre las dos
 -- personas. Por eso `authenticated` recibe `select` y nada más, y `anon` nada.
 --
+-- `(select auth.uid())` y no `auth.uid()` a secas: así Postgres lo evalúa una
+-- vez por statement (initPlan) y no por fila.
+--
 -- El `filter` de la suscripción no es un control de acceso, lo elige el
 -- cliente: quien filtra es esta política (ver el informe del spike).
 --
@@ -30,7 +33,11 @@ begin
   if exists (select 1 from pg_roles where rolname = 'authenticated') then
     revoke all on public.conversations from authenticated;
     revoke all on public.messages from authenticated;
-    grant select on public.conversations to authenticated;
+    -- Grant por columna: el cliente solo necesita estas. Las marcas de
+    -- ocultamiento (`*_hidden_at`, migración eng70_chat_hidden) le dirían a un
+    -- participante si la otra persona "borró" el chat, y quedan fuera.
+    grant select (id, patient_id, professional_id, created_at)
+      on public.conversations to authenticated;
     grant select on public.messages to authenticated;
   end if;
 end $$;
@@ -43,7 +50,7 @@ drop policy if exists conversations_select_participants on public.conversations;
 --;;
 create policy conversations_select_participants on public.conversations
   for select
-  using (patient_id = auth.uid() or professional_id = auth.uid());
+  using (patient_id = (select auth.uid()) or professional_id = (select auth.uid()));
 --;;
 drop policy if exists messages_select_participants on public.messages;
 --;;
@@ -57,7 +64,8 @@ create policy messages_select_participants on public.messages
       select 1
         from public.conversations c
        where c.id = messages.conversation_id
-         and (c.patient_id = auth.uid() or c.professional_id = auth.uid())
+         and (c.patient_id = (select auth.uid())
+           or c.professional_id = (select auth.uid()))
     )
   );
 --;;

@@ -212,6 +212,17 @@ describe('RLS del chat (integration)', () => {
     ).rejects.toThrow(/permission denied/);
   });
 
+  it('el cliente no ve si la otra persona ocultó el chat', async () => {
+    await expect(
+      asUser(
+        patient,
+        (tx) => tx.$queryRaw`
+          select professional_hidden_at from conversations
+           where id = ${conversationId}::uuid`,
+      ),
+    ).rejects.toThrow(/permission denied/);
+  });
+
   it('la migración se puede volver a correr sin romper nada', async () => {
     await expect(applyMigration(prisma, MIGRATION)).resolves.toBeUndefined();
   });
