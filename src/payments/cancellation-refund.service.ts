@@ -126,8 +126,9 @@ export class CancellationRefundService {
     try {
       return await this.refund(appointmentId, now);
     } catch (err) {
+      // Falló la lectura: sin ella no hay monto que informar.
       this.logger.error(
-        `No se pudo registrar el reembolso del turno ${appointmentId}: ${String(err)}`,
+        `REFUND_LOST: no se pudo calcular el reembolso del turno ${appointmentId}: ${String(err)}`,
       );
       return { percent: 0, amount: 0, status: 'PENDIENTE' };
     }
@@ -250,17 +251,37 @@ export class CancellationRefundService {
     const { percent, amount } = this.compute(appointment, now);
     const payment = appointment?.payment;
 
-    if (!payment?.mercadopago_payment_id || amount.isZero()) {
+    // Sin pago aprobado `compute` da monto 0; con la política en 0 % también.
+    if (!payment || amount.isZero()) {
       return { percent, amount: amount.toNumber(), status: null };
     }
 
-    const refund = await this.prisma.refund.create({
-      data: {
-        payment_id: payment.id,
-        amount,
-        reason: CANCELLATION_REASON,
-      },
-    });
+    // Desde acá el monto ya está calculado: si registrar el reembolso falla se
+    // devuelve igual, para que el paciente no vea "$0, pendiente".
+    let refund: { id: string };
+    try {
+      refund = await this.prisma.refund.create({
+        data: {
+          payment_id: payment.id,
+          amount,
+          reason: CANCELLATION_REASON,
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `REFUND_LOST: no se pudo registrar el reembolso del turno ${appointmentId} (pago ${payment.id}, ${amount.toString()}): ${String(err)}`,
+      );
+      return { percent, amount: amount.toNumber(), status: 'PENDIENTE' };
+    }
+
+    // Pago aprobado sin id de MercadoPago: no hay a quién pedirle la
+    // devolución. Queda la fila `PENDIENTE` para resolverlo a mano.
+    if (!payment.mercadopago_payment_id) {
+      this.logger.error(
+        `REFUND_LOST: el pago ${payment.id} del turno ${appointmentId} está aprobado pero sin mercadopago_payment_id (refund ${refund.id}): devolverlo a mano.`,
+      );
+      return { percent, amount: amount.toNumber(), status: 'PENDIENTE' };
+    }
 
     let status: RefundOutcome = 'PENDIENTE';
     try {
@@ -297,7 +318,7 @@ export class CancellationRefundService {
       }
     } catch (err) {
       this.logger.error(
-        `No se pudo reembolsar el turno ${appointmentId} (refund ${refund.id}): ${String(err)}`,
+        `REFUND_FAILED: no se pudo reembolsar el turno ${appointmentId} (refund ${refund.id}): ${String(err)}`,
       );
     }
 

@@ -440,12 +440,16 @@ export class AppointmentsService {
     // Si la cancelación falla, el link tiene que seguir sirviendo: por eso se
     // vence recién acá.
     await this.payments.expireCheckout(appointmentId, now);
-    // Solo un turno confirmado está pago, y solo ese tiene algo que devolver o
-    // un profesional que se enteró de la reserva (ENG-69): de una reserva sin
-    // pagar nunca se le avisó, y "te cancelaron" sería de un turno que no conoce.
-    let refund: CancellationRefund = { percent: 0, amount: 0, status: null };
-    if (row.status === 'CONFIRMADO') {
-      refund = await this.refunds.refundCancellation(appointmentId, now);
+    // `row.status` se leyó antes del UPDATE: si el webhook confirmó el pago en el
+    // medio, el turno estaba `RESERVADO_SIN_PAGAR` en la lectura y pago al
+    // escribirse la cancelación. Por eso el reembolso se intenta siempre;
+    // `refundCancellation` lee el pago fresco y devuelve `status: null` si no hay
+    // nada aprobado que devolver.
+    const refund = await this.refunds.refundCancellation(appointmentId, now);
+    // Al profesional solo se le avisa de un turno que conoce (ENG-69): el
+    // confirmado, o el que resultó pago. De una reserva sin pagar nunca se le
+    // avisó, y "te cancelaron" sería de un turno que no conoce.
+    if (refund.status !== null || row.status === 'CONFIRMADO') {
       await this.inApp.notifyProfessional(
         appointmentId,
         'TURNO_CANCELADO',
@@ -469,16 +473,15 @@ export class AppointmentsService {
     appointmentId: string,
     now: Date = new Date(),
   ): Promise<CancellationRefund> {
-    const row = await this.readCancellable(
+    await this.readCancellable(
       accessToken,
       userId,
       appointmentId,
       now,
+      'No pudimos calcular el reembolso. Probá de nuevo en unos minutos.',
     );
 
-    if (row.status !== 'CONFIRMADO') {
-      return { percent: 0, amount: 0, status: null };
-    }
+    // Sin pago aprobado `quote` da 0: no hace falta mirar el estado del turno.
     return this.refunds.quote(appointmentId, now);
   }
 
@@ -495,6 +498,7 @@ export class AppointmentsService {
     userId: string,
     appointmentId: string,
     now: Date,
+    readErrorMessage = 'No pudimos cancelar el turno. Probá de nuevo en unos minutos.',
   ): Promise<AppointmentRow> {
     const client = this.supabase.getClientForToken(accessToken);
 
@@ -505,9 +509,7 @@ export class AppointmentsService {
       .maybeSingle();
 
     if (error) {
-      throw new InternalServerErrorException(
-        'No pudimos cancelar el turno. Probá de nuevo en unos minutos.',
-      );
+      throw new InternalServerErrorException(readErrorMessage);
     }
     // También cae acá el turno de otra persona: RLS no lo devuelve, así que para
     // este usuario no existe. Un 403 confirmaría que el id es real.

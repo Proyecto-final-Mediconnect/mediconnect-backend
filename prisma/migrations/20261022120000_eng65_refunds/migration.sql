@@ -33,6 +33,11 @@ ALTER TABLE "appointments"
 -- SECURITY DEFINER porque el que inserta es `authenticated`, que no tiene por
 -- qué poder leer la política de otro profesional. El `search_path` vacío evita
 -- que una función homónima en otro esquema se cuele en la ejecución.
+--
+-- El trigger es la fuente de verdad sin importar quién inserte: corre igual con
+-- el INSERT de `authenticated` por PostgREST y con el `create` de Prisma (el
+-- backend, que no pasa por RLS). Si más adelante se revoca el INSERT directo
+-- (ENG-175), sigue valiendo.
 --;;
 CREATE OR REPLACE FUNCTION public.appointments_snapshot_cancellation_policy()
 RETURNS trigger

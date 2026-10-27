@@ -50,17 +50,6 @@ export class AppointmentsController {
   }
 
   /**
-   * Cancela un turno futuro propio (ENG-55).
-   *
-   * `PATCH` y no `DELETE`: el turno no se borra. Queda en CANCELADO, con su
-   * `cancelled_at`, porque el profesional tiene que poder ver que le cancelaron
-   * y porque de esa fila cuelgan el pago (ENG-63) y el reembolso (ENG-65).
-   *
-   * Sin body: lo único que se puede pedir es la cancelación. El motivo
-   * (`appointments.cancellation_reason`) no se expone todavía — el criterio de
-   * aceptación no lo pide y con `forbidNonWhitelisted` mandarlo daría 400.
-   */
-  /**
    * Cuánto se devolvería si el paciente cancela ahora (ENG-65), para mostrarlo
    * antes de confirmar. No cancela nada.
    */
@@ -73,6 +62,17 @@ export class AppointmentsController {
     return this.appointments.cancellationQuote(accessToken, userId, id);
   }
 
+  /**
+   * Cancela un turno futuro propio (ENG-55).
+   *
+   * `PATCH` y no `DELETE`: el turno no se borra. Queda en CANCELADO, con su
+   * `cancelled_at`, porque el profesional tiene que poder ver que le cancelaron
+   * y porque de esa fila cuelgan el pago (ENG-63) y el reembolso (ENG-65).
+   *
+   * Sin body: lo único que se puede pedir es la cancelación. El motivo
+   * (`appointments.cancellation_reason`) no se expone todavía — el criterio de
+   * aceptación no lo pide y con `forbidNonWhitelisted` mandarlo daría 400.
+   */
   @Patch(':id/cancel')
   cancel(
     @Req() req: Request,

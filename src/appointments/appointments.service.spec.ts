@@ -609,10 +609,33 @@ describe('AppointmentsService', () => {
 
     it('no avisa la cancelación de una reserva sin pagar, que nunca se le anunció', async () => {
       results = [READ_OK];
+      refunds.refundCancellation.mockResolvedValue({
+        percent: 100,
+        amount: 0,
+        status: null,
+      });
 
       await cancel();
 
       expect(inApp.notifyProfessional).not.toHaveBeenCalled();
+    });
+
+    it('si el pago se aprobó entre la lectura y el UPDATE, reembolsa y avisa', async () => {
+      // La lectura vio `RESERVADO_SIN_PAGAR`; el webhook confirmó en el medio.
+      results = [READ_OK];
+
+      const view = await cancel();
+
+      expect(refunds.refundCancellation).toHaveBeenCalledWith(
+        APPOINTMENT_ID,
+        NOW,
+      );
+      expect(view.refund.status).toBe('PROCESADO');
+      expect(inApp.notifyProfessional).toHaveBeenCalledWith(
+        APPOINTMENT_ID,
+        'TURNO_CANCELADO',
+        NOW,
+      );
     });
 
     it('reembolsa un turno confirmado y devuelve lo reembolsado (ENG-65)', async () => {
@@ -635,10 +658,14 @@ describe('AppointmentsService', () => {
 
     it('una reserva sin pagar no tiene nada que reembolsar', async () => {
       results = [READ_OK];
+      refunds.refundCancellation.mockResolvedValue({
+        percent: 0,
+        amount: 0,
+        status: null,
+      });
 
       const view = await cancel();
 
-      expect(refunds.refundCancellation).not.toHaveBeenCalled();
       expect(view.refund).toEqual({ percent: 0, amount: 0, status: null });
     });
 
@@ -740,15 +767,25 @@ describe('AppointmentsService', () => {
       expect(prisma.appointment.update).not.toHaveBeenCalled();
     });
 
-    it('una reserva sin pagar cotiza 0', async () => {
+    it('una reserva sin pagar cotiza 0 (el service de reembolsos lo resuelve)', async () => {
       results = [{ data: INSERTED_ROW, error: null }];
-
-      await expect(quote()).resolves.toEqual({
-        percent: 0,
+      refunds.quote.mockResolvedValue({
+        percent: 100,
         amount: 0,
         status: null,
       });
-      expect(refunds.quote).not.toHaveBeenCalled();
+
+      await expect(quote()).resolves.toEqual({
+        percent: 100,
+        amount: 0,
+        status: null,
+      });
+    });
+
+    it('un error de lectura en la cotización no dice que falló la cancelación', async () => {
+      results = [{ data: null, error: { message: 'boom' } }];
+
+      await expect(quote()).rejects.toThrow(/reembolso/);
     });
 
     it('el profesional no puede cotizar la cancelación', async () => {
