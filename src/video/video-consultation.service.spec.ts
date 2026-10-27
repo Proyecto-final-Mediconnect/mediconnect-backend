@@ -280,7 +280,7 @@ describe('VideoConsultationService', () => {
 
       await expect(
         service.join('jwt', PROFESSIONAL, APPOINTMENT, DENTRO_DE_LA_VENTANA),
-      ).rejects.toThrow(ConflictException);
+      ).rejects.toThrow('El paciente todavía no pagó este turno.');
     });
 
     it('acepta RESERVADO_SIN_PAGAR en un turno reservado antes de que existiera el cobro', async () => {
