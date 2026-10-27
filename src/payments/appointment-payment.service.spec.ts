@@ -631,17 +631,22 @@ describe('AppointmentPaymentService', () => {
     it('sin pago todavía devuelve SIN_INICIAR, no un error', async () => {
       await expect(
         service.readStatus('jwt', PATIENT, APPOINTMENT),
-      ).resolves.toMatchObject({ status: 'SIN_INICIAR' });
+      ).resolves.toMatchObject({ status: 'SIN_INICIAR', confirmedAt: null });
     });
 
     it('devuelve lo que escribió el webhook', async () => {
-      prisma.payment.findUnique.mockResolvedValue({ status: 'APROBADO' });
+      prisma.payment.findUnique.mockResolvedValue({
+        status: 'APROBADO',
+        confirmed_at: new Date('2026-10-01T14:59:00Z'),
+      });
 
       await expect(
         service.readStatus('jwt', PATIENT, APPOINTMENT),
       ).resolves.toMatchObject({
         status: 'APROBADO',
         appointmentStatus: 'RESERVADO_SIN_PAGAR',
+        // Para la historia del turno en la app: cuándo se acreditó.
+        confirmedAt: '2026-10-01T14:59:00.000Z',
       });
     });
 

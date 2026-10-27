@@ -1,7 +1,7 @@
 import { Test, type TestingModule } from '@nestjs/testing';
 import { Prisma } from '../../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
-import { CatalogService } from './catalog.service';
+import { CatalogService, normalizeSearch } from './catalog.service';
 import { ListProfessionalsQueryDto } from './dto/list-professionals-query.dto';
 
 type FindManyArgs = Prisma.ProfessionalFindManyArgs;
@@ -31,10 +31,12 @@ describe('CatalogService', () => {
   let service: CatalogService;
   const findMany = jest.fn();
   const count = jest.fn();
+  const queryRaw = jest.fn();
 
   beforeEach(async () => {
     findMany.mockReset().mockResolvedValue([]);
     count.mockReset().mockResolvedValue(0);
+    queryRaw.mockReset().mockResolvedValue([]);
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -43,6 +45,7 @@ describe('CatalogService', () => {
           provide: PrismaService,
           useValue: {
             professional: { findMany, count },
+            $queryRaw: queryRaw,
             // El service envuelve findMany + count en $transaction para que
             // ambos vean el mismo snapshot; el mock resuelve las promesas que
             // ya se ejecutaron al armarse el array.
@@ -296,6 +299,79 @@ describe('CatalogService', () => {
       expect(select).toMatchObject({
         specialties: { orderBy: { specialty: { name: 'asc' } } },
       });
+    });
+  });
+
+  describe('listProfessionals — búsqueda por nombre o especialidad', () => {
+    it('sin búsqueda no va a la base a buscar ids', async () => {
+      await service.listProfessionals(query());
+
+      expect(queryRaw).not.toHaveBeenCalled();
+      const args = findMany.mock.calls[0][0] as FindManyArgs;
+      expect(args.where).not.toHaveProperty('profile_id');
+    });
+
+    it('limita la página y el total a los que coinciden', async () => {
+      queryRaw.mockResolvedValue([{ profile_id: 'a' }, { profile_id: 'b' }]);
+
+      await service.listProfessionals(query({ search: 'Martín' }));
+
+      const args = findMany.mock.calls[0][0] as FindManyArgs;
+      expect(args.where).toMatchObject({ profile_id: { in: ['a', 'b'] } });
+      expect((count.mock.calls[0][0] as FindManyArgs).where).toMatchObject({
+        profile_id: { in: ['a', 'b'] },
+      });
+    });
+
+    // `$queryRaw` recibe un `Prisma.sql`: lo fijo está en `strings` y todo texto
+    // del usuario, en `values` (parámetros, nunca concatenado).
+    const sqlEnviado = () =>
+      queryRaw.mock.calls[0][0] as { strings: string[]; values: unknown[] };
+
+    it('busca sin tildes ni mayúsculas, y el texto viaja como parámetro', async () => {
+      await service.listProfessionals(query({ search: 'MARTÍN' }));
+
+      const { strings, values } = sqlEnviado();
+      expect(strings.join('')).not.toContain('martin');
+      expect(values).toContain('%martin%');
+    });
+
+    it('exige cada palabra, en cualquier orden', async () => {
+      await service.listProfessionals(query({ search: 'Olivares  Martín' }));
+
+      const { strings, values } = sqlEnviado();
+      expect(values).toEqual(
+        expect.arrayContaining(['%olivares%', '%martin%']),
+      );
+      expect(strings.join('')).toContain(' and ');
+    });
+
+    it('escapa los comodines de LIKE', async () => {
+      await service.listProfessionals(query({ search: '50%_x' }));
+
+      expect(sqlEnviado().values).toContain('%50\\%\\_x%');
+    });
+
+    it('las listas de caracteres con tilde coinciden posición a posición', async () => {
+      await service.listProfessionals(query({ search: 'joão' }));
+
+      const [con, sin] = sqlEnviado().values.filter(
+        (v) => typeof v === 'string' && !v.startsWith('%'),
+      ) as string[];
+      expect([...con]).toHaveLength([...sin].length);
+      // Lo que saca `normalizeSearch` (NFD) también lo saca `translate()`.
+      for (const [i, c] of [...con].entries()) {
+        expect(normalizeSearch(c)).toBe(sin[i]);
+      }
+    });
+
+    it('sin coincidencias devuelve la lista vacía, no el catálogo entero', async () => {
+      queryRaw.mockResolvedValue([]);
+
+      await service.listProfessionals(query({ search: 'nadie' }));
+
+      const args = findMany.mock.calls[0][0] as FindManyArgs;
+      expect(args.where).toMatchObject({ profile_id: { in: [] } });
     });
   });
 });

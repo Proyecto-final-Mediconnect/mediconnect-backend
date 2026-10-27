@@ -64,10 +64,15 @@ describe('Turnos (e2e)', () => {
     ...APPOINTMENT_ROW,
     scheduled_at: new Date(APPOINTMENT_ROW.scheduled_at),
     price: { toString: () => '15000.00' },
+    created_at: new Date('2026-10-01T12:00:00.000Z'),
   };
 
   /** Ídem tras cancelar. */
-  const CANCELLED_ROW = { ...CREATED_ROW, status: 'CANCELADO' };
+  const CANCELLED_ROW = {
+    ...CREATED_ROW,
+    status: 'CANCELADO',
+    cancelled_at: new Date('2026-10-02T12:00:00.000Z'),
+  };
 
   function makeSupabaseMock() {
     const builder: unknown = new Proxy(
@@ -431,6 +436,8 @@ describe('Turnos (e2e)', () => {
         status: 'CANCELADO',
         date: MONDAY,
         startTime: '10:00',
+        createdAt: '2026-10-01T12:00:00.000Z',
+        cancelledAt: '2026-10-02T12:00:00.000Z',
       });
     });
 

@@ -62,6 +62,8 @@ const CANCELLED_PRISMA_ROW = {
   scheduled_at: new Date(INSERTED_ROW.scheduled_at),
   price: { toString: () => '15000.00' },
   status: 'CANCELADO',
+  created_at: new Date('2026-08-01T12:00:00.000Z'),
+  cancelled_at: new Date('2026-08-02T15:30:00.000Z'),
 };
 
 /** Lo que devuelve `prisma.appointment.create` al reservar (ENG-175). */
@@ -541,6 +543,9 @@ describe('AppointmentsService', () => {
         date: MONDAY,
         startTime: '10:00',
         price: 15000,
+        // Para la historia del turno en la app: cuándo se reservó y se canceló.
+        createdAt: '2026-08-01T12:00:00.000Z',
+        cancelledAt: '2026-08-02T15:30:00.000Z',
       });
     });
 
