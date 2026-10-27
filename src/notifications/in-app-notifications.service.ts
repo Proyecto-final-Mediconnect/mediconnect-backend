@@ -20,6 +20,8 @@ export interface InAppNotificationView extends InAppNotificationText {
   id: string;
   type: string;
   appointmentId: string | null;
+  /** Conversación de un aviso `NUEVO_MENSAJE` (ENG-70), para que la campanita lleve al chat. */
+  conversationId: string | null;
   createdAt: string;
   readAt: string | null;
 }
@@ -98,6 +100,73 @@ export class InAppNotificationsService {
     }
   }
 
+  /**
+   * Avisa que llegó un mensaje de chat (ENG-70).
+   *
+   * **Un aviso por conversación sin leer**, no uno por mensaje: diez mensajes
+   * seguidos dejan un solo "Fulano te escribió", que se apaga al abrir el chat
+   * (`markConversationRead`). La unicidad de turno no aplica acá
+   * (`appointment_id` es `null`), así que el control es esta consulta previa:
+   * dos mensajes simultáneos pueden dejar dos avisos, y es un costo aceptable.
+   *
+   * **Nunca tira**, por lo mismo que `notifyProfessional`: el mensaje ya quedó
+   * guardado y eso es lo importante.
+   */
+  async notifyNewMessage(
+    recipientId: string,
+    conversationId: string,
+    from: string,
+    now: Date = new Date(),
+  ): Promise<void> {
+    try {
+      const pending = await this.prisma.notification.count({
+        where: {
+          ...this.conversationNotices(recipientId, conversationId),
+          read_at: null,
+        },
+      });
+      if (pending > 0) return;
+
+      await this.prisma.notification.create({
+        data: {
+          user_id: recipientId,
+          type: 'NUEVO_MENSAJE',
+          channel: 'IN_APP',
+          payload: { conversationId, from },
+          sent_at: now,
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `No se pudo dejar el aviso de mensaje de la conversación ${conversationId}: ${String(err)}`,
+      );
+    }
+  }
+
+  /** Apaga el aviso de mensaje nuevo de una conversación al abrirla (ENG-70). */
+  async markConversationRead(
+    userId: string,
+    conversationId: string,
+    now: Date = new Date(),
+  ): Promise<void> {
+    await this.prisma.notification.updateMany({
+      where: {
+        ...this.conversationNotices(userId, conversationId),
+        read_at: null,
+      },
+      data: { read_at: now },
+    });
+  }
+
+  private conversationNotices(userId: string, conversationId: string) {
+    return {
+      user_id: userId,
+      type: 'NUEVO_MENSAJE' as const,
+      channel: 'IN_APP' as const,
+      payload: { path: ['conversationId'], equals: conversationId },
+    };
+  }
+
   /** La bandeja del usuario: los últimos avisos in-app y cuántos no leyó. */
   async listMine(userId: string): Promise<InAppInbox> {
     const where = { user_id: userId, channel: 'IN_APP' as const };
@@ -125,6 +194,7 @@ export class InAppNotificationsService {
         id: row.id,
         type: row.type,
         appointmentId: row.appointment_id,
+        conversationId: conversationIdOf(row.payload),
         createdAt: row.created_at.toISOString(),
         readAt: row.read_at?.toISOString() ?? null,
         ...renderInAppNotification(row.type, row.payload),
@@ -159,4 +229,12 @@ export class InAppNotificationsService {
     const exists = await this.prisma.notification.count({ where: owned });
     if (exists === 0) throw new NotFoundException('Ese aviso no existe.');
   }
+}
+
+function conversationIdOf(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
+  const value = (payload as Record<string, unknown>).conversationId;
+  return typeof value === 'string' ? value : null;
 }
