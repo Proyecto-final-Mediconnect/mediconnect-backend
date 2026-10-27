@@ -63,6 +63,12 @@ const CANCELLED_PRISMA_ROW = {
   status: 'CANCELADO',
 };
 
+/** Lo que devuelve `prisma.appointment.create` al reservar (ENG-175). */
+const CREATED_PRISMA_ROW = {
+  ...CANCELLED_PRISMA_ROW,
+  status: 'RESERVADO_SIN_PAGAR',
+};
+
 describe('AppointmentsService', () => {
   let service: AppointmentsService;
   let payments: { expireCheckout: jest.Mock };
@@ -73,12 +79,10 @@ describe('AppointmentsService', () => {
     patient: { findMany: jest.Mock };
     scheduleRule: { findMany: jest.Mock };
     scheduleBlock: { findMany: jest.Mock };
-    appointment: { findMany: jest.Mock; update: jest.Mock };
+    appointment: { findMany: jest.Mock; update: jest.Mock; create: jest.Mock };
   };
   /** Cola de respuestas del cliente PostgREST mockeado, en orden de consumo. */
   let results: { data: unknown; error: unknown }[];
-  /** Payloads pasados a `.insert(...)`, para afirmar qué se escribe. */
-  let inserts: Record<string, unknown>[];
 
   /** Cliente Supabase encadenable: cada método devuelve el mismo builder y el
    *  `await` consume la próxima respuesta de la cola. */
@@ -91,12 +95,7 @@ describe('AppointmentsService', () => {
             return (resolve: (value: unknown) => void) =>
               resolve(results.shift() ?? { data: null, error: null });
           }
-          return (...args: unknown[]) => {
-            if (prop === 'insert') {
-              inserts.push(args[0] as Record<string, unknown>);
-            }
-            return builder;
-          };
+          return () => builder;
         },
       },
     );
@@ -108,7 +107,6 @@ describe('AppointmentsService', () => {
 
   beforeEach(() => {
     results = [];
-    inserts = [];
     prisma = {
       professional: {
         findFirst: jest.fn().mockResolvedValue(PRO_ROW),
@@ -128,6 +126,7 @@ describe('AppointmentsService', () => {
       appointment: {
         findMany: jest.fn().mockResolvedValue([]),
         update: jest.fn().mockResolvedValue(CANCELLED_PRISMA_ROW),
+        create: jest.fn().mockResolvedValue(CREATED_PRISMA_ROW),
       },
     };
 
@@ -146,7 +145,6 @@ describe('AppointmentsService', () => {
   /** Respuestas de un `book` que llega hasta el insert sin tropezar. */
   const PATIENT_EXISTS = { data: { profile_id: PATIENT_ID }, error: null };
   const NO_COLLISION = { data: [], error: null };
-  const INSERT_OK = { data: INSERTED_ROW, error: null };
 
   describe('getAvailability', () => {
     it('devuelve la grilla del profesional con sus horarios', async () => {
@@ -287,7 +285,7 @@ describe('AppointmentsService', () => {
     const VALID = { professionalId: PRO_ID, date: MONDAY, startTime: '10:00' };
 
     it('reserva el turno y devuelve la vista con la hora local', async () => {
-      results = [PATIENT_EXISTS, NO_COLLISION, INSERT_OK];
+      results = [PATIENT_EXISTS, NO_COLLISION];
 
       const view = await service.book(TOKEN, PATIENT_ID, VALID, NOW);
 
@@ -310,7 +308,7 @@ describe('AppointmentsService', () => {
     it('antes de validar el horario libera las retenciones vencidas del profesional y del paciente', async () => {
       // La disponibilidad ya no cuenta una retención vencida, pero el índice
       // único de la base sí: sin liberarla antes, el insert daría 409.
-      results = [PATIENT_EXISTS, NO_COLLISION, INSERT_OK];
+      results = [PATIENT_EXISTS, NO_COLLISION];
 
       await service.book(TOKEN, PATIENT_ID, VALID, NOW);
 
@@ -324,28 +322,29 @@ describe('AppointmentsService', () => {
     });
 
     it('el servidor decide precio, duración, paciente y estado', async () => {
-      results = [PATIENT_EXISTS, NO_COLLISION, INSERT_OK];
+      results = [PATIENT_EXISTS, NO_COLLISION];
 
       await service.book(TOKEN, PATIENT_ID, VALID, NOW);
 
-      expect(inserts[0]).toEqual({
+      const { data } = prisma.appointment.create.mock.calls[0][0];
+      expect(data).toEqual({
         patient_id: PATIENT_ID,
         professional_id: PRO_ID,
         // 10:00 en Argentina = 13:00 UTC.
-        scheduled_at: '2026-08-17T13:00:00.000Z',
+        scheduled_at: new Date('2026-08-17T13:00:00.000Z'),
         duration_minutes: 30,
         price: 15000,
       });
       // `status` no se manda: lo pone el DEFAULT de la columna. Si apareciera acá,
       // sería el primer paso hacia aceptarlo del cliente.
-      expect(inserts[0]).not.toHaveProperty('status');
+      expect(data).not.toHaveProperty('status');
     });
 
     it('rechaza un horario que no está en la agenda', async () => {
       await expect(
         service.book(TOKEN, PATIENT_ID, { ...VALID, startTime: '10:15' }, NOW),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(inserts).toHaveLength(0);
+      expect(prisma.appointment.create).not.toHaveBeenCalled();
     });
 
     it('rechaza un horario ya pasado', async () => {
@@ -411,7 +410,7 @@ describe('AppointmentsService', () => {
       await expect(service.book(TOKEN, PATIENT_ID, VALID, NOW)).rejects.toThrow(
         /completá tu perfil/i,
       );
-      expect(inserts).toHaveLength(0);
+      expect(prisma.appointment.create).not.toHaveBeenCalled();
     });
 
     it('no deja reservar dos turnos superpuestos al mismo paciente', async () => {
@@ -431,7 +430,7 @@ describe('AppointmentsService', () => {
       await expect(service.book(TOKEN, PATIENT_ID, VALID, NOW)).rejects.toThrow(
         /se superpone/i,
       );
-      expect(inserts).toHaveLength(0);
+      expect(prisma.appointment.create).not.toHaveBeenCalled();
     });
 
     it('un turno propio contiguo no se considera superpuesto', async () => {
@@ -446,7 +445,6 @@ describe('AppointmentsService', () => {
           ],
           error: null,
         },
-        INSERT_OK,
       ];
 
       await expect(
@@ -457,11 +455,8 @@ describe('AppointmentsService', () => {
     it('traduce la unique de la base a un 409 entendible', async () => {
       // La carrera real: dos pacientes confirman el mismo horario a la vez y los
       // dos pasan la validación previa. El árbitro es el índice parcial.
-      results = [
-        PATIENT_EXISTS,
-        NO_COLLISION,
-        { data: null, error: { code: '23505' } },
-      ];
+      results = [PATIENT_EXISTS, NO_COLLISION];
+      prisma.appointment.create.mockRejectedValue({ code: 'P2002' });
 
       await expect(service.book(TOKEN, PATIENT_ID, VALID, NOW)).rejects.toThrow(
         /acaba de reservar otra persona/i,
@@ -469,11 +464,8 @@ describe('AppointmentsService', () => {
     });
 
     it('cualquier otro error de la base sale como 500 genérico', async () => {
-      results = [
-        PATIENT_EXISTS,
-        NO_COLLISION,
-        { data: null, error: { code: '42501' } },
-      ];
+      results = [PATIENT_EXISTS, NO_COLLISION];
+      prisma.appointment.create.mockRejectedValue(new Error('connection lost'));
 
       await expect(
         service.book(TOKEN, PATIENT_ID, VALID, NOW),

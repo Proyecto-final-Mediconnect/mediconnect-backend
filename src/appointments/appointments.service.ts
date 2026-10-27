@@ -88,8 +88,9 @@ const MAX_RANGE_DAYS = BOOKING_HORIZON_DAYS + 2;
  *  tiene que cambiar el otro o la base y la app dejan de coincidir. */
 const ACTIVE_STATUSES = ['RESERVADO_SIN_PAGAR', 'CONFIRMADO'] as const;
 
-/** `23505 unique_violation` de Postgres, que PostgREST propaga tal cual. */
-const UNIQUE_VIOLATION = '23505';
+/** `P2002` de Prisma: el `23505 unique_violation` de Postgres, que acá es el
+ *  índice parcial de horario ocupado. */
+const PRISMA_UNIQUE_VIOLATION = 'P2002';
 
 /** `P2025` de Prisma: el `where` del update no encontró ninguna fila. */
 const PRISMA_RECORD_NOT_FOUND = 'P2025';
@@ -278,26 +279,29 @@ export class AppointmentsService {
       slot.durationMinutes,
     );
 
-    const { data, error } = await client
-      .from('appointments')
-      .insert({
-        patient_id: userId,
-        professional_id: dto.professionalId,
-        scheduled_at: scheduledAt.toISOString(),
-        duration_minutes: slot.durationMinutes,
-        price: professional.consultationPrice,
-        // `status` no se manda: lo pone el DEFAULT de la columna
-        // (RESERVADO_SIN_PAGAR). Mandarlo desde acá sería el primer paso para que
-        // algún día se acepte del cliente.
-      })
-      .select(APPOINTMENT_SELECT)
-      .single();
-
-    if (error) {
+    // Se inserta como owner (Prisma) y no con el JWT del paciente: desde ENG-175
+    // `authenticated` no tiene INSERT sobre `appointments`. Con el INSERT
+    // abierto, cualquiera podía reservar por PostgREST un turno CONFIRMADO, a
+    // $1 o fuera de la agenda; así, todo lo que se escribe sale de acá. El
+    // `patient_id` es el del JWT, nunca uno del body.
+    let created;
+    try {
+      created = await this.prisma.appointment.create({
+        data: {
+          patient_id: userId,
+          professional_id: dto.professionalId,
+          scheduled_at: scheduledAt,
+          duration_minutes: slot.durationMinutes,
+          price: professional.consultationPrice,
+          // `status` no se manda: lo pone el DEFAULT de la columna
+          // (RESERVADO_SIN_PAGAR).
+        },
+      });
+    } catch (err) {
       // La carrera real: dos pacientes confirman el mismo horario a la vez y los
       // dos pasan la validación de arriba, porque miran un estado que ya cambió
       // cuando el INSERT llega. El árbitro es el índice parcial de la base.
-      if ((error as { code?: string }).code === UNIQUE_VIOLATION) {
+      if ((err as { code?: string }).code === PRISMA_UNIQUE_VIOLATION) {
         throw new ConflictException(
           'Ese turno lo acaba de reservar otra persona. Elegí otro horario.',
         );
@@ -307,7 +311,18 @@ export class AppointmentsService {
       );
     }
 
-    const [view] = await this.toViews([data as unknown as AppointmentRow]);
+    const data: AppointmentRow = {
+      id: created.id,
+      patient_id: created.patient_id,
+      professional_id: created.professional_id,
+      scheduled_at: created.scheduled_at.toISOString(),
+      duration_minutes: created.duration_minutes,
+      // `Decimal` no es `string | number`; `toString()` conserva los decimales.
+      price: created.price.toString(),
+      status: created.status,
+    };
+
+    const [view] = await this.toViews([data]);
     return view;
   }
 
