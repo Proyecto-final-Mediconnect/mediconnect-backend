@@ -68,6 +68,10 @@ const IDEMPOTENCY_KEY_TTL_MS = 24 * 3_600_000;
 /** Motivo que queda en `refunds.reason`. */
 const CANCELLATION_REASON = 'CANCELACION_PACIENTE';
 
+/** `reason` del pago aprobado sobre un turno ya cancelado o liberado. */
+const INACTIVE_APPOINTMENT_REASON: UnappliedPaymentReason =
+  'PAGO_SOBRE_TURNO_INACTIVO';
+
 /**
  * Por qué se devuelve un pago que no se pudo aplicar a un turno (ENG-144). Va en
  * `refunds.reason` junto con el id del pago de MercadoPago, que es lo que hace
@@ -285,6 +289,10 @@ export class CancellationRefundService {
     now: Date,
   ): Promise<CancellationRefund> {
     const appointment = await this.read(appointmentId);
+
+    const unapplied = await this.unappliedRefundOf(appointment?.payment);
+    if (unapplied) return unapplied;
+
     const { percent, amount } = this.compute(appointment, now);
     const payment = appointment?.payment;
 
@@ -366,6 +374,42 @@ export class CancellationRefundService {
     }
 
     return { percent, amount: amount.toNumber(), status };
+  }
+
+  /**
+   * La devolución entera que el webhook ya anotó para este pago, si se aprobó
+   * cuando el turno ya estaba cancelado (ENG-180).
+   *
+   * Pasa cuando el pago entra justo mientras el paciente cancela una reserva
+   * sin pagar: el UPDATE de `cancel` gana, el webhook ve el turno cancelado y
+   * anota `PAGO_SOBRE_TURNO_INACTIVO` **en el mismo commit en que aprueba el
+   * pago**. Así que si acá el pago se ve `APROBADO`, esa fila ya está: pedir
+   * además la devolución de la política sería devolver dos veces. Se informa la
+   * del webhook, que es la del total.
+   *
+   * No hace falta un lock: el orden inverso no existe, porque sin el commit del
+   * webhook el pago no está aprobado y la cancelación no tiene nada que
+   * devolver.
+   */
+  private async unappliedRefundOf(
+    payment: RefundableAppointment['payment'] | undefined,
+  ): Promise<CancellationRefund | null> {
+    if (!payment) return null;
+
+    const refund = await this.prisma.refund.findFirst({
+      where: {
+        payment_id: payment.id,
+        reason: { startsWith: `${INACTIVE_APPOINTMENT_REASON}:` },
+      },
+      select: { amount: true, status: true },
+    });
+    if (!refund) return null;
+
+    return {
+      percent: 100,
+      amount: refund.amount.toNumber(),
+      status: refund.status,
+    };
   }
 
   private async read(
