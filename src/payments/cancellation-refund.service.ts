@@ -73,6 +73,20 @@ export type UnappliedPaymentReason =
   /** El pago se aprobó cuando el turno ya estaba cancelado o liberado. */
   | 'PAGO_SOBRE_TURNO_INACTIVO';
 
+/** `refunds.reason` de un pago no aplicado: motivo + id del pago de MercadoPago. */
+export function unappliedRefundReason(
+  reason: UnappliedPaymentReason,
+  mpPaymentId: string,
+): string {
+  return `${reason}:${mpPaymentId}`;
+}
+
+/** Código de Prisma para violación de unicidad. */
+const PRISMA_UNIQUE_VIOLATION = 'P2002';
+
+/** La `X-Idempotency-Key` de MercadoPago vale 24 h. */
+const MP_IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 /**
  * Reembolso al cancelar un turno pagado (ENG-65).
  *
@@ -139,10 +153,15 @@ export class CancellationRefundService {
    * cuando el turno ya estaba cancelado o liberado. No hay política que aplicar:
    * no se prestó ningún servicio a cambio.
    *
-   * - **Idempotente:** el webhook se repite. Si ya hay un reembolso registrado
-   *   para ese pago de MercadoPago, no se pide otro; y la clave de idempotencia
-   *   de MercadoPago es el id del pago, así que tampoco duplica si la fila se
-   *   llegó a crear pero la respuesta se perdió.
+   * - **Idempotente:** el webhook se repite. Hay una sola fila por pago de
+   *   MercadoPago y motivo (índice único `refunds_payment_reason_uq`), y la
+   *   clave de idempotencia de MercadoPago es el id del pago, así que tampoco
+   *   duplica si la fila se llegó a crear pero la respuesta se perdió.
+   * - **Reintenta:** si la fila ya existe y no quedó `PROCESADO` (MercadoPago
+   *   falló o la dejó pendiente), vuelve a pedir la devolución con la misma
+   *   clave y actualiza esa fila. Solo dentro de las 24 h de la fila: después
+   *   la clave de MercadoPago vence y reintentar podría devolver dos veces, así
+   *   que queda en Sentry para resolverlo a mano.
    * - Con `markPaymentRefunded`, un reembolso procesado deja la fila de
    *   `payments` en `REEMBOLSADO`. Para el duplicado no: esa fila es del primer
    *   pago, que sigue valiendo.
@@ -162,19 +181,47 @@ export class CancellationRefundService {
     now: Date,
   ): Promise<RefundOutcome> {
     const { paymentId, mpPaymentId, reason, markPaymentRefunded } = params;
-    const reasonText = `${reason}:${mpPaymentId}`;
+    const reasonText = unappliedRefundReason(reason, mpPaymentId);
+    const amount = new Prisma.Decimal(params.amount);
 
     try {
       const existing = await this.prisma.refund.findFirst({
         where: { payment_id: paymentId, reason: reasonText },
-        select: { status: true },
+        select: { id: true, status: true, created_at: true },
       });
-      if (existing) return existing.status;
 
-      const amount = new Prisma.Decimal(params.amount);
-      const refund = await this.prisma.refund.create({
-        data: { payment_id: paymentId, amount, reason: reasonText },
-      });
+      let refundId: string;
+      if (existing) {
+        if (existing.status === 'PROCESADO') return existing.status;
+        if (
+          now.getTime() - existing.created_at.getTime() >=
+          MP_IDEMPOTENCY_WINDOW_MS
+        ) {
+          this.alertExpiredRefund(mpPaymentId, reason, existing);
+          return existing.status;
+        }
+        refundId = existing.id;
+      } else {
+        try {
+          const created = await this.prisma.refund.create({
+            data: { payment_id: paymentId, amount, reason: reasonText },
+            select: { id: true },
+          });
+          refundId = created.id;
+        } catch (err) {
+          if ((err as { code?: string }).code !== PRISMA_UNIQUE_VIOLATION) {
+            throw err;
+          }
+          // Otra entrega de la misma notificación creó la fila entre el
+          // `findFirst` y el `create`, y es la que está llamando a
+          // MercadoPago: se devuelve su estado sin pedir nada.
+          const winner = await this.prisma.refund.findFirst({
+            where: { payment_id: paymentId, reason: reasonText },
+            select: { status: true },
+          });
+          return winner?.status ?? 'PENDIENTE';
+        }
+      }
 
       let status: RefundOutcome = 'PENDIENTE';
       try {
@@ -191,7 +238,7 @@ export class CancellationRefundService {
               : 'PENDIENTE';
 
         await this.prisma.refund.update({
-          where: { id: refund.id },
+          where: { id: refundId },
           data: {
             status,
             mercadopago_refund_id: mp.id,
@@ -207,7 +254,7 @@ export class CancellationRefundService {
         }
       } catch (err) {
         this.logger.error(
-          `No se pudo devolver el pago ${mpPaymentId} (${reason}, refund ${refund.id}): ${String(err)}`,
+          `No se pudo devolver el pago ${mpPaymentId} (${reason}, refund ${refundId}): ${String(err)}`,
         );
       }
 
@@ -222,6 +269,30 @@ export class CancellationRefundService {
       this.alertManualRefund(mpPaymentId, reason, 'PENDIENTE');
       return 'PENDIENTE';
     }
+  }
+
+  /** La fila quedó sin procesar y la clave de MercadoPago ya venció. */
+  private alertExpiredRefund(
+    mpPaymentId: string,
+    reason: UnappliedPaymentReason,
+    refund: { id: string; status: RefundOutcome; created_at: Date },
+  ): void {
+    this.logger.error(
+      `Devolución ${refund.id} del pago ${mpPaymentId} (${reason}) sigue ${refund.status} pasadas 24 h: no se reintenta. Revisarla a mano en MercadoPago.`,
+    );
+    Sentry.captureMessage(
+      `Devolución de MercadoPago sin procesar pasadas 24 h (${reason}): revisarla a mano`,
+      {
+        level: 'error',
+        tags: { area: 'pagos', reason },
+        extra: {
+          mpPaymentId,
+          refundId: refund.id,
+          status: refund.status,
+          createdAt: refund.created_at.toISOString(),
+        },
+      },
+    );
   }
 
   private alertManualRefund(

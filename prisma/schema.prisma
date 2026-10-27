@@ -492,6 +492,9 @@ model PaymentWebhookEvent {
 }
 
 /// Reembolsos (1:N sobre un pago).
+/// Índice único parcial `refunds_payment_reason_uq` (payment_id, reason) para los
+/// motivos `PAGO_%` de ENG-144: Prisma no modela índices parciales, vive solo en
+/// la migración 20261026130000_eng144_refunds_unico.
 model Refund {
   id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   payment_id            String        @db.Uuid

@@ -234,6 +234,7 @@ describe('CancellationRefundService', () => {
           amount: new Prisma.Decimal(15000),
           reason: 'PAGO_DUPLICADO:mp-segundo',
         },
+        select: { id: true },
       });
       expect(mercadoPago.refundPayment).toHaveBeenCalledWith(
         'mp-segundo',
@@ -281,6 +282,64 @@ describe('CancellationRefundService', () => {
 
       expect(prisma.refund.create).not.toHaveBeenCalled();
       expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+    });
+
+    it('si la fila quedó PENDIENTE hace menos de 24 h, reintenta con la misma clave y actualiza esa fila', async () => {
+      prisma.refund.findFirst.mockResolvedValue({
+        id: 'ref-viejo',
+        status: 'PENDIENTE',
+        created_at: new Date(NOW.getTime() - 2 * 60 * 60 * 1000),
+      });
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PROCESADO');
+
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+      expect(mercadoPago.refundPayment).toHaveBeenCalledWith(
+        'mp-segundo',
+        15000,
+        'unapplied-mp-segundo',
+      );
+      expect(prisma.refund.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'ref-viejo' } }),
+      );
+    });
+
+    it('si la fila sin procesar tiene más de 24 h no reintenta (la clave venció) y avisa a Sentry', async () => {
+      prisma.refund.findFirst.mockResolvedValue({
+        id: 'ref-viejo',
+        status: 'RECHAZADO',
+        created_at: new Date(NOW.getTime() - 25 * 60 * 60 * 1000),
+      });
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('RECHAZADO');
+
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(prisma.refund.update).not.toHaveBeenCalled();
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+        expect.stringContaining('24 h'),
+        expect.objectContaining({ level: 'error' }),
+      );
+    });
+
+    it('si otra entrega concurrente creó la fila (P2002), devuelve su estado sin llamar a MercadoPago', async () => {
+      prisma.refund.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ status: 'PENDIENTE' });
+      prisma.refund.create.mockRejectedValue(
+        Object.assign(new Error('unique'), { code: 'P2002' }),
+      );
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PENDIENTE');
+
+      expect(prisma.refund.findFirst).toHaveBeenCalledTimes(2);
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
     });
 
     it('si MercadoPago falla queda PENDIENTE y avisa a Sentry para devolverlo a mano, sin tirar', async () => {

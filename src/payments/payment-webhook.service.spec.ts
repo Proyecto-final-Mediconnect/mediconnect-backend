@@ -1,4 +1,7 @@
 import { createHmac } from 'node:crypto';
+import * as Sentry from '@sentry/nestjs';
+
+jest.mock('@sentry/nestjs', () => ({ captureMessage: jest.fn() }));
 import { Prisma } from '../../generated/prisma/client';
 import { buildManifest } from './mercadopago-signature';
 import { HttpStatus } from '@nestjs/common';
@@ -63,6 +66,7 @@ describe('PaymentWebhookService', () => {
   let prisma: {
     payment: { findUnique: jest.Mock; updateMany: jest.Mock };
     appointment: { updateMany: jest.Mock };
+    refund: { createMany: jest.Mock };
     paymentWebhookEvent: { create: jest.Mock; update: jest.Mock };
     $transaction: jest.Mock;
   };
@@ -79,6 +83,7 @@ describe('PaymentWebhookService', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       appointment: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      refund: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
       paymentWebhookEvent: {
         create: jest.fn().mockResolvedValue({ id: 'evt-1' }),
         update: jest.fn().mockResolvedValue({}),
@@ -96,6 +101,7 @@ describe('PaymentWebhookService', () => {
     refunds = {
       refundUnappliedPayment: jest.fn().mockResolvedValue('PROCESADO'),
     };
+    (Sentry.captureMessage as jest.Mock).mockClear();
     service = new PaymentWebhookService(
       prisma as never,
       mercadopago as never,
@@ -244,6 +250,109 @@ describe('PaymentWebhookService', () => {
       expect(refunds.refundUnappliedPayment).not.toHaveBeenCalled();
     });
 
+    it('turno no confirmable: anota la devolución pendiente en la misma transacción', async () => {
+      prisma.appointment.updateMany.mockResolvedValue({ count: 0 });
+
+      await service.handle(signed(), SECRET, NOW);
+
+      expect(prisma.refund.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            payment_id: 'pay-1',
+            amount: new Prisma.Decimal(15000),
+            reason: `PAGO_SOBRE_TURNO_INACTIVO:${MP_PAYMENT_ID}`,
+          },
+        ],
+        skipDuplicates: true,
+      });
+    });
+
+    describe('reintento en ya-procesado', () => {
+      function retried(current: unknown) {
+        prisma.payment.updateMany.mockResolvedValue({ count: 0 });
+        prisma.payment.findUnique
+          .mockResolvedValueOnce(PAYMENT_ROW)
+          .mockResolvedValueOnce({
+            status: 'APROBADO',
+            mercadopago_payment_id: MP_PAYMENT_ID,
+          })
+          .mockResolvedValueOnce(current);
+      }
+
+      it('si el proceso murió antes de devolver, el reintento de MercadoPago lo devuelve', async () => {
+        retried({
+          status: 'APROBADO',
+          mercadopago_payment_id: MP_PAYMENT_ID,
+          appointment: { status: 'CANCELADO' },
+          refunds: [
+            {
+              reason: `PAGO_SOBRE_TURNO_INACTIVO:${MP_PAYMENT_ID}`,
+              status: 'PENDIENTE',
+            },
+          ],
+        });
+
+        await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
+          'ya-procesado',
+        );
+        expect(refunds.refundUnappliedPayment).toHaveBeenCalledWith(
+          {
+            paymentId: 'pay-1',
+            mpPaymentId: MP_PAYMENT_ID,
+            amount: 15000,
+            reason: 'PAGO_SOBRE_TURNO_INACTIVO',
+            markPaymentRefunded: true,
+          },
+          NOW,
+        );
+      });
+
+      it('turno confirmado y cancelado con reembolso de ENG-65: no devuelve de nuevo', async () => {
+        retried({
+          status: 'APROBADO',
+          mercadopago_payment_id: MP_PAYMENT_ID,
+          appointment: { status: 'CANCELADO' },
+          refunds: [{ reason: 'CANCELACION_PACIENTE', status: 'PROCESADO' }],
+        });
+
+        await service.handle(signed(), SECRET, NOW);
+
+        expect(refunds.refundUnappliedPayment).not.toHaveBeenCalled();
+        expect(Sentry.captureMessage).not.toHaveBeenCalled();
+      });
+
+      it('turno cancelado sin ninguna devolución: no adivina, avisa a Sentry', async () => {
+        retried({
+          status: 'APROBADO',
+          mercadopago_payment_id: MP_PAYMENT_ID,
+          appointment: { status: 'CANCELADO' },
+          refunds: [],
+        });
+
+        await service.handle(signed(), SECRET, NOW);
+
+        expect(refunds.refundUnappliedPayment).not.toHaveBeenCalled();
+        expect(Sentry.captureMessage).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({ level: 'error' }),
+        );
+      });
+
+      it('turno confirmado: no hay nada que devolver', async () => {
+        retried({
+          status: 'APROBADO',
+          mercadopago_payment_id: MP_PAYMENT_ID,
+          appointment: { status: 'CONFIRMADO' },
+          refunds: [],
+        });
+
+        await service.handle(signed(), SECRET, NOW);
+
+        expect(refunds.refundUnappliedPayment).not.toHaveBeenCalled();
+        expect(Sentry.captureMessage).not.toHaveBeenCalled();
+      });
+    });
+
     it('un turno confirmado normal no devuelve nada', async () => {
       await service.handle(signed(), SECRET, NOW);
 
@@ -297,6 +406,45 @@ describe('PaymentWebhookService', () => {
       'monto-no-coincide',
     );
     expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        level: 'error',
+        extra: expect.objectContaining({
+          paymentId: 'pay-1',
+          mpPaymentId: MP_PAYMENT_ID,
+          paidAmount: 100,
+          expectedAmount: '15000',
+        }),
+      }),
+    );
+    // Es el primer pago del turno, no un duplicado: queda para revisar a mano.
+    expect(refunds.refundUnappliedPayment).not.toHaveBeenCalled();
+  });
+
+  it('segundo pago por menos plata con otro id: se devuelve como duplicado', async () => {
+    mercadopago.getPayment.mockResolvedValue(
+      mpPayment({ transactionAmount: 100 }),
+    );
+    prisma.payment.findUnique.mockResolvedValue({
+      ...PAYMENT_ROW,
+      status: 'APROBADO',
+      mercadopago_payment_id: 'primer-pago',
+    });
+
+    await expect(service.handle(signed(), SECRET, NOW)).resolves.toBe(
+      'monto-no-coincide',
+    );
+    expect(refunds.refundUnappliedPayment).toHaveBeenCalledWith(
+      {
+        paymentId: 'pay-1',
+        mpPaymentId: MP_PAYMENT_ID,
+        amount: 100,
+        reason: 'PAGO_DUPLICADO',
+        markPaymentRefunded: false,
+      },
+      NOW,
+    );
   });
 
   it('moneda distinta: no confirma', async () => {
