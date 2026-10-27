@@ -1,7 +1,7 @@
 import { Test, type TestingModule } from '@nestjs/testing';
 import { Prisma } from '../../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
-import { CatalogService } from './catalog.service';
+import { CatalogService, normalizeSearch } from './catalog.service';
 import { ListProfessionalsQueryDto } from './dto/list-professionals-query.dto';
 
 type FindManyArgs = Prisma.ProfessionalFindManyArgs;
@@ -323,27 +323,46 @@ describe('CatalogService', () => {
       });
     });
 
+    // `$queryRaw` recibe un `Prisma.sql`: lo fijo está en `strings` y todo texto
+    // del usuario, en `values` (parámetros, nunca concatenado).
+    const sqlEnviado = () =>
+      queryRaw.mock.calls[0][0] as { strings: string[]; values: unknown[] };
+
     it('busca sin tildes ni mayúsculas, y el texto viaja como parámetro', async () => {
       await service.listProfessionals(query({ search: 'MARTÍN' }));
 
-      // Tagged template: el primer argumento son los pedazos de SQL fijos y el
-      // resto, los valores. El texto buscado tiene que estar entre los valores.
-      const [sql, ...valores] = queryRaw.mock.calls[0] as [
-        TemplateStringsArray,
-        ...unknown[],
-      ];
-      expect(sql.join('')).not.toContain('martin');
-      expect(valores).toContain('%martin%');
+      const { strings, values } = sqlEnviado();
+      expect(strings.join('')).not.toContain('martin');
+      expect(values).toContain('%martin%');
+    });
+
+    it('exige cada palabra, en cualquier orden', async () => {
+      await service.listProfessionals(query({ search: 'Olivares  Martín' }));
+
+      const { strings, values } = sqlEnviado();
+      expect(values).toEqual(
+        expect.arrayContaining(['%olivares%', '%martin%']),
+      );
+      expect(strings.join('')).toContain(' and ');
     });
 
     it('escapa los comodines de LIKE', async () => {
       await service.listProfessionals(query({ search: '50%_x' }));
 
-      const [, ...valores] = queryRaw.mock.calls[0] as [
-        TemplateStringsArray,
-        ...unknown[],
-      ];
-      expect(valores).toContain('%50\\%\\_x%');
+      expect(sqlEnviado().values).toContain('%50\\%\\_x%');
+    });
+
+    it('las listas de caracteres con tilde coinciden posición a posición', async () => {
+      await service.listProfessionals(query({ search: 'joão' }));
+
+      const [con, sin] = sqlEnviado().values.filter(
+        (v) => typeof v === 'string' && !v.startsWith('%'),
+      ) as string[];
+      expect([...con]).toHaveLength([...sin].length);
+      // Lo que saca `normalizeSearch` (NFD) también lo saca `translate()`.
+      for (const [i, c] of [...con].entries()) {
+        expect(normalizeSearch(c)).toBe(sin[i]);
+      }
     });
 
     it('sin coincidencias devuelve la lista vacía, no el catálogo entero', async () => {

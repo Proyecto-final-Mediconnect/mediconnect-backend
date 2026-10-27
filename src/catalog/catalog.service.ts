@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { Prisma } from '../../generated/prisma';
+import { Prisma } from '../../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ListProfessionalsQueryDto } from './dto/list-professionals-query.dto';
 
@@ -71,24 +71,34 @@ export class CatalogService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Los profesionales cuyo nombre, apellido o alguna especialidad contienen el
-   * texto, sin tildes ni mayúsculas. Va por SQL porque Prisma no compara sin
-   * tildes, y con `translate()` en vez de `unaccent` para no sumar una
-   * extensión. El texto viaja como parámetro, nunca concatenado.
+   * Los profesionales cuyo nombre, apellido o alguna especialidad contienen
+   * TODAS las palabras del texto, en cualquier orden, sin tildes ni mayúsculas
+   * ("Olivares Martín" encuentra a "Martín Olivares"). Va por SQL porque Prisma
+   * no compara sin tildes, y con `translate()` en vez de `unaccent` para no
+   * sumar una extensión. El texto viaja como parámetro, nunca concatenado.
    */
   private async idsMatching(search: string): Promise<string[]> {
-    const patron = `%${escapeLike(normalizeSearch(search))}%`;
-    const rows = await this.prisma.$queryRaw<{ profile_id: string }[]>`
+    const condiciones = normalizeSearch(search)
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(
+        (palabra) => Prisma.sql`translate(
+          lower(p.first_name || ' ' || p.last_name || ' ' || coalesce(s.name, '')),
+          ${CON_TILDE},
+          ${SIN_TILDE}
+        ) like ${`%${escapeLike(palabra)}%`}`,
+      );
+    // Un texto de solo diacríticos queda vacío al normalizar: no matchea nada.
+    if (condiciones.length === 0) return [];
+    const rows = await this.prisma.$queryRaw<{ profile_id: string }[]>(
+      Prisma.sql`
       select distinct p.profile_id
       from professionals p
       left join professional_specialties ps on ps.professional_id = p.profile_id
       left join specialties s on s.id = ps.specialty_id
-      where translate(
-        lower(p.first_name || ' ' || p.last_name || ' ' || coalesce(s.name, '')),
-        ${CON_TILDE},
-        ${SIN_TILDE}
-      ) like ${patron}
-    `;
+      where ${Prisma.join(condiciones, ' and ')}
+    `,
+    );
     return rows.map((r) => r.profile_id);
   }
 
@@ -141,12 +151,16 @@ export class CatalogService {
 }
 
 /**
+ * Caracteres con tilde que `translate()` reemplaza del lado de la base. Las dos
+ * constantes tienen que coincidir posición a posición.
+ */
+const CON_TILDE = 'áéíóúüàèìòùñãâêîôûõçöäëï';
+const SIN_TILDE = 'aeiouuaeioun' + 'aaeiouocoaei';
+
+/**
  * Saca tildes y pasa a minúscula, como `translate(lower(...))` del lado de la
  * base: así "martin" encuentra a "Martín" y "pediatria" a "Pediatría".
  */
-const CON_TILDE = 'áéíóúüàèìòùñ';
-const SIN_TILDE = 'aeiouuaeioun';
-
 export function normalizeSearch(texto: string): string {
   return texto
     .toLowerCase()
