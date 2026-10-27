@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AppointmentPaymentController } from './appointment-payment.controller';
 import { AppointmentPaymentService } from './appointment-payment.service';
+import { CancellationRefundService } from './cancellation-refund.service';
 import { MercadoPagoService } from './mercadopago.service';
 import { PaymentWebhookService } from './payment-webhook.service';
 import { PaymentsWebhookController } from './payments-webhook.controller';
@@ -10,9 +11,8 @@ import { PaymentsWebhookController } from './payments-webhook.controller';
  * EP-04 — Pagos (ADR-013).
  *
  * Tiene el cobro del turno (ENG-63) y el webhook que lo confirma (ENG-64).
- * `MercadoPagoService` se exporta porque lo va a necesitar ENG-65 para el
- * reembolso al cancelar, y `AppointmentPaymentService` porque la cancelación
- * (ENG-55) vence el link de pago del turno.
+ * La cancelación (ENG-55) usa `AppointmentPaymentService` para vencer el link
+ * de pago del turno y `CancellationRefundService` para el reembolso (ENG-65).
  *
  * El banco de pruebas del spike (ENG-61) se sacó al cerrar ENG-64: exponía en
  * producción un endpoint para crear preferencias con montos arbitrarios. Las
@@ -27,7 +27,12 @@ import { PaymentsWebhookController } from './payments-webhook.controller';
     MercadoPagoService,
     PaymentWebhookService,
     AppointmentPaymentService,
+    CancellationRefundService,
   ],
-  exports: [MercadoPagoService, AppointmentPaymentService],
+  exports: [
+    MercadoPagoService,
+    AppointmentPaymentService,
+    CancellationRefundService,
+  ],
 })
 export class PaymentsModule {}

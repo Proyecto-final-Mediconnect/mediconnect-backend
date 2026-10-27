@@ -79,6 +79,21 @@ export interface MercadoPagoPayment {
   approvedAt: string | null;
 }
 
+/** Reembolso tal como lo reporta MercadoPago (ENG-65). */
+export interface MercadoPagoRefund {
+  id: string;
+  /** `approved`, `in_process`, `rejected`, `cancelled`, ... */
+  status: string;
+  amount: number;
+}
+
+/** Respuesta de `POST /v1/payments/:id/refunds`. Solo se tipa lo que se usa. */
+interface RefundResponse {
+  id: number | string;
+  status: string;
+  amount: number;
+}
+
 /** Respuesta de `POST`/`GET /checkout/preferences`. Solo se tipa lo que se usa. */
 interface PreferenceResponse {
   id: string;
@@ -334,6 +349,32 @@ export class MercadoPagoService {
       paymentMethodId: body.payment_method_id ?? null,
       approvedAt: body.date_approved ?? null,
     };
+  }
+
+  /**
+   * Devuelve `amount` de un pago aprobado (ENG-65). Con un monto menor al
+   * cobrado, MercadoPago hace un reembolso parcial; el pago sigue `approved`
+   * hasta que se devuelve todo, y ahí pasa a `refunded`.
+   *
+   * La clave de idempotencia es obligatoria y no opcional como en las
+   * preferencias: un reintento después de un timeout que sí llegó a
+   * MercadoPago devolvería la plata dos veces.
+   */
+  async refundPayment(
+    paymentId: string,
+    amount: number,
+    idempotencyKey: string,
+  ): Promise<MercadoPagoRefund> {
+    this.assertConfigured();
+
+    const body = await this.request<RefundResponse>(
+      'POST',
+      `/v1/payments/${encodeURIComponent(paymentId)}/refunds`,
+      { amount },
+      idempotencyKey,
+    );
+
+    return { id: String(body.id), status: body.status, amount: body.amount };
   }
 
   private assertConfigured(): void {

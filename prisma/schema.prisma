@@ -383,17 +383,22 @@ model CancellationPolicy {
 /// esa cláusula NO es equivalente — impediría revender un turno cancelado — así
 /// que el índice vive solo en el SQL de la migración.
 model Appointment {
-  id                  String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  patient_id          String             @db.Uuid
-  professional_id     String             @db.Uuid
-  scheduled_at        DateTime           @db.Timestamptz(6)
-  duration_minutes    Int                @db.SmallInt
-  price               Decimal            @db.Decimal(10, 2)
-  status              appointment_status @default(RESERVADO_SIN_PAGAR)
-  cancellation_reason String?
-  cancelled_at        DateTime?          @db.Timestamptz(6)
-  created_at          DateTime           @default(now()) @db.Timestamptz(6)
-  updated_at          DateTime           @default(now()) @db.Timestamptz(6)
+  id                            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id                    String             @db.Uuid
+  professional_id               String             @db.Uuid
+  scheduled_at                  DateTime           @db.Timestamptz(6)
+  duration_minutes              Int                @db.SmallInt
+  price                         Decimal            @db.Decimal(10, 2)
+  status                        appointment_status @default(RESERVADO_SIN_PAGAR)
+  cancellation_reason           String?
+  cancelled_at                  DateTime?          @db.Timestamptz(6)
+  /// Copia de la política de cancelación al reservar (ENG-65). La escribe un
+  /// trigger; NULL = el profesional no tenía política y aplica el default.
+  policy_hours_full_refund      Int?               @db.SmallInt
+  policy_hours_partial_refund   Int?               @db.SmallInt
+  policy_partial_refund_percent Int?               @db.SmallInt
+  created_at                    DateTime           @default(now()) @db.Timestamptz(6)
+  updated_at                    DateTime           @default(now()) @db.Timestamptz(6)
 
   patient       Patient        @relation(fields: [patient_id], references: [profile_id])
   professional  Professional   @relation(fields: [professional_id], references: [profile_id])
@@ -488,13 +493,14 @@ model PaymentWebhookEvent {
 
 /// Reembolsos (1:N sobre un pago).
 model Refund {
-  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  payment_id   String        @db.Uuid
-  amount       Decimal       @db.Decimal(10, 2)
-  status       refund_status @default(PENDIENTE)
-  reason       String?
-  processed_at DateTime?     @db.Timestamptz(6)
-  created_at   DateTime      @default(now()) @db.Timestamptz(6)
+  id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payment_id            String        @db.Uuid
+  amount                Decimal       @db.Decimal(10, 2)
+  status                refund_status @default(PENDIENTE)
+  reason                String?
+  mercadopago_refund_id String?
+  processed_at          DateTime?     @db.Timestamptz(6)
+  created_at            DateTime      @default(now()) @db.Timestamptz(6)
 
   payment Payment @relation(fields: [payment_id], references: [id])
 
