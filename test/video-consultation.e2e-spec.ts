@@ -50,7 +50,8 @@ describe('Videoconsulta desde un turno (e2e)', () => {
       professional_id: '22222222-2222-4222-8222-222222222222',
       scheduled_at: SCHEDULED_AT,
       duration_minutes: 30,
-      status: 'RESERVADO_SIN_PAGAR',
+      status: 'CONFIRMADO',
+      created_at: '2026-10-20T12:00:00.000Z',
     };
 
     daily = {

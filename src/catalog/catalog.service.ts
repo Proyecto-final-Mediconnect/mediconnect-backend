@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { Prisma } from '../../generated/prisma';
+import { Prisma } from '../../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ListProfessionalsQueryDto } from './dto/list-professionals-query.dto';
 
@@ -70,11 +70,50 @@ type ProfessionalRow = Prisma.ProfessionalGetPayload<{
 export class CatalogService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Los profesionales cuyo nombre, apellido o alguna especialidad contienen
+   * TODAS las palabras del texto, en cualquier orden, sin tildes ni mayúsculas
+   * ("Olivares Martín" encuentra a "Martín Olivares"). Va por SQL porque Prisma
+   * no compara sin tildes, y con `translate()` en vez de `unaccent` para no
+   * sumar una extensión. El texto viaja como parámetro, nunca concatenado.
+   */
+  private async idsMatching(search: string): Promise<string[]> {
+    const condiciones = normalizeSearch(search)
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(
+        (palabra) => Prisma.sql`translate(
+          lower(p.first_name || ' ' || p.last_name || ' ' || coalesce(s.name, '')),
+          ${CON_TILDE},
+          ${SIN_TILDE}
+        ) like ${`%${escapeLike(palabra)}%`}`,
+      );
+    // Un texto de solo diacríticos queda vacío al normalizar: no matchea nada.
+    if (condiciones.length === 0) return [];
+    const rows = await this.prisma.$queryRaw<{ profile_id: string }[]>(
+      Prisma.sql`
+      select distinct p.profile_id
+      from professionals p
+      left join professional_specialties ps on ps.professional_id = p.profile_id
+      left join specialties s on s.id = ps.specialty_id
+      where ${Prisma.join(condiciones, ' and ')}
+    `,
+    );
+    return rows.map((r) => r.profile_id);
+  }
+
   async listProfessionals(
     query: ListProfessionalsQueryDto,
   ): Promise<ProfessionalListView> {
     const { page, limit } = query;
     const where = buildWhere(query);
+
+    if (query.search) {
+      const ids = await this.idsMatching(query.search);
+      // Sin coincidencias, `in: []` deja la página vacía con total 0: es la
+      // respuesta correcta, no "sin filtro".
+      where.profile_id = { in: ids };
+    }
 
     // Una sola transacción para que `total` y la página correspondan al mismo
     // snapshot: con scroll infinito, un alta entre ambas queries desplazaría
@@ -109,6 +148,30 @@ export class CatalogService {
       },
     };
   }
+}
+
+/**
+ * Caracteres con tilde que `translate()` reemplaza del lado de la base. Las dos
+ * constantes tienen que coincidir posición a posición.
+ */
+const CON_TILDE = 'áéíóúüàèìòùñãâêîôûõçöäëï';
+const SIN_TILDE = 'aeiouuaeioun' + 'aaeiouocoaei';
+
+/**
+ * Saca tildes y pasa a minúscula, como `translate(lower(...))` del lado de la
+ * base: así "martin" encuentra a "Martín" y "pediatria" a "Pediatría".
+ */
+export function normalizeSearch(texto: string): string {
+  return texto
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+/** Escapa los comodines de LIKE: buscar "50%" no tiene que matchear todo. */
+function escapeLike(texto: string): string {
+  return texto.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
 
 function buildWhere(

@@ -8,6 +8,7 @@ const NOW = new Date('2026-10-21T15:00:00.000Z');
 const APPOINTMENT_ID = 'turno-1';
 const PRO_ID = 'pro-1';
 const USER_ID = 'user-1';
+const CONVERSATION_ID = 'conv-1';
 
 const APPOINTMENT = {
   professional_id: PRO_ID,
@@ -129,12 +130,91 @@ describe('InAppNotificationsService', () => {
             id: 'n-1',
             type: 'PAGO_CONFIRMADO',
             appointmentId: APPOINTMENT_ID,
+            conversationId: null,
             createdAt: NOW.toISOString(),
             readAt: null,
             title: 'Turno nuevo confirmado',
             body: 'Julián Pérez reservó y pagó un turno para el viernes, 23 de octubre a las 10:30.',
           },
         ],
+      });
+    });
+
+    it('el aviso de mensaje nuevo trae su conversación, para que la campanita lleve al chat', async () => {
+      prisma.notification.findMany.mockResolvedValue([
+        {
+          id: 'n-2',
+          type: 'NUEVO_MENSAJE',
+          payload: { conversationId: CONVERSATION_ID, from: 'Julián Pérez' },
+          appointment_id: null,
+          created_at: NOW,
+          read_at: null,
+        },
+      ]);
+
+      const { notifications } = await service.listMine(USER_ID);
+
+      expect(notifications[0]).toMatchObject({
+        conversationId: CONVERSATION_ID,
+        appointmentId: null,
+        body: 'Julián Pérez te escribió.',
+      });
+    });
+  });
+
+  describe('notifyNewMessage (ENG-70)', () => {
+    const notices = {
+      user_id: USER_ID,
+      type: 'NUEVO_MENSAJE',
+      channel: 'IN_APP',
+      payload: { path: ['conversationId'], equals: CONVERSATION_ID },
+    };
+
+    it('deja un aviso con la conversación y quién escribió', async () => {
+      await service.notifyNewMessage(
+        USER_ID,
+        CONVERSATION_ID,
+        'Julián Pérez',
+        NOW,
+      );
+
+      expect(prisma.notification.count).toHaveBeenCalledWith({
+        where: { ...notices, read_at: null },
+      });
+      expect(prisma.notification.create).toHaveBeenCalledWith({
+        data: {
+          user_id: USER_ID,
+          type: 'NUEVO_MENSAJE',
+          channel: 'IN_APP',
+          payload: { conversationId: CONVERSATION_ID, from: 'Julián Pérez' },
+          sent_at: NOW,
+        },
+      });
+    });
+
+    it('si ya hay un aviso sin leer de esa conversación, no deja otro', async () => {
+      prisma.notification.count.mockResolvedValue(1);
+
+      await service.notifyNewMessage(USER_ID, CONVERSATION_ID, 'Julián', NOW);
+
+      expect(prisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('nunca tira: si la base falla, lo loguea y sigue', async () => {
+      prisma.notification.create.mockRejectedValue(new Error('db caída'));
+
+      await expect(
+        service.notifyNewMessage(USER_ID, CONVERSATION_ID, 'Julián', NOW),
+      ).resolves.toBeUndefined();
+      expect(logError).toHaveBeenCalled();
+    });
+
+    it('abrir el chat apaga su aviso', async () => {
+      await service.markConversationRead(USER_ID, CONVERSATION_ID, NOW);
+
+      expect(prisma.notification.updateMany).toHaveBeenCalledWith({
+        where: { ...notices, read_at: null },
+        data: { read_at: NOW },
       });
     });
   });

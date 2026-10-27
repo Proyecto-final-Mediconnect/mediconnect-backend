@@ -51,6 +51,19 @@ export class AppointmentsController {
   }
 
   /**
+   * Cuánto se devolvería si el paciente cancela ahora (ENG-65), para mostrarlo
+   * antes de confirmar. No cancela nada.
+   */
+  @Get(':id/cancellation-quote')
+  cancellationQuote(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.appointments.cancellationQuote(accessToken, userId, id);
+  }
+
+  /**
    * Cancela un turno futuro propio (ENG-55).
    *
    * `PATCH` y no `DELETE`: el turno no se borra. Queda en CANCELADO, con su

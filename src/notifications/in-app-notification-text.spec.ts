@@ -64,6 +64,18 @@ describe('renderInAppNotification', () => {
     }
   });
 
+  it('mensaje nuevo (ENG-70): nombra a quien escribió, o queda genérico', () => {
+    expect(
+      renderInAppNotification('NUEVO_MENSAJE', { from: 'Dra. Laura Gómez' }),
+    ).toEqual({
+      title: 'Mensaje nuevo',
+      body: 'Dra. Laura Gómez te escribió.',
+    });
+    expect(renderInAppNotification('NUEVO_MENSAJE', { from: '  ' }).body).toBe(
+      'Tenés un mensaje sin leer.',
+    );
+  });
+
   it('un tipo desconocido sale con un texto neutro', () => {
     expect(renderInAppNotification('OTRO', {})).toEqual({
       title: 'Aviso',

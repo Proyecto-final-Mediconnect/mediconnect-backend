@@ -68,8 +68,13 @@ export function renderInAppNotification(
         title: 'Tu turno empieza en una hora',
         body: `En una hora tenés turno${withWho(patient, professional)}.`,
       };
-    case 'NUEVO_MENSAJE':
-      return { title: 'Mensaje nuevo', body: 'Tenés un mensaje sin leer.' };
+    case 'NUEVO_MENSAJE': {
+      const from = text(p.from);
+      return {
+        title: 'Mensaje nuevo',
+        body: from ? `${from} te escribió.` : 'Tenés un mensaje sin leer.',
+      };
+    }
     case 'RESENA_MODERADA':
       return {
         title: 'Tu reseña fue revisada',

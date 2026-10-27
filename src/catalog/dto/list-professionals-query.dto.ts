@@ -5,14 +5,19 @@ import {
   IsInt,
   IsNumber,
   IsOptional,
+  IsString,
   IsUUID,
   Max,
+  MaxLength,
   Min,
   Validate,
   ValidatorConstraint,
   type ValidationArguments,
   type ValidatorConstraintInterface,
 } from 'class-validator';
+
+/** Largo máximo de la búsqueda: un nombre y una especialidad entran de sobra. */
+export const MAX_SEARCH_LENGTH = 80;
 
 /** Tamaño de página del catálogo público (ENG-49: 20 por página). */
 export const DEFAULT_PAGE_SIZE = 20;
@@ -103,4 +108,20 @@ export class ListProfessionalsQueryDto {
   @Min(0, { message: 'maxPrice no puede ser negativo' })
   @Validate(MaxPriceNotBelowMinConstraint)
   maxPrice?: number;
+
+  /**
+   * Busca por nombre, apellido o especialidad, sin importar mayúsculas ni
+   * tildes. Vacía o solo espacios es "sin búsqueda".
+   */
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) => {
+    if (typeof value !== 'string') return value;
+    const limpio = value.trim();
+    return limpio === '' ? undefined : limpio;
+  })
+  @IsString({ message: 'search debe ser texto' })
+  @MaxLength(MAX_SEARCH_LENGTH, {
+    message: `search no puede superar los ${String(MAX_SEARCH_LENGTH)} caracteres`,
+  })
+  search?: string;
 }

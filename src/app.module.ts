@@ -13,6 +13,7 @@ import { AppService } from './app.service';
 import { AppointmentsModule } from './appointments/appointments.module';
 import { AuthModule } from './auth/auth.module';
 import { CatalogModule } from './catalog/catalog.module';
+import { ConversationsModule } from './conversations/conversations.module';
 import { ClinicalRecordsModule } from './clinical-records/clinical-records.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { ClientIpThrottlerGuard } from './common/throttler/client-ip-throttler.guard';
@@ -63,6 +64,7 @@ import { VideoModule } from './video/video.module';
     AppointmentsModule,
     ClinicalRecordsModule,
     MediPassModule,
+    ConversationsModule,
     PaymentsModule,
     JobsModule,
   ],

@@ -33,6 +33,7 @@ type AppointmentRow = {
   scheduled_at: string;
   duration_minutes: number;
   status: string;
+  created_at: string;
 };
 
 function appointmentRow(overrides: Partial<AppointmentRow> = {}) {
@@ -42,7 +43,8 @@ function appointmentRow(overrides: Partial<AppointmentRow> = {}) {
     professional_id: PROFESSIONAL,
     scheduled_at: SCHEDULED_AT,
     duration_minutes: 30,
-    status: 'RESERVADO_SIN_PAGAR',
+    status: 'CONFIRMADO',
+    created_at: '2026-10-20T12:00:00.000Z',
     ...overrides,
   };
 }
@@ -258,6 +260,36 @@ describe('VideoConsultationService', () => {
 
     it('acepta CONFIRMADO', async () => {
       build(appointmentRow({ status: 'CONFIRMADO' }));
+
+      await expect(
+        service.join('jwt', PATIENT, APPOINTMENT, DENTRO_DE_LA_VENTANA),
+      ).resolves.toMatchObject({ role: 'PACIENTE' });
+    });
+
+    it('pide pagar un turno RESERVADO_SIN_PAGAR reservado con el cobro ya andando', async () => {
+      build(appointmentRow({ status: 'RESERVADO_SIN_PAGAR' }));
+
+      await expect(
+        service.join('jwt', PATIENT, APPOINTMENT, DENTRO_DE_LA_VENTANA),
+      ).rejects.toThrow('Pagá el turno para entrar a la consulta.');
+      expect(daily.createConsultationRoom).not.toHaveBeenCalled();
+    });
+
+    it('al profesional tampoco lo deja entrar a un turno impago', async () => {
+      build(appointmentRow({ status: 'RESERVADO_SIN_PAGAR' }));
+
+      await expect(
+        service.join('jwt', PROFESSIONAL, APPOINTMENT, DENTRO_DE_LA_VENTANA),
+      ).rejects.toThrow('El paciente todavía no pagó este turno.');
+    });
+
+    it('acepta RESERVADO_SIN_PAGAR en un turno reservado antes de que existiera el cobro', async () => {
+      build(
+        appointmentRow({
+          status: 'RESERVADO_SIN_PAGAR',
+          created_at: '2026-08-20T12:00:00.000Z',
+        }),
+      );
 
       await expect(
         service.join('jwt', PATIENT, APPOINTMENT, DENTRO_DE_LA_VENTANA),
