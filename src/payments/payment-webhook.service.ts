@@ -271,6 +271,21 @@ export class PaymentWebhookService {
       this.logger.error(
         `Pago ${mpPayment.id} aprobado por ${mpPayment.transactionAmount} ${mpPayment.currencyId}, el turno ${payment.appointment_id} vale ${payment.amount.toString()} ${payment.currency}. No se confirma.`,
       );
+      // Plata cobrada sin turno y sin devolución automática: que no quede solo
+      // en el log.
+      Sentry.captureMessage(
+        'Pago de MercadoPago que no coincide con el turno: hay que devolverlo a mano',
+        {
+          level: 'error',
+          tags: { area: 'pagos', outcome: 'monto-no-coincide' },
+          extra: {
+            mpPaymentId: mpPayment.id,
+            appointmentId: payment.appointment_id,
+            amount: mpPayment.transactionAmount,
+            currency: mpPayment.currencyId,
+          },
+        },
+      );
       return 'monto-no-coincide';
     }
 
@@ -318,6 +333,16 @@ export class PaymentWebhookService {
         this.logger.error(
           `Pago ${mpPayment.id} aprobado pero el turno ${payment.appointment_id} ya no estaba RESERVADO_SIN_PAGAR: se devuelve.`,
         );
+        // La fila del reembolso se anota en el mismo commit que el pago: si el
+        // proceso muere antes de llamar a MercadoPago, el reintento de la
+        // notificación (`ya-procesado`) la encuentra y lo completa.
+        await tx.refund.create({
+          data: {
+            payment_id: payment.id,
+            amount: new Prisma.Decimal(mpPayment.transactionAmount),
+            reason: `PAGO_SOBRE_TURNO_INACTIVO:${mpPayment.id}`,
+          },
+        });
         return 'turno-no-confirmable' as const;
       }
       return 'turno-confirmado' as const;
@@ -361,6 +386,33 @@ export class PaymentWebhookService {
         },
         now,
       );
+    }
+
+    // Reintento tras una caída entre el commit y el reembolso: el pago sobre un
+    // turno inactivo dejó su fila en `refunds` dentro de la transacción, y si
+    // sigue sin `PROCESADO` se vuelve a pedir (es idempotente, ver
+    // `refundUnappliedPayment`).
+    if (outcome === 'ya-procesado') {
+      const pending = await this.prisma.refund.findFirst({
+        where: {
+          payment_id: payment.id,
+          reason: `PAGO_SOBRE_TURNO_INACTIVO:${mpPayment.id}`,
+          status: { not: 'PROCESADO' },
+        },
+        select: { id: true },
+      });
+      if (pending) {
+        await this.refunds.refundUnappliedPayment(
+          {
+            paymentId: payment.id,
+            mpPaymentId: mpPayment.id,
+            amount: mpPayment.transactionAmount,
+            reason: 'PAGO_SOBRE_TURNO_INACTIVO',
+            markPaymentRefunded: true,
+          },
+          now,
+        );
+      }
     }
 
     if (outcome === 'turno-confirmado') {

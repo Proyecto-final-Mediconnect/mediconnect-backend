@@ -264,6 +264,7 @@ describe('CancellationRefundService', () => {
           amount: new Prisma.Decimal(15000),
           reason: 'PAGO_DUPLICADO:mp-segundo',
         },
+        select: expect.any(Object),
       });
       expect(mercadoPago.refundPayment).toHaveBeenCalledWith(
         'mp-segundo',
@@ -303,7 +304,11 @@ describe('CancellationRefundService', () => {
     });
 
     it('si el webhook se repite no pide otra devolución', async () => {
-      prisma.refund.findFirst.mockResolvedValue({ status: 'PROCESADO' });
+      prisma.refund.findFirst.mockResolvedValue({
+        id: 'ref-1',
+        status: 'PROCESADO',
+        created_at: NOW,
+      });
 
       await expect(
         service.refundUnappliedPayment(DUPLICATE, NOW),
@@ -311,6 +316,62 @@ describe('CancellationRefundService', () => {
 
       expect(prisma.refund.create).not.toHaveBeenCalled();
       expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+    });
+
+    it('una fila PENDIENTE se reintenta con la misma fila y la misma clave', async () => {
+      prisma.refund.findFirst.mockResolvedValue({
+        id: 'ref-viejo',
+        status: 'PENDIENTE',
+        created_at: new Date(NOW.getTime() - 3_600_000),
+      });
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PROCESADO');
+
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+      expect(mercadoPago.refundPayment).toHaveBeenCalledWith(
+        'mp-segundo',
+        15000,
+        'unapplied-mp-segundo',
+      );
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-viejo' },
+        data: expect.objectContaining({ status: 'PROCESADO' }),
+      });
+    });
+
+    it('pasadas las 24 h de la clave no reintenta: avisa para devolverlo a mano', async () => {
+      prisma.refund.findFirst.mockResolvedValue({
+        id: 'ref-viejo',
+        status: 'PENDIENTE',
+        created_at: new Date(NOW.getTime() - 25 * 3_600_000),
+      });
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PENDIENTE');
+
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(Sentry.captureMessage).toHaveBeenCalled();
+    });
+
+    it('dos entregas concurrentes: la que pierde el índice único sigue con la fila de la otra', async () => {
+      prisma.refund.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: 'ref-otra',
+          status: 'PROCESADO',
+          created_at: NOW,
+        });
+      prisma.refund.create.mockRejectedValue({ code: 'P2002' });
+
+      await expect(
+        service.refundUnappliedPayment(DUPLICATE, NOW),
+      ).resolves.toBe('PROCESADO');
+
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(prisma.refund.update).not.toHaveBeenCalled();
     });
 
     it('si MercadoPago falla queda PENDIENTE y avisa a Sentry para devolverlo a mano, sin tirar', async () => {

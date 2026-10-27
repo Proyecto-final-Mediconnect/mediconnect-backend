@@ -59,6 +59,12 @@ const REFUNDABLE_SELECT = {
   },
 } as const;
 
+/** Violación de unicidad en Prisma. */
+const PRISMA_UNIQUE_VIOLATION = 'P2002';
+
+/** MercadoPago vence la `X-Idempotency-Key` a las 24 h. */
+const IDEMPOTENCY_KEY_TTL_MS = 24 * 3_600_000;
+
 /** Motivo que queda en `refunds.reason`. */
 const CANCELLATION_REASON = 'CANCELACION_PACIENTE';
 
@@ -143,7 +149,10 @@ export class CancellationRefundService {
    * - **Idempotente:** el webhook se repite. Si ya hay un reembolso registrado
    *   para ese pago de MercadoPago, no se pide otro; y la clave de idempotencia
    *   de MercadoPago es el id del pago, así que tampoco duplica si la fila se
-   *   llegó a crear pero la respuesta se perdió.
+   *   llegó a crear pero la respuesta se perdió. Una fila `PENDIENTE` o
+   *   `RECHAZADO` se reintenta (dentro de las 24 h de la clave), y el índice
+   *   único parcial `refunds_payment_reason_uq` evita dos filas por entregas
+   *   concurrentes.
    * - Con `markPaymentRefunded`, un reembolso procesado deja la fila de
    *   `payments` en `REEMBOLSADO`. Para el duplicado no: esa fila es del primer
    *   pago, que sigue valiendo.
@@ -166,16 +175,44 @@ export class CancellationRefundService {
     const reasonText = `${reason}:${mpPaymentId}`;
 
     try {
-      const existing = await this.prisma.refund.findFirst({
-        where: { payment_id: paymentId, reason: reasonText },
-        select: { status: true },
-      });
-      if (existing) return existing.status;
+      const select = { id: true, status: true, created_at: true } as const;
+      const where = { payment_id: paymentId, reason: reasonText };
+      let refund = await this.prisma.refund.findFirst({ where, select });
+
+      if (refund?.status === 'PROCESADO') return refund.status;
+
+      // Una fila que quedó `PENDIENTE` o `RECHAZADO` (MercadoPago falló, o el
+      // proceso murió antes de pedirlo) se reintenta con la misma fila y la
+      // misma clave: es seguro porque MercadoPago devuelve el reembolso original
+      // en vez de crear otro. Su clave vence a las 24 h: pasado ese plazo no se
+      // reintenta, porque podría devolver dos veces; queda para resolverlo a
+      // mano.
+      if (
+        refund &&
+        now.getTime() - refund.created_at.getTime() > IDEMPOTENCY_KEY_TTL_MS
+      ) {
+        this.alertManualRefund(mpPaymentId, reason, refund.status);
+        return refund.status;
+      }
 
       const amount = new Prisma.Decimal(params.amount);
-      const refund = await this.prisma.refund.create({
-        data: { payment_id: paymentId, amount, reason: reasonText },
-      });
+      if (!refund) {
+        try {
+          refund = await this.prisma.refund.create({
+            data: { payment_id: paymentId, amount, reason: reasonText },
+            select,
+          });
+        } catch (err) {
+          // Dos entregas concurrentes: la otra ganó el índice único parcial
+          // (`refunds_payment_reason_uq`). Se sigue con su fila.
+          if ((err as { code?: string }).code !== PRISMA_UNIQUE_VIOLATION) {
+            throw err;
+          }
+          refund = await this.prisma.refund.findFirst({ where, select });
+          if (!refund) throw err;
+          if (refund.status === 'PROCESADO') return refund.status;
+        }
+      }
 
       let status: RefundOutcome = 'PENDIENTE';
       try {
