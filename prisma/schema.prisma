@@ -90,6 +90,7 @@ enum notification_type {
   PAGO_CONFIRMADO
   RESENA_MODERADA
   TURNO_CANCELADO
+  TURNO_REPROGRAMADO
 }
 
 enum notification_channel {
@@ -397,6 +398,8 @@ model Appointment {
   policy_hours_full_refund      Int?               @db.SmallInt
   policy_hours_partial_refund   Int?               @db.SmallInt
   policy_partial_refund_percent Int?               @db.SmallInt
+  /// Cuándo se movió de horario (ENG-66). Un turno se reprograma una sola vez.
+  rescheduled_at                DateTime?          @db.Timestamptz(6)
   created_at                    DateTime           @default(now()) @db.Timestamptz(6)
   updated_at                    DateTime           @default(now()) @db.Timestamptz(6)
 
