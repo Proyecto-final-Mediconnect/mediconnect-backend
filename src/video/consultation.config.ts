@@ -36,17 +36,39 @@ export const JOIN_OPENS_MINUTES_BEFORE = 10;
 export const JOIN_GRACE_MINUTES_AFTER = 15;
 
 /**
- * Estados del turno que habilitan entrar a la sala.
+ * Estados del turno que habilitan entrar a la sala (ENG-147).
  *
- * El título de ENG-56 dice "turno confirmado", pero hoy **ningún turno llega a
- * CONFIRMADO**: la confirmación depende del pago, que es ENG-63/ENG-64 del
- * Release 2, y ENG-54 deja todo turno nuevo en RESERVADO_SIN_PAGAR. Exigir
- * CONFIRMADO acá dejaría la videoconsulta inalcanzable para todos.
+ * Solo `CONFIRMADO`, que es el turno pagado. ENG-101 libera las reservas
+ * impagas a los 15 minutos, pero lo hace un job que dispara un cron de GitHub,
+ * y si el cron se atrasa queda una ventana en la que un turno sin pagar sigue
+ * `RESERVADO_SIN_PAGAR` cuando abre la sala. Sin este recorte, el paciente se
+ * atendería sin pagar.
  *
- * Cuando el pago exista, esta lista se recorta a `['CONFIRMADO']` y no hay que
- * tocar nada más. Espeja `ACTIVE_STATUSES` de `appointments.service.ts`.
+ * La excepción son los turnos anteriores al cobro: ver
+ * {@link PAYMENT_REQUIRED_SINCE}.
  */
-export const JOINABLE_STATUSES = ['RESERVADO_SIN_PAGAR', 'CONFIRMADO'] as const;
+export const JOINABLE_STATUSES = ['CONFIRMADO'] as const;
+
+/**
+ * Desde cuándo un turno tiene que estar pagado para tener videoconsulta: el
+ * deploy de ENG-63 (merge de backend #61 a `main`).
+ *
+ * Antes de eso no había forma de pagar y todo turno quedaba
+ * `RESERVADO_SIN_PAGAR` para siempre, así que esos turnos son legítimos en ese
+ * estado. Se compara contra `appointments.created_at`, que es cuándo se
+ * reservó y el paciente no puede cambiar.
+ */
+export const PAYMENT_REQUIRED_SINCE = new Date('2026-10-19T20:28:41Z');
+
+/** Si un turno en `status`, reservado en `createdAt`, puede entrar a la sala. */
+export function isJoinableStatus(status: string, createdAt: Date): boolean {
+  if (status === 'RESERVADO_SIN_PAGAR') {
+    return createdAt < PAYMENT_REQUIRED_SINCE;
+  }
+  return JOINABLE_STATUSES.includes(
+    status as (typeof JOINABLE_STATUSES)[number],
+  );
+}
 
 /**
  * Grabación de audio para el pipeline de transcripción (EP-07).
