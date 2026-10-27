@@ -585,7 +585,7 @@ describe('AppointmentsService', () => {
         where: {
           id: APPOINTMENT_ID,
           patient_id: PATIENT_ID,
-          status: { in: ['RESERVADO_SIN_PAGAR', 'CONFIRMADO'] },
+          status: 'RESERVADO_SIN_PAGAR',
           scheduled_at: new Date(UNPAID.scheduled_at),
           rescheduled_at: null,
         },
@@ -744,6 +744,37 @@ describe('AppointmentsService', () => {
 
       await expect(reschedule(MONDAY, '09:30')).rejects.toThrow(
         /lo acaba de reservar otra persona/,
+      );
+    });
+
+    it('revalida el estado exacto que se leyó: un turno pagado en el medio no se mueve', async () => {
+      results = [read(PAID), NO_COLLISION];
+      prisma.appointment.update.mockResolvedValue(
+        updatedTo(PAID, NEXT_MONDAY, '09:30'),
+      );
+
+      await reschedule(NEXT_MONDAY, '09:30');
+
+      expect(prisma.appointment.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ status: 'CONFIRMADO' }),
+        }),
+      );
+    });
+
+    it('si armar la vista falla después del update, el profesional igual se entera', async () => {
+      results = [read(PAID), NO_COLLISION];
+      prisma.appointment.update.mockResolvedValue(
+        updatedTo(PAID, NEXT_MONDAY, '09:30'),
+      );
+      prisma.professional.findMany.mockRejectedValueOnce(new Error('boom'));
+
+      await expect(reschedule(NEXT_MONDAY, '09:30')).rejects.toThrow('boom');
+      expect(inApp.notifyProfessional).toHaveBeenCalledWith(
+        APPOINTMENT_ID,
+        'TURNO_REPROGRAMADO',
+        NOW,
+        { previousScheduledAt: PAID.scheduled_at },
       );
     });
 

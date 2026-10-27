@@ -567,15 +567,19 @@ export class AppointmentsService {
       appointmentId,
     );
 
+    let updated;
     try {
-      const updated = await this.prisma.appointment.update({
+      updated = await this.prisma.appointment.update({
         // Las mismas condiciones que se validaron, revalidadas en el `where`:
         // entre la lectura y la escritura el turno pudo cambiar (lo cancelaron,
-        // el job lo liberó, otro click ya lo reprogramó).
+        // el job lo liberó, otro click ya lo reprogramó). El estado se revalida
+        // exacto, no "cualquier activo": si el webhook de MercadoPago lo pasó a
+        // CONFIRMADO en el medio, se salteó la regla de devolución y el aviso al
+        // profesional, y tiene que volver a evaluarse (P2025 -> 409).
         where: {
           id: appointmentId,
           patient_id: userId,
-          status: { in: [...ACTIVE_STATUSES] },
+          status: row.status as (typeof ACTIVE_STATUSES)[number],
           scheduled_at: currentStart,
           rescheduled_at: null,
         },
@@ -586,31 +590,6 @@ export class AppointmentsService {
           updated_at: now,
         },
       });
-
-      const [view] = await this.toViews([
-        {
-          id: updated.id,
-          patient_id: updated.patient_id,
-          professional_id: updated.professional_id,
-          scheduled_at: updated.scheduled_at.toISOString(),
-          duration_minutes: updated.duration_minutes,
-          price: updated.price.toString(),
-          status: updated.status,
-          rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
-        },
-      ]);
-
-      // Solo de un turno confirmado: de una reserva sin pagar el profesional
-      // todavía no se enteró. Nunca tira.
-      if (row.status === 'CONFIRMADO') {
-        await this.inApp.notifyProfessional(
-          appointmentId,
-          'TURNO_REPROGRAMADO',
-          now,
-          { previousScheduledAt: currentStart.toISOString() },
-        );
-      }
-      return view;
     } catch (err) {
       const code = (err as { code?: string }).code;
       // La carrera con otra reserva del mismo horario: el árbitro es el índice
@@ -629,6 +608,33 @@ export class AppointmentsService {
         'No pudimos reprogramar el turno. Probá de nuevo en unos minutos.',
       );
     }
+
+    // Solo de un turno confirmado: de una reserva sin pagar el profesional
+    // todavía no se enteró. Nunca tira. Va apenas después del `update`, antes de
+    // armar la vista: si `toViews` fallara, el turno ya se movió y el aviso no
+    // se puede perder.
+    if (row.status === 'CONFIRMADO') {
+      await this.inApp.notifyProfessional(
+        appointmentId,
+        'TURNO_REPROGRAMADO',
+        now,
+        { previousScheduledAt: currentStart.toISOString() },
+      );
+    }
+
+    const [view] = await this.toViews([
+      {
+        id: updated.id,
+        patient_id: updated.patient_id,
+        professional_id: updated.professional_id,
+        scheduled_at: updated.scheduled_at.toISOString(),
+        duration_minutes: updated.duration_minutes,
+        price: updated.price.toString(),
+        status: updated.status,
+        rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
+      },
+    ]);
+    return view;
   }
 
   /**
