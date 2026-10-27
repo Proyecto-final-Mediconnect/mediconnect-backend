@@ -625,6 +625,48 @@ describe('AppointmentsService', () => {
       );
     });
 
+    it('usa la política congelada en el turno, no la vigente del profesional (ENG-179)', async () => {
+      // Al reservar valía 24 h; después el profesional la subió a 48 h. Faltan
+      // 30 h: con la del turno corresponde la devolución total.
+      results = [
+        read({
+          ...PAID,
+          scheduled_at: '2026-08-18T17:00:00.000Z',
+          policy_hours_full_refund: 24,
+          policy_hours_partial_refund: 6,
+          policy_partial_refund_percent: 50,
+        }),
+        NO_COLLISION,
+      ];
+      policies.policyFor.mockResolvedValue({
+        hoursFullRefund: 48,
+        hoursPartialRefund: 12,
+        partialRefundPercent: 30,
+      });
+      prisma.appointment.update.mockResolvedValue(
+        updatedTo(PAID, NEXT_MONDAY, '09:30'),
+      );
+
+      await expect(reschedule(NEXT_MONDAY, '09:30')).resolves.toMatchObject({
+        status: 'CONFIRMADO',
+      });
+      expect(policies.policyFor).not.toHaveBeenCalled();
+    });
+
+    it('un turno anterior a ENG-65, sin política congelada, usa la vigente', async () => {
+      results = [read({ ...PAID, scheduled_at: '2026-08-18T17:00:00.000Z' })];
+      policies.policyFor.mockResolvedValue({
+        hoursFullRefund: 48,
+        hoursPartialRefund: 12,
+        partialRefundPercent: 30,
+      });
+
+      await expect(reschedule(NEXT_MONDAY, '09:30')).rejects.toThrow(
+        /hasta 48 horas antes/,
+      );
+      expect(policies.policyFor).toHaveBeenCalledWith(PRO_ID);
+    });
+
     it('un turno pagado sin la anticipación de la devolución total no se reprograma', async () => {
       // Faltan 2 horas: cancelarlo hoy no devuelve nada.
       results = [read({ ...PAID, scheduled_at: UNPAID.scheduled_at })];

@@ -33,7 +33,11 @@ import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
 import { holdExpiresAt, UNPAID_HOLD_MS } from './unpaid-hold';
 import { CancellationPolicyService } from '../professionals/cancellation-policy.service';
-import { refundPercentFor } from '../professionals/cancellation-policy';
+import {
+  CancellationPolicy,
+  refundPercentFor,
+  resolvePolicy,
+} from '../professionals/cancellation-policy';
 import { UnpaidReleaseService } from './unpaid-release.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 
@@ -101,6 +105,17 @@ const PRISMA_UNIQUE_VIOLATION = 'P2002';
 
 /** `P2025` de Prisma: el `where` del update no encontró ninguna fila. */
 const PRISMA_RECORD_NOT_FOUND = 'P2025';
+
+/** Política de cancelación que un trigger copia en el turno al reservarlo
+ *  (ENG-65). Los turnos anteriores la tienen en `null`. */
+const FROZEN_POLICY_COLUMNS =
+  'policy_hours_full_refund, policy_hours_partial_refund, policy_partial_refund_percent';
+
+interface FrozenPolicyColumns {
+  policy_hours_full_refund: number | null;
+  policy_hours_partial_refund: number | null;
+  policy_partial_refund_percent: number | null;
+}
 
 /** Datos del profesional que ve el paciente en la pantalla de reserva. */
 export interface BookableProfessional {
@@ -556,8 +571,9 @@ export class AppointmentsService {
    *   minutos no venció, y la retención **no se reinicia**: cuenta desde que se
    *   reservó.
    *
-   * La política es la vigente del profesional. Cuando entre ENG-65 (backend#78),
-   * que la congela en el turno al reservar, hay que leer esa.
+   * La política es la que quedó congelada en el turno al reservarlo (ENG-65),
+   * la misma que usa la cancelación. Los turnos anteriores a ENG-65 no la
+   * tienen y usan la vigente del profesional (ENG-179).
    */
   async reschedule(
     accessToken: string,
@@ -570,7 +586,7 @@ export class AppointmentsService {
 
     const { data, error } = await client
       .from('appointments')
-      .select(`${APPOINTMENT_SELECT}, created_at`)
+      .select(`${APPOINTMENT_SELECT}, created_at, ${FROZEN_POLICY_COLUMNS}`)
       .eq('id', appointmentId)
       .maybeSingle();
 
@@ -584,7 +600,9 @@ export class AppointmentsService {
       throw new NotFoundException('Ese turno no existe.');
     }
 
-    const row = data as unknown as AppointmentRow & { created_at: string };
+    const row = data as unknown as AppointmentRow & {
+      created_at: string;
+    } & FrozenPolicyColumns;
 
     if (row.patient_id !== userId) {
       throw new ForbiddenException(
@@ -612,7 +630,7 @@ export class AppointmentsService {
     }
 
     if (row.status === 'CONFIRMADO') {
-      const policy = await this.policies.policyFor(row.professional_id);
+      const policy = await this.policyOf(row);
       const percent = refundPercentFor(policy, currentStart, now);
       if (percent < 100) {
         const devolucion =
@@ -733,6 +751,23 @@ export class AppointmentsService {
    * front puede tener la grilla vieja o manipulada. Lo comparten la reserva y
    * la reprogramación.
    */
+  /**
+   * La política congelada en el turno, o la vigente del profesional si el turno
+   * es anterior a ENG-65 y no la tiene.
+   */
+  private async policyOf(
+    row: Pick<AppointmentRow, 'professional_id'> & FrozenPolicyColumns,
+  ): Promise<CancellationPolicy> {
+    const frozen = resolvePolicy({
+      hours_full_refund: row.policy_hours_full_refund ?? null,
+      hours_partial_refund: row.policy_hours_partial_refund ?? null,
+      partial_refund_percent: row.policy_partial_refund_percent ?? null,
+    });
+    return frozen.configured
+      ? frozen.policy
+      : this.policies.policyFor(row.professional_id);
+  }
+
   private async assertSlotBookable(
     professionalId: string,
     date: string,
