@@ -168,6 +168,7 @@ describe('MercadoPagoService', () => {
         sandboxInitPoint: PREFERENCE_BODY.sandbox_init_point,
         externalReference: APPOINTMENT_ID,
         expiresAt: null,
+        backUrlSuccess: null,
       });
     });
 
@@ -253,6 +254,40 @@ describe('MercadoPagoService', () => {
       expect(preference.expiresAt).toEqual(EXPIRES_AT);
       expect(preference.externalReference).toBe(APPOINTMENT_ID);
     });
+
+    it('lee adónde vuelve al aprobarse el pago (ENG-172)', async () => {
+      fetchMock.mockResolvedValue(
+        ok({
+          ...PREFERENCE_BODY,
+          back_urls: { success: 'mediconnect://pago/x?resultado=exito' },
+        }),
+      );
+
+      const preference = await service.getPreference(PREFERENCE_BODY.id);
+
+      expect(preference.backUrlSuccess).toBe(
+        'mediconnect://pago/x?resultado=exito',
+      );
+    });
+  });
+
+  describe('updateBackUrls (ENG-172)', () => {
+    it('cambia solo los back_urls de la preferencia, con un PUT', async () => {
+      fetchMock.mockResolvedValue(ok({ ...PREFERENCE_BODY }));
+      const backUrls = {
+        success: 'mediconnect://pago/x?resultado=exito',
+        failure: 'mediconnect://pago/x?resultado=fallo',
+        pending: 'mediconnect://pago/x?resultado=pendiente',
+      };
+
+      await service.updateBackUrls(PREFERENCE_BODY.id, backUrls);
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        `https://api.mercadopago.com/checkout/preferences/${PREFERENCE_BODY.id}`,
+      );
+      expect(fetchMock.mock.calls[0][1].method).toBe('PUT');
+      expect(bodyOf()).toEqual({ back_urls: backUrls });
+    });
   });
 
   describe('expirePreference', () => {
@@ -269,6 +304,24 @@ describe('MercadoPagoService', () => {
         expires: true,
         expiration_date_to: '2026-10-14T12:15:00.000-03:00',
       });
+    });
+  });
+
+  describe('refundPayment', () => {
+    it('pide el reembolso del monto con la clave de idempotencia', async () => {
+      fetchMock.mockResolvedValue(
+        ok({ id: 9001, status: 'approved', amount: 7500 }),
+      );
+
+      const refund = await service.refundPayment('123', 7500, 'refund-abc');
+
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        'https://api.mercadopago.com/v1/payments/123/refunds',
+      );
+      expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+      expect(bodyOf()).toEqual({ amount: 7500 });
+      expect(headersOf()['X-Idempotency-Key']).toBe('refund-abc');
+      expect(refund).toEqual({ id: '9001', status: 'approved', amount: 7500 });
     });
   });
 

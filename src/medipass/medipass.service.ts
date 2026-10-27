@@ -3,17 +3,30 @@ import {
   ConflictException,
   GoneException,
   Injectable,
+  InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  accessStatus,
+  resourceLabel,
+  type AccessStatus,
+} from './access-history';
 import { OpenEmergencySessionDto } from './dto/open-emergency-session.dto';
 import {
   CODE_ALPHABET,
   CODE_LENGTH,
+  CODE_MAX_ATTEMPTS,
   CODE_TTL_MS,
   CODIGO_INVALIDO,
   SESSION_TTL_MS,
 } from './medipass.config';
+import {
+  ACCESS_SELECT,
+  toMediPassAccess,
+  type MediPassAccess,
+} from './medipass-access';
 import {
   toVitalBlock,
   VITAL_SELECT,
@@ -39,6 +52,27 @@ export interface EmergencySessionStatusResponse {
   expiraEl: string;
   vital: VitalBlock;
 }
+
+/** Un acceso de un consultante al MediPass, con lo que miró (ENG-76). */
+export interface MediPassAccessView {
+  sesionId: string;
+  consultante: { nombre: string | null; matricula: string | null };
+  inicio: string;
+  vence: string;
+  revocadoEl: string | null;
+  estado: AccessStatus;
+  vistas: { recurso: string | null; etiqueta: string; el: string }[];
+}
+
+/** `GET /medipass/me/historial`: una página de accesos, del más reciente al más viejo. */
+export interface MediPassHistoryResponse {
+  accesos: MediPassAccessView[];
+  pagina: number;
+  hayMas: boolean;
+}
+
+/** Accesos por página del historial. */
+const HISTORY_PAGE_SIZE = 10;
 
 /** Forma de un UUID v4, para no pegarle a la base con cualquier cosa. */
 const UUID_PATTERN =
@@ -68,6 +102,8 @@ const UUID_PATTERN =
  */
 @Injectable()
 export class MediPassService {
+  private readonly logger = new Logger(MediPassService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   /**
@@ -96,28 +132,67 @@ export class MediPassService {
       };
     }
 
-    const creado = await this.prisma.$transaction(async (tx) => {
-      // Vencer lo que quedara vigente antes de insertar: si otra request ganó
-      // la carrera, su código queda cortado acá y sobrevive uno solo.
-      await tx.mediPassCode.updateMany({
-        where: { patient_id: patientId, expires_at: { gt: ahora } },
-        data: { expires_at: ahora },
-      });
-
-      return tx.mediPassCode.create({
-        data: {
-          patient_id: patientId,
-          code: this.generarCodigo(),
-          expires_at: new Date(ahora.getTime() + CODE_TTL_MS),
-        },
-        select: { code: true, expires_at: true },
-      });
-    });
+    const creado = await this.crearCodigo(patientId, ahora);
 
     return {
       codigo: creado.code,
       expiraEl: creado.expires_at.toISOString(),
     };
+  }
+
+  /**
+   * Inserta el código nuevo, reintentando si el sorteo cayó en uno que ya existe.
+   *
+   * Desde ENG-170 `medipass_codes.code` es único (hallazgo 1 de ENG-105): antes,
+   * dos pacientes con el mismo código vigente hacían que el canje resolviera a
+   * uno de los dos y el consultante recibiera la ficha del paciente equivocado,
+   * sin ninguna señal. Ahora la base lo rechaza con `P2002` y el reintento
+   * sortea otro.
+   *
+   * Es el mismo patrón que `ClinicalRecordsService.append` ante una colisión de
+   * `sequence_number`: la operación es válida, solo le tocó otro valor.
+   */
+  private async crearCodigo(
+    patientId: string,
+    ahora: Date,
+  ): Promise<{ code: string; expires_at: Date }> {
+    for (let intento = 1; intento <= CODE_MAX_ATTEMPTS; intento += 1) {
+      try {
+        return await this.prisma.$transaction(async (tx) => {
+          // Vencer lo que quedara vigente antes de insertar: si otra request
+          // ganó la carrera, su código queda cortado acá y sobrevive uno solo.
+          await tx.mediPassCode.updateMany({
+            where: { patient_id: patientId, expires_at: { gt: ahora } },
+            data: { expires_at: ahora },
+          });
+
+          return tx.mediPassCode.create({
+            data: {
+              patient_id: patientId,
+              code: this.generarCodigo(),
+              expires_at: new Date(ahora.getTime() + CODE_TTL_MS),
+            },
+            select: { code: true, expires_at: true },
+          });
+        });
+      } catch (error) {
+        if (!esCodigoRepetido(error) || intento === CODE_MAX_ATTEMPTS)
+          throw error;
+
+        // Con 28^8 combinaciones esto no debería verse nunca. Si aparece en los
+        // logs con alguna frecuencia, el generador está mal, no hubo mala
+        // suerte: vale la pena que quede como warning y no en silencio.
+        this.logger.warn(
+          `Colisión al generar el código MediPass del paciente ${patientId} (intento ${intento}/${CODE_MAX_ATTEMPTS})`,
+        );
+      }
+    }
+
+    // Inalcanzable: la última vuelta del loop relanza. Está por el tipo de
+    // retorno, que TypeScript no puede inferir del `for`.
+    throw new InternalServerErrorException(
+      'No pudimos generar tu código. Probá de nuevo en unos segundos.',
+    );
   }
 
   /** El bloque vital del propio paciente, que es lo que ve en su pantalla. */
@@ -252,6 +327,222 @@ export class MediPassService {
   }
 
   /**
+   * Historial de accesos al MediPass del paciente (HU-38, ENG-76): quién lo
+   * abrió, cuándo, si sigue abierto, si se cortó, y qué miró.
+   *
+   * Se agrupa por sesión y no se lista fila por fila de la bitácora: lo que el
+   * paciente necesita saber es "el Dr. X entró el martes", y las vistas de esa
+   * visita van adentro. Se pagina por sesión, de la más reciente a la más
+   * vieja; el `id` desempata dos sesiones abiertas en el mismo instante para
+   * que una página nunca repita ni saltee filas.
+   *
+   * Las lecturas de la historia clínica (`audit_logs`, `CLINICAL_RECORD_READ`)
+   * no van acá: son de ENG-165.
+   */
+  async getMyHistory(
+    patientId: string,
+    pagina = 1,
+    now: Date = new Date(),
+  ): Promise<MediPassHistoryResponse> {
+    await this.assertPatientExists(patientId);
+
+    // Uno de más para saber si hay otra página sin un COUNT aparte.
+    const rows = await this.prisma.mediPassSession.findMany({
+      where: { patient_id: patientId },
+      orderBy: [{ started_at: 'desc' }, { id: 'desc' }],
+      skip: (pagina - 1) * HISTORY_PAGE_SIZE,
+      take: HISTORY_PAGE_SIZE + 1,
+      select: {
+        id: true,
+        consultant_name: true,
+        consultant_license: true,
+        started_at: true,
+        expires_at: true,
+        revoked_at: true,
+        access_logs: {
+          // La bitácora es del paciente; el filtro lo repite por si alguna vez
+          // una sesión quedara mal asociada.
+          where: { patient_id: patientId },
+          orderBy: { accessed_at: 'asc' },
+          select: { resource_accessed: true, accessed_at: true },
+        },
+      },
+    });
+
+    return {
+      pagina,
+      hayMas: rows.length > HISTORY_PAGE_SIZE,
+      accesos: rows.slice(0, HISTORY_PAGE_SIZE).map((s) => ({
+        sesionId: s.id,
+        consultante: {
+          nombre: s.consultant_name,
+          matricula: s.consultant_license,
+        },
+        inicio: s.started_at.toISOString(),
+        vence: s.expires_at.toISOString(),
+        revocadoEl: s.revoked_at?.toISOString() ?? null,
+        estado: accessStatus(s, now),
+        vistas: s.access_logs.map((log) => ({
+          recurso: log.resource_accessed,
+          etiqueta: resourceLabel(log.resource_accessed),
+          el: log.accessed_at.toISOString(),
+        })),
+      })),
+    };
+  }
+
+  /**
+   * Los accesos abiertos ahora mismo sobre el MediPass del paciente (HU-35,
+   * ENG-74).
+   *
+   * Es la mitad visible de lo que el MediPass promete: sin esta lista, el
+   * paciente puede tener un acceso abierto y no saberlo, y el control sobre su
+   * información clínica queda escrito en el diseño y en ningún otro lado. La
+   * otra mitad es `revokeAccess`.
+   *
+   * ## El vencimiento se filtra acá, no en la base
+   *
+   * `expires_at: { gt: ahora }` contra el reloj del servidor, igual que
+   * `getSessionStatus` y por el mismo motivo que ENG-101: ninguna lectura
+   * devuelve una sesión vencida aunque el job de ENG-104 todavía no la haya
+   * marcado. Si se confiara en una columna materializada, un job atrasado le
+   * mostraría al paciente accesos abiertos que en realidad ya se cerraron —y,
+   * peor, le dejaría "cortar" accesos que no existen.
+   *
+   * Ordenados por vencimiento ascendente: primero el que se cierra antes. Es el
+   * orden que pide el ticket.
+   */
+  async listMyAccesses(patientId: string): Promise<MediPassAccess[]> {
+    await this.assertPatientExists(patientId);
+
+    const ahora = new Date();
+    const sessions = await this.prisma.mediPassSession.findMany({
+      where: {
+        patient_id: patientId,
+        revoked_at: null,
+        expires_at: { gt: ahora },
+      },
+      orderBy: { expires_at: 'asc' },
+      select: ACCESS_SELECT,
+    });
+
+    return sessions.map((session) => toMediPassAccess(session, ahora));
+  }
+
+  /**
+   * El paciente corta un acceso (HU-36, ENG-75).
+   *
+   * Es **la** propiedad que el proyecto promete sobre el MediPass y la que hay
+   * que poder demostrar en vivo: a partir de acá, el siguiente
+   * `GET /medipass/sessions/:id` de esa sesión devuelve 410 y la ficha de
+   * emergencia se cierra en el próximo poll. No hace falta ningún job: el 410
+   * ya sale de `revoked_at` en `getSessionStatus`.
+   *
+   * Cortar un acceso **no corta los demás**, y eso es consecuencia directa de
+   * que cada canje del código abra su propia sesión (ver `openSession`): en una
+   * guardia con dos médicos mirando, el paciente le saca el acceso a uno sin
+   * dejar al otro afuera.
+   *
+   * ## Por qué es idempotente y no da error si ya estaba cerrado
+   *
+   * Un acceso ya revocado, o que venció solo mientras el paciente apretaba el
+   * botón, termina en el mismo estado que se pedía: cerrado. Devolver un error
+   * ahí sería decirle al paciente que algo falló cuando el resultado es
+   * exactamente el que quería, y un doble click no puede verse como una falla.
+   * Lo que sí devuelve 404 es la sesión de otro paciente, con el mismo criterio
+   * que `CODIGO_INVALIDO`: distinguirla de una inexistente diría si ese id
+   * existe.
+   *
+   * ## Por qué la auditoría va en la misma transacción
+   *
+   * La revocación y su registro en `audit_logs` son un solo hecho. Si el log
+   * fallara y la revocación quedara igual, el paciente vería "acceso cortado"
+   * sin que haya quedado constancia de cuándo lo cortó, que es justo lo que
+   * tendría que poder probar después. Y si se escribiera el log sin revocar,
+   * sería una constancia falsa. Juntas en una transacción, un fallo devuelve
+   * 500 y el paciente sabe que tiene que reintentar: de los tres resultados
+   * posibles, el único inaceptable es que crea que cortó un acceso que sigue
+   * abierto.
+   */
+  async revokeAccess(patientId: string, sessionId: string): Promise<void> {
+    const session = await this.prisma.mediPassSession.findUnique({
+      where: { id: sessionId },
+      select: {
+        patient_id: true,
+        revoked_at: true,
+        expires_at: true,
+        consultant_name: true,
+        consultant_license: true,
+      },
+    });
+
+    if (!session || session.patient_id !== patientId) {
+      throw new NotFoundException('Ese acceso no existe.');
+    }
+
+    const ahora = new Date();
+    const yaCerrado =
+      session.revoked_at !== null ||
+      session.expires_at.getTime() <= ahora.getTime();
+
+    // Ya estaba cerrado: nada que revocar y nada que auditar. El paciente no
+    // cortó este acceso —se cerró solo— y marcarlo como revocado falsearía el
+    // historial de accesos que ENG-76 le va a mostrar.
+    if (yaCerrado) return;
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // `updateMany` con el estado esperado en el `where`, y no `update` por
+        // id: si el job de ENG-104 o otra pestaña ganaron la carrera entre la
+        // lectura de arriba y esto, `count` vuelve en 0 y no se escribe el log
+        // de una revocación que no ocurrió.
+        const { count } = await tx.mediPassSession.updateMany({
+          where: {
+            id: sessionId,
+            patient_id: patientId,
+            revoked_at: null,
+            expires_at: { gt: ahora },
+          },
+          data: { revoked_at: ahora, revoked_by: patientId },
+        });
+
+        if (count === 0) return;
+
+        await tx.auditLog.create({
+          data: {
+            actor_id: patientId,
+            action: 'MEDIPASS_ACCESS_REVOKED',
+            resource_type: 'medipass_sessions',
+            resource_id: sessionId,
+            metadata: {
+              // Quién era, congelado en el log: la sesión se puede borrar alguna
+              // vez por retención, y entonces el log sería el único lugar donde
+              // dice a quién se le cortó el acceso.
+              consultante: session.consultant_name,
+              matricula: session.consultant_license,
+              // Cuánto le quedaba. Es el dato que distingue "le corté el acceso
+              // enseguida" de "lo dejé casi hasta el final".
+              minutosRestantes: Math.max(
+                0,
+                Math.ceil(
+                  (session.expires_at.getTime() - ahora.getTime()) / 60_000,
+                ),
+              ),
+            },
+          },
+        });
+      });
+    } catch (error) {
+      this.logger.error(
+        `No se pudo revocar el acceso ${sessionId} del paciente ${patientId}: ${String(error)}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos cortar el acceso. Probá de nuevo en unos segundos.',
+      );
+    }
+  }
+
+  /**
    * La fila de `patients` tiene que existir: `medipass_codes.patient_id` apunta
    * a ella, y el bloque vital sale de ahí.
    *
@@ -292,4 +583,23 @@ export class MediPassService {
     }
     return codigo;
   }
+}
+
+/**
+ * `P2002` de Prisma sobre la unique de `code` (ENG-170).
+ *
+ * Se mira el `target` y no solo el código de error: `medipass_codes` podría
+ * tener otra unique alguna vez, y reintentar con un código nuevo no arreglaría
+ * una colisión en otra columna —solo la escondería detrás de tres intentos.
+ */
+function esCodigoRepetido(error: unknown): boolean {
+  if ((error as { code?: string }).code !== 'P2002') return false;
+
+  const target = (error as { meta?: { target?: unknown } }).meta?.target;
+  if (Array.isArray(target)) return target.includes('code');
+  if (typeof target === 'string') return target.includes('code');
+
+  // Sin `meta.target` no se puede saber qué unique fue. Se trata como la de
+  // `code`, que hoy es la única de la tabla.
+  return true;
 }

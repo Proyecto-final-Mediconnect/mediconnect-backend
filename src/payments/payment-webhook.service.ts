@@ -1,7 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
+import * as Sentry from '@sentry/nestjs';
 import { Prisma, type Payment } from '../../generated/prisma/client';
 import { AppointmentNotificationsService } from '../notifications/appointment-notifications.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { CancellationRefundService } from './cancellation-refund.service';
 import { verifyWebhookSignature } from './mercadopago-signature';
 import {
   MercadoPagoApiError,
@@ -35,11 +38,16 @@ export type WebhookOutcome =
   | 'pago-desconocido'
   | 'monto-no-coincide'
   | 'ya-procesado'
+  | 'pago-duplicado'
   | 'turno-confirmado'
   | 'turno-no-confirmable'
   | 'pago-rechazado'
   | 'pago-pendiente'
+  | 'pago-reembolsado'
   | 'estado-no-manejado';
+
+/** Estado de MercadoPago de un pago devuelto entero (ENG-65). */
+const REFUNDED_STATUS = 'refunded';
 
 /** Estados de MercadoPago que significan "este intento no cobró". */
 const REJECTED_STATUSES = ['rejected', 'cancelled'];
@@ -74,6 +82,8 @@ export class PaymentWebhookService {
     private readonly prisma: PrismaService,
     private readonly mercadopago: MercadoPagoService,
     private readonly notifications: AppointmentNotificationsService,
+    private readonly inApp: InAppNotificationsService,
+    private readonly refunds: CancellationRefundService,
   ) {}
 
   async handle(
@@ -219,8 +229,27 @@ export class PaymentWebhookService {
       return 'pago-pendiente';
     }
 
-    // `refunded` y `charged_back` son de ENG-65 (reembolsos). Quedan en la
-    // bitácora y en el log hasta que ese flujo exista.
+    if (mpPayment.status === REFUNDED_STATUS) {
+      // Llega después de un reembolso total (ENG-65). Normalmente
+      // `CancellationRefundService` ya dejó el pago REEMBOLSADO y esto no
+      // cambia nada; cubre el caso en que la respuesta de MercadoPago se
+      // perdió, o el reembolso se hizo a mano desde su panel.
+      // Solo si es el pago que quedó registrado en el turno. El reembolso de un
+      // pago duplicado (ENG-144) también llega como `refunded`, y no puede
+      // marcar como devuelto el pago bueno, que sigue valiendo.
+      await this.prisma.payment.updateMany({
+        where: {
+          id: payment.id,
+          status: 'APROBADO',
+          mercadopago_payment_id: mpPayment.id,
+        },
+        data: { status: 'REEMBOLSADO' },
+      });
+      return 'pago-reembolsado';
+    }
+
+    // `charged_back` (contracargo) no tiene flujo: queda en la bitácora y en el
+    // log para resolverlo a mano.
     this.logger.warn(
       `Estado de MercadoPago no manejado: ${mpPayment.status} (payment_id=${mpPayment.id}).`,
     );
@@ -242,6 +271,21 @@ export class PaymentWebhookService {
       this.logger.error(
         `Pago ${mpPayment.id} aprobado por ${mpPayment.transactionAmount} ${mpPayment.currencyId}, el turno ${payment.appointment_id} vale ${payment.amount.toString()} ${payment.currency}. No se confirma.`,
       );
+      // Plata cobrada sin turno y sin devolución automática: que no quede solo
+      // en el log.
+      Sentry.captureMessage(
+        'Pago de MercadoPago que no coincide con el turno: hay que devolverlo a mano',
+        {
+          level: 'error',
+          tags: { area: 'pagos', outcome: 'monto-no-coincide' },
+          extra: {
+            mpPaymentId: mpPayment.id,
+            appointmentId: payment.appointment_id,
+            amount: mpPayment.transactionAmount,
+            currency: mpPayment.currencyId,
+          },
+        },
+      );
       return 'monto-no-coincide';
     }
 
@@ -259,20 +303,46 @@ export class PaymentWebhookService {
             : now,
         },
       });
-      if (paid.count === 0) return 'ya-procesado' as const;
+      if (paid.count === 0) {
+        // O es la misma notificación repetida (idempotente), o es **otro** pago
+        // aprobado sobre un turno que ya estaba pago: dos pestañas, dos pagos
+        // (ENG-144). Se lee de nuevo dentro de la transacción porque lo que se
+        // leyó antes puede haber cambiado con otra notificación concurrente.
+        const current = await tx.payment.findUnique({
+          where: { id: payment.id },
+          select: { status: true, mercadopago_payment_id: true },
+        });
+        const duplicate =
+          current?.mercadopago_payment_id != null &&
+          current.mercadopago_payment_id !== mpPayment.id &&
+          ['APROBADO', 'REEMBOLSADO'].includes(current.status);
+        return duplicate
+          ? ('pago-duplicado' as const)
+          : ('ya-procesado' as const);
+      }
 
       // Solo un turno que sigue esperando el pago pasa a CONFIRMADO. Si entre
       // la reserva y el pago el paciente lo canceló o ENG-101 lo liberó, el
-      // pago queda APROBADO pero el turno no revive: hay que devolver la plata
-      // (ENG-65), y el log es la señal.
+      // pago queda APROBADO pero el turno no revive: se devuelve entero
+      // después del commit (ENG-144).
       const confirmed = await tx.appointment.updateMany({
         where: { id: payment.appointment_id, status: 'RESERVADO_SIN_PAGAR' },
         data: { status: 'CONFIRMADO', updated_at: now },
       });
       if (confirmed.count === 0) {
         this.logger.error(
-          `Pago ${mpPayment.id} aprobado pero el turno ${payment.appointment_id} ya no estaba RESERVADO_SIN_PAGAR: requiere reembolso.`,
+          `Pago ${mpPayment.id} aprobado pero el turno ${payment.appointment_id} ya no estaba RESERVADO_SIN_PAGAR: se devuelve.`,
         );
+        // La fila del reembolso se anota en el mismo commit que el pago: si el
+        // proceso muere antes de llamar a MercadoPago, el reintento de la
+        // notificación (`ya-procesado`) la encuentra y lo completa.
+        await tx.refund.create({
+          data: {
+            payment_id: payment.id,
+            amount: new Prisma.Decimal(mpPayment.transactionAmount),
+            reason: `PAGO_SOBRE_TURNO_INACTIVO:${mpPayment.id}`,
+          },
+        });
         return 'turno-no-confirmable' as const;
       }
       return 'turno-confirmado' as const;
@@ -282,8 +352,78 @@ export class PaymentWebhookService {
     // transacción terminó no confirmando. Sin `await`: la respuesta a
     // MercadoPago no espera a Resend (hasta 10 s de timeout). Nunca tira, y si
     // falla lo reintenta el job de recordatorios (ENG-68).
+    // Plata cobrada sin un turno a cambio: se devuelve entera (ENG-144). Va
+    // después del commit porque llama a MercadoPago, y nunca tira.
+    if (outcome === 'pago-duplicado' || outcome === 'turno-no-confirmable') {
+      const reason =
+        outcome === 'pago-duplicado'
+          ? 'PAGO_DUPLICADO'
+          : 'PAGO_SOBRE_TURNO_INACTIVO';
+      this.logger.warn(
+        `Pago ${mpPayment.id} del turno ${payment.appointment_id} no se aplica (${outcome}): se devuelve entero.`,
+      );
+      Sentry.captureMessage(
+        `Pago de MercadoPago que no se aplica (${outcome})`,
+        {
+          level: 'warning',
+          tags: { area: 'pagos', outcome },
+          extra: {
+            mpPaymentId: mpPayment.id,
+            appointmentId: payment.appointment_id,
+            amount: mpPayment.transactionAmount,
+          },
+        },
+      );
+      await this.refunds.refundUnappliedPayment(
+        {
+          paymentId: payment.id,
+          mpPaymentId: mpPayment.id,
+          amount: mpPayment.transactionAmount,
+          reason,
+          // El duplicado no toca la fila del turno: es del primer pago, que
+          // sigue valiendo. El pago sobre un turno inactivo sí es el de la fila.
+          markPaymentRefunded: outcome === 'turno-no-confirmable',
+        },
+        now,
+      );
+    }
+
+    // Reintento tras una caída entre el commit y el reembolso: el pago sobre un
+    // turno inactivo dejó su fila en `refunds` dentro de la transacción, y si
+    // sigue sin `PROCESADO` se vuelve a pedir (es idempotente, ver
+    // `refundUnappliedPayment`).
+    if (outcome === 'ya-procesado') {
+      const pending = await this.prisma.refund.findFirst({
+        where: {
+          payment_id: payment.id,
+          reason: `PAGO_SOBRE_TURNO_INACTIVO:${mpPayment.id}`,
+          status: { not: 'PROCESADO' },
+        },
+        select: { id: true },
+      });
+      if (pending) {
+        await this.refunds.refundUnappliedPayment(
+          {
+            paymentId: payment.id,
+            mpPaymentId: mpPayment.id,
+            amount: mpPayment.transactionAmount,
+            reason: 'PAGO_SOBRE_TURNO_INACTIVO',
+            markPaymentRefunded: true,
+          },
+          now,
+        );
+      }
+    }
+
     if (outcome === 'turno-confirmado') {
       void this.notifications.sendConfirmation(payment.appointment_id, now);
+      // El aviso in-app al profesional sí se espera: es un INSERT local, no
+      // una API externa. También nunca tira (ENG-69).
+      await this.inApp.notifyProfessional(
+        payment.appointment_id,
+        'PAGO_CONFIRMADO',
+        now,
+      );
     }
     return outcome;
   }

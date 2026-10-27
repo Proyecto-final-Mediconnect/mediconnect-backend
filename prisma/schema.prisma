@@ -5,7 +5,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url = env("DATABASE_URL")
+  url      = env("DATABASE_URL")
 }
 
 // ===========================================================================
@@ -89,6 +89,7 @@ enum notification_type {
   NUEVO_MENSAJE
   PAGO_CONFIRMADO
   RESENA_MODERADA
+  TURNO_CANCELADO
 }
 
 enum notification_channel {
@@ -162,6 +163,19 @@ model Patient {
   address    String?
   created_at DateTime  @default(now()) @db.Timestamptz(6)
   updated_at DateTime  @default(now()) @db.Timestamptz(6)
+
+  // Campos vitales del MediPass (ENG-134). La forma de los `jsonb` la fija el
+  // tipo `VitalBlock` que la web ya consume, con las claves en español:
+  // allergies `[{ que, gravedad }]`, medications `[{ droga, dosis, nota? }]`,
+  // conditions `[{ nombre, codigo }]`, emergency_contact
+  // `{ nombre, vinculo, telefono }`. `jsonb` en vez de tres tablas propias es
+  // deuda reconocida: ver el comentario de la migración.
+  sex               String? @db.VarChar(30)
+  blood_type        String? @db.VarChar(3)
+  allergies         Json?   @db.JsonB
+  medications       Json?   @db.JsonB
+  conditions        Json?   @db.JsonB
+  emergency_contact Json?   @db.JsonB
 
   profile                 Profile               @relation(fields: [profile_id], references: [id], onDelete: Cascade)
   appointments            Appointment[]
@@ -369,23 +383,28 @@ model CancellationPolicy {
 /// esa cláusula NO es equivalente — impediría revender un turno cancelado — así
 /// que el índice vive solo en el SQL de la migración.
 model Appointment {
-  id                  String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  patient_id          String             @db.Uuid
-  professional_id     String             @db.Uuid
-  scheduled_at        DateTime           @db.Timestamptz(6)
-  duration_minutes    Int                @db.SmallInt
-  price               Decimal            @db.Decimal(10, 2)
-  status              appointment_status @default(RESERVADO_SIN_PAGAR)
-  cancellation_reason String?
-  cancelled_at        DateTime?          @db.Timestamptz(6)
-  created_at          DateTime           @default(now()) @db.Timestamptz(6)
-  updated_at          DateTime           @default(now()) @db.Timestamptz(6)
+  id                            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id                    String             @db.Uuid
+  professional_id               String             @db.Uuid
+  scheduled_at                  DateTime           @db.Timestamptz(6)
+  duration_minutes              Int                @db.SmallInt
+  price                         Decimal            @db.Decimal(10, 2)
+  status                        appointment_status @default(RESERVADO_SIN_PAGAR)
+  cancellation_reason           String?
+  cancelled_at                  DateTime?          @db.Timestamptz(6)
+  /// Copia de la política de cancelación al reservar (ENG-65). La escribe un
+  /// trigger; NULL = el profesional no tenía política y aplica el default.
+  policy_hours_full_refund      Int?               @db.SmallInt
+  policy_hours_partial_refund   Int?               @db.SmallInt
+  policy_partial_refund_percent Int?               @db.SmallInt
+  created_at                    DateTime           @default(now()) @db.Timestamptz(6)
+  updated_at                    DateTime           @default(now()) @db.Timestamptz(6)
 
-  patient      Patient      @relation(fields: [patient_id], references: [profile_id])
-  professional Professional @relation(fields: [professional_id], references: [profile_id])
-  consultation Consultation?
-  payment      Payment?
-  review       Review?
+  patient       Patient        @relation(fields: [patient_id], references: [profile_id])
+  professional  Professional   @relation(fields: [professional_id], references: [profile_id])
+  consultation  Consultation?
+  payment       Payment?
+  review        Review?
   notifications Notification[]
 
   @@index([professional_id, scheduled_at])
@@ -474,13 +493,14 @@ model PaymentWebhookEvent {
 
 /// Reembolsos (1:N sobre un pago).
 model Refund {
-  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  payment_id   String        @db.Uuid
-  amount       Decimal       @db.Decimal(10, 2)
-  status       refund_status @default(PENDIENTE)
-  reason       String?
-  processed_at DateTime?     @db.Timestamptz(6)
-  created_at   DateTime      @default(now()) @db.Timestamptz(6)
+  id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payment_id            String        @db.Uuid
+  amount                Decimal       @db.Decimal(10, 2)
+  status                refund_status @default(PENDIENTE)
+  reason                String?
+  mercadopago_refund_id String?
+  processed_at          DateTime?     @db.Timestamptz(6)
+  created_at            DateTime      @default(now()) @db.Timestamptz(6)
 
   payment Payment @relation(fields: [payment_id], references: [id])
 
@@ -522,11 +542,11 @@ model ClinicalRecordEntry {
   ///     `default now()` lo elige la base después.
   created_at         DateTime   @db.Timestamptz(3)
 
-  patient      Patient               @relation(fields: [patient_id], references: [profile_id])
-  professional Professional          @relation(fields: [professional_id], references: [profile_id])
-  consultation Consultation?         @relation(fields: [consultation_id], references: [id])
-  corrects     ClinicalRecordEntry?  @relation("EntryCorrections", fields: [corrects_entry_id], references: [id])
-  corrected_by ClinicalRecordEntry?  @relation("EntryCorrections")
+  patient      Patient              @relation(fields: [patient_id], references: [profile_id])
+  professional Professional         @relation(fields: [professional_id], references: [profile_id])
+  consultation Consultation?        @relation(fields: [consultation_id], references: [id])
+  corrects     ClinicalRecordEntry? @relation("EntryCorrections", fields: [corrects_entry_id], references: [id])
+  corrected_by ClinicalRecordEntry? @relation("EntryCorrections")
   summary      ConsultationSummary?
 
   @@unique([patient_id, sequence_number])
@@ -570,11 +590,16 @@ model Conversation {
   professional_id String   @db.Uuid
   created_at      DateTime @default(now()) @db.Timestamptz(6)
 
+  /// "Borrar chat" de cada lado (ENG-70): lo oculta solo de esa bandeja. Un mensaje nuevo limpia las dos.
+  patient_hidden_at      DateTime? @db.Timestamptz(6)
+  professional_hidden_at DateTime? @db.Timestamptz(6)
+
   patient      Patient      @relation(fields: [patient_id], references: [profile_id])
   professional Professional @relation(fields: [professional_id], references: [profile_id])
   messages     Message[]
 
   @@unique([patient_id, professional_id])
+  @@index([professional_id])
   @@map("conversations")
 }
 
@@ -607,7 +632,7 @@ model Notification {
   created_at DateTime             @default(now()) @db.Timestamptz(6)
 
   /// Turno al que se refiere el aviso (ENG-68). `null` en los que no son de un turno.
-  appointment_id String?   @db.Uuid
+  appointment_id String? @db.Uuid
 
   user        Profile      @relation(fields: [user_id], references: [id])
   appointment Appointment? @relation(fields: [appointment_id], references: [id], onDelete: Cascade)
@@ -634,11 +659,20 @@ model PushToken {
 // EP-09 — MediPass
 // ===========================================================================
 
-/// Código rotatorio de un solo uso, vigente 5 minutos.
+/// Código rotatorio del MediPass, vigente 5 minutos.
+///
+/// **No es de un solo uso**, a diferencia de lo que decía este comentario hasta
+/// ENG-170: cada canje abre su propia sesión y el código sigue sirviendo hasta
+/// que rota (ver `MediPassService.openSession`). Es deliberado —un médico que
+/// recarga la página no puede quedar afuera, y en una guardia puede haber más de
+/// uno mirando— y es lo que hace posible revocar un acceso sin cortar los otros.
+/// `used_at` guarda cuándo se usó por primera vez, no es una traba.
 model MediPassCode {
   id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   patient_id String    @db.Uuid
-  code       String    @db.VarChar(8)
+  /// Único por ENG-170: dos códigos vigentes iguales le entregaban al consultante
+  /// la ficha del paciente equivocado. La generación reintenta ante `P2002`.
+  code       String    @unique @db.VarChar(8)
   expires_at DateTime  @db.Timestamptz(6)
   used_at    DateTime? @db.Timestamptz(6)
   created_at DateTime  @default(now()) @db.Timestamptz(6)

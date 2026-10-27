@@ -6,6 +6,7 @@ import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
+import { DEFAULT_CANCELLATION_POLICY } from './../src/professionals/cancellation-policy';
 
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
 const ID = '11111111-1111-4111-8111-111111111111';
@@ -87,7 +88,34 @@ describe('GET /professionals/:id — perfil público (e2e)', () => {
           ],
           price: 15000,
           currency: 'ARS',
+          // ENG-67: el paciente tiene que ver a qué atenerse ANTES de reservar.
+          // Sin política configurada viaja el default, nunca `null`.
+          cancellationPolicy: DEFAULT_CANCELLATION_POLICY,
         });
+      });
+  });
+
+  it('la política de cancelación viaja configurada cuando el profesional la fijó', async () => {
+    findFirst.mockResolvedValue({
+      ...validatedRow,
+      cancellation_policy: {
+        hours_full_refund: 72,
+        hours_partial_refund: 24,
+        partial_refund_percent: 25,
+      },
+    });
+
+    await request(app.getHttpServer())
+      .get(`/professionals/${ID}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.cancellationPolicy).toEqual({
+          hoursFullRefund: 72,
+          hoursPartialRefund: 24,
+          partialRefundPercent: 25,
+        });
+        // `configured` es para la pantalla del profesional, no para el paciente.
+        expect(res.body.cancellationPolicy.configured).toBeUndefined();
       });
   });
 

@@ -59,6 +59,7 @@ describe('AppointmentPaymentService', () => {
     createPreference: jest.Mock;
     getPreference: jest.Mock;
     expirePreference: jest.Mock;
+    updateBackUrls: jest.Mock;
   };
   let prisma: {
     payment: { findUnique: jest.Mock; upsert: jest.Mock };
@@ -91,6 +92,7 @@ describe('AppointmentPaymentService', () => {
       }),
       getPreference: jest.fn(),
       expirePreference: jest.fn().mockResolvedValue(undefined),
+      updateBackUrls: jest.fn().mockResolvedValue(undefined),
     };
 
     prisma = {
@@ -217,6 +219,7 @@ describe('AppointmentPaymentService', () => {
         sandboxInitPoint: 'https://mp/checkout/sandbox-viva',
         externalReference: APPOINTMENT,
         expiresAt: new Date(NOW.getTime() + 10 * MINUTE),
+        backUrlSuccess: `https://app.test/turnos/${APPOINTMENT}/pago?resultado=exito`,
       });
 
       const link = await service.createCheckout(
@@ -228,6 +231,8 @@ describe('AppointmentPaymentService', () => {
 
       expect(mercadopago.getPreference).toHaveBeenCalledWith('pref-viva');
       expect(mercadopago.createPreference).not.toHaveBeenCalled();
+      // Misma punta que la vez anterior: no hay nada que cambiarle.
+      expect(mercadopago.updateBackUrls).not.toHaveBeenCalled();
       expect(link.checkoutUrl).toBe('https://mp/checkout/sandbox-viva');
       expect(prisma.payment.upsert).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -649,6 +654,107 @@ describe('AppointmentPaymentService', () => {
       await expect(
         service.readStatus('jwt', PROFESSIONAL, APPOINTMENT),
       ).rejects.toThrow(ForbiddenException);
+    });
+  });
+  describe('vuelta a la app (ENG-172)', () => {
+    const APP_URLS = {
+      success: `mediconnect://pago/${APPOINTMENT}?resultado=exito`,
+      failure: `mediconnect://pago/${APPOINTMENT}?resultado=fallo`,
+      pending: `mediconnect://pago/${APPOINTMENT}?resultado=pendiente`,
+    };
+
+    function preferenciaViva(backUrlSuccess: string) {
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'pay-1',
+        status: 'PENDIENTE',
+        mercadopago_preference_id: 'pref-viva',
+      });
+      mercadopago.getPreference.mockResolvedValue({
+        id: 'pref-viva',
+        initPoint: 'https://mp/checkout/prod-viva',
+        sandboxInitPoint: 'https://mp/checkout/sandbox-viva',
+        externalReference: APPOINTMENT,
+        expiresAt: new Date(NOW.getTime() + 10 * MINUTE),
+        backUrlSuccess,
+      });
+    }
+
+    it('desde la app, los back_urls abren la app', async () => {
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW, 'app');
+
+      expect(mercadopago.createPreference).toHaveBeenCalledWith(
+        expect.objectContaining({ backUrls: APP_URLS }),
+      );
+    });
+
+    it('sin origen sigue volviendo a la web', async () => {
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW);
+
+      expect(mercadopago.createPreference).toHaveBeenCalledWith(
+        expect.objectContaining({
+          backUrls: {
+            success: `https://app.test/turnos/${APPOINTMENT}/pago?resultado=exito`,
+            failure: `https://app.test/turnos/${APPOINTMENT}/pago?resultado=fallo`,
+            pending: `https://app.test/turnos/${APPOINTMENT}/pago?resultado=pendiente`,
+          },
+        }),
+      );
+    });
+
+    it('la app sin WEB_ORIGIN en producción igual cobra: no lo necesita', async () => {
+      env.NODE_ENV = 'production';
+      env.WEB_ORIGIN = undefined;
+
+      await expect(
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW, 'app'),
+      ).resolves.toMatchObject({ appointmentId: APPOINTMENT });
+    });
+
+    it('empezado en la web y seguido en la app: la misma preferencia, que ahora vuelve a la app', async () => {
+      // Crear otra dejaría dos links pagables para el mismo turno.
+      preferenciaViva(
+        `https://app.test/turnos/${APPOINTMENT}/pago?resultado=exito`,
+      );
+
+      const link = await service.createCheckout(
+        'jwt',
+        PATIENT,
+        APPOINTMENT,
+        NOW,
+        'app',
+      );
+
+      expect(mercadopago.createPreference).not.toHaveBeenCalled();
+      expect(mercadopago.updateBackUrls).toHaveBeenCalledWith(
+        'pref-viva',
+        APP_URLS,
+      );
+      expect(link.checkoutUrl).toBe('https://mp/checkout/sandbox-viva');
+    });
+
+    it('al revés también: de la app a la web', async () => {
+      preferenciaViva(APP_URLS.success);
+
+      await service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW, 'web');
+
+      expect(mercadopago.updateBackUrls).toHaveBeenCalledWith(
+        'pref-viva',
+        expect.objectContaining({
+          success: `https://app.test/turnos/${APPOINTMENT}/pago?resultado=exito`,
+        }),
+      );
+    });
+
+    it('si MercadoPago no deja cambiarlos, no devuelve un link que vuelve al lugar equivocado', async () => {
+      preferenciaViva(
+        `https://app.test/turnos/${APPOINTMENT}/pago?resultado=exito`,
+      );
+      mercadopago.updateBackUrls.mockRejectedValue(new Error('mp caído'));
+
+      await expect(
+        service.createCheckout('jwt', PATIENT, APPOINTMENT, NOW, 'app'),
+      ).rejects.toThrow('mp caído');
+      expect(prisma.payment.upsert).not.toHaveBeenCalled();
     });
   });
 });

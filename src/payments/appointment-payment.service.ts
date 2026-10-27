@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { holdExpiresAt } from '../appointments/unpaid-hold';
+import type { CheckoutOrigin } from './dto/create-checkout.dto';
 import {
   MercadoPagoApiError,
   MercadoPagoService,
@@ -110,6 +111,13 @@ const REUSE_MIN_REMAINING_MS = 2 * 60 * 1000;
  */
 const PAYABLE_APPOINTMENT_STATUS = 'RESERVADO_SIN_PAGAR';
 
+/**
+ * Esquema de la app mobile (`scheme` en el `app.json` de mediconnect-mobile).
+ * MercadoPago lo acepta en los `back_urls` con `auto_return`: al aprobarse el
+ * pago el navegador abre la app y se cierra solo (ENG-172).
+ */
+const APP_SCHEME = 'mediconnect';
+
 /** Estados del pago que ya cerraron el intento con plata adentro. */
 const SETTLED_PAYMENT_STATUSES: ('APROBADO' | 'REEMBOLSADO')[] = [
   'APROBADO',
@@ -156,6 +164,7 @@ export class AppointmentPaymentService {
     userId: string,
     appointmentId: string,
     now: Date = new Date(),
+    origen: CheckoutOrigin = 'web',
   ): Promise<CheckoutLink> {
     if (!this.mercadopago.isConfigured()) {
       throw new ServiceUnavailableException(PAYMENTS_UNAVAILABLE);
@@ -196,7 +205,7 @@ export class AppointmentPaymentService {
 
     // Antes de tocar MercadoPago: si falta configuración, mejor no cobrar.
     const notificationUrl = this.notificationUrl();
-    const backUrls = this.backUrls(appointment.id);
+    const backUrls = this.backUrls(appointment.id, origen);
 
     const { amount, currency, professionalName } =
       await this.readChargeDetails(appointment);
@@ -215,12 +224,23 @@ export class AppointmentPaymentService {
       throw new ConflictException('Ese turno ya tiene un pago registrado.');
     }
 
+    const reusable = await this.reusablePreference(
+      existing?.mercadopago_preference_id ?? null,
+      appointment.id,
+      now,
+    );
+
+    // Se empezó a pagar desde la otra punta: la misma preferencia, pero que
+    // vuelva adonde está el paciente ahora. Si tiene el checkout abierto en las
+    // dos puntas, el último en llamar decide adónde vuelve la preferencia (la
+    // pestaña web podría terminar en `mediconnect://`); el estado igual sale
+    // del webhook, no del retorno.
+    if (reusable && reusable.backUrlSuccess !== backUrls.success) {
+      await this.mercadopago.updateBackUrls(reusable.id, backUrls);
+    }
+
     const preference =
-      (await this.reusablePreference(
-        existing?.mercadopago_preference_id ?? null,
-        appointment.id,
-        now,
-      )) ??
+      reusable ??
       (await this.mercadopago.createPreference({
         // EL contrato con ENG-64. No tocar sin cambiar el webhook.
         externalReference: appointment.id,
@@ -536,11 +556,25 @@ export class AppointmentPaymentService {
    * ser una lista de orígenes para CORS, el paciente que acaba de pagar volvería
    * a una URL rota. En los dos casos, 503 antes de cobrar.
    */
-  private backUrls(appointmentId: string): {
+  private backUrls(
+    appointmentId: string,
+    origen: CheckoutOrigin,
+  ): {
     success: string;
     failure: string;
     pending: string;
   } {
+    // Desde la app vuelve a la app. El resultado lo sigue leyendo la pantalla
+    // del backend: el query param solo dice qué contar mientras tanto.
+    if (origen === 'app') {
+      const app = `${APP_SCHEME}://pago/${appointmentId}`;
+      return {
+        success: `${app}?resultado=exito`,
+        failure: `${app}?resultado=fallo`,
+        pending: `${app}?resultado=pendiente`,
+      };
+    }
+
     const configured = this.config.get<string>('WEB_ORIGIN');
     const production = this.config.get<string>('NODE_ENV') === 'production';
 

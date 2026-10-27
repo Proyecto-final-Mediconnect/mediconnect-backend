@@ -44,6 +44,55 @@ export const CODE_TTL_MS = 5 * 60_000;
 export const SESSION_TTL_MS = 30 * 60_000;
 
 /**
+ * Reintentos de la generación del código ante una colisión (ENG-170).
+ *
+ * Desde ENG-170 `medipass_codes.code` es único, así que sortear un código que ya
+ * existe devuelve `P2002` en lugar de insertar un duplicado. Reintentar es lo
+ * correcto: el código es aleatorio y el siguiente sorteo es independiente.
+ *
+ * Tres alcanza de sobra. Con 28^8 combinaciones, la probabilidad de que tres
+ * sorteos consecutivos colisionen es despreciable incluso con millones de filas
+ * acumuladas; si igual pasara, es mejor un 500 que un bucle.
+ */
+export const CODE_MAX_ATTEMPTS = 3;
+
+/**
+ * Techo **global** del canje, en intentos por minuto para toda la instancia
+ * (ENG-170, hallazgo 2 de ENG-105).
+ *
+ * El límite de 10/min del canje es **por IP**, y el ataque que importa no viene
+ * de una IP. Un atacante no quiere la ficha de alguien en particular: quiere
+ * *una*, de cualquiera, así que su probabilidad por intento es `N/28^8` con `N`
+ * = códigos vigentes. Desde una IP eso son décadas; con una botnet de 10.000 IPs
+ * son 100.000 intentos por minuto y el 50 % de probabilidad de sacar una ficha
+ * al azar en **1,8 días**.
+ *
+ * 120/min lleva ese número a ~4,2 años y sigue estando muy por encima del uso
+ * real: el canje legítimo es un médico de guardia escaneando un QR, no tráfico
+ * de volumen.
+ *
+ * **El tradeoff asumido:** un techo global es por definición un vector de
+ * denegación de servicio sobre la propia función, porque alguien puede quemarlo
+ * a propósito. Se acepta porque el número solo lo alcanza un abuso grosero y
+ * porque `GET /medipass/sessions/:id` **no** entra en este límite: las sesiones
+ * ya abiertas siguen funcionando, así que un médico en medio de una consulta no
+ * se queda sin la ficha. Lo único que se bloquea es abrir accesos nuevos.
+ */
+export const CANJE_GLOBAL_LIMIT = 120;
+
+/** Nombre del throttler del techo global. Lo registra `AppModule`. */
+export const CANJE_GLOBAL_THROTTLER = 'medipassCanje';
+
+/**
+ * Clave fija del contador global.
+ *
+ * `ThrottlerGuard` cuenta por lo que devuelve `getTracker`, que normalmente es
+ * la IP. Devolver una constante para este throttler es lo que convierte el
+ * límite en global: todas las requests caen en el mismo contador.
+ */
+export const CANJE_GLOBAL_TRACKER = 'medipass-canje-global';
+
+/**
  * Lo que se le contesta a quien manda un código que no sirve.
  *
  * **Un solo mensaje para "no existe", "venció" y "se revocó".** Distinguirlos le

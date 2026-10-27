@@ -1,11 +1,16 @@
 import {
   ConflictException,
   GoneException,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { OpenEmergencySessionDto } from './dto/open-emergency-session.dto';
-import { CODE_ALPHABET, CODE_LENGTH } from './medipass.config';
+import {
+  CODE_ALPHABET,
+  CODE_LENGTH,
+  CODE_MAX_ATTEMPTS,
+} from './medipass.config';
 import { MediPassService } from './medipass.service';
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
@@ -26,8 +31,14 @@ type PrismaMock = {
     create: jest.Mock;
     update: jest.Mock;
   };
-  mediPassSession: { create: jest.Mock; findUnique: jest.Mock };
+  mediPassSession: {
+    create: jest.Mock;
+    findUnique: jest.Mock;
+    findMany: jest.Mock;
+    updateMany: jest.Mock;
+  };
   mediPassAccessLog: { create: jest.Mock };
+  auditLog: { create: jest.Mock };
   $transaction: jest.Mock;
 };
 
@@ -44,8 +55,14 @@ describe('MediPassService', () => {
         create: jest.fn(),
         update: jest.fn(),
       },
-      mediPassSession: { create: jest.fn(), findUnique: jest.fn() },
+      mediPassSession: {
+        create: jest.fn(),
+        findUnique: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       mediPassAccessLog: { create: jest.fn() },
+      auditLog: { create: jest.fn() },
       $transaction: jest.fn(),
     };
     // Transacción interactiva: el callback corre contra el mismo mock.
@@ -318,6 +335,374 @@ describe('MediPassService', () => {
         NotFoundException,
       );
       expect(prisma.mediPassSession.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getMyHistory (ENG-76)', () => {
+    const NOW = new Date('2026-10-21T15:00:00.000Z');
+    const inicio = new Date('2026-10-18T14:00:00.000Z');
+
+    /** Una sesión como la devuelve Prisma, con sus accesos. */
+    const sesion = (over: Record<string, unknown> = {}) => ({
+      id: SESSION,
+      consultant_name: 'Dra. Paula Ferrer',
+      consultant_license: 'MP-12345',
+      started_at: inicio,
+      expires_at: new Date(inicio.getTime() + 30 * 60_000),
+      revoked_at: null,
+      access_logs: [
+        { resource_accessed: 'medipass.vital', accessed_at: inicio },
+        {
+          resource_accessed: 'alergias',
+          accessed_at: new Date(inicio.getTime() + 60_000),
+        },
+      ],
+      ...over,
+    });
+
+    it('devuelve quién entró, cuándo y qué miró', async () => {
+      prisma.mediPassSession.findMany.mockResolvedValue([sesion()]);
+
+      const res = await service.getMyHistory(PATIENT, 1, NOW);
+
+      expect(res).toEqual({
+        pagina: 1,
+        hayMas: false,
+        accesos: [
+          {
+            sesionId: SESSION,
+            consultante: { nombre: 'Dra. Paula Ferrer', matricula: 'MP-12345' },
+            inicio: inicio.toISOString(),
+            vence: '2026-10-18T14:30:00.000Z',
+            revocadoEl: null,
+            estado: 'VENCIDO',
+            vistas: [
+              {
+                recurso: 'medipass.vital',
+                etiqueta:
+                  'Información vital: alergias, medicación, condiciones y contacto de emergencia',
+                el: inicio.toISOString(),
+              },
+              {
+                recurso: 'alergias',
+                etiqueta: 'Alergias',
+                el: '2026-10-18T14:01:00.000Z',
+              },
+            ],
+          },
+        ],
+      });
+    });
+
+    it('solo lee sesiones y bitácora del propio paciente', async () => {
+      await service.getMyHistory(PATIENT, 1, NOW);
+
+      expect(prisma.mediPassSession.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { patient_id: PATIENT },
+          select: expect.objectContaining({
+            access_logs: expect.objectContaining({
+              where: { patient_id: PATIENT },
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('pagina de a 10, de la más reciente a la más vieja, sin repetir ni saltear', async () => {
+      await service.getMyHistory(PATIENT, 3, NOW);
+
+      expect(prisma.mediPassSession.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orderBy: [{ started_at: 'desc' }, { id: 'desc' }],
+          skip: 20,
+          take: 11,
+        }),
+      );
+    });
+
+    it('avisa si hay otra página sin devolver la fila de más', async () => {
+      prisma.mediPassSession.findMany.mockResolvedValue(
+        Array.from({ length: 11 }, (_, i) => sesion({ id: `s-${i}` })),
+      );
+
+      const res = await service.getMyHistory(PATIENT, 1, NOW);
+
+      expect(res.hayMas).toBe(true);
+      expect(res.accesos).toHaveLength(10);
+    });
+
+    it('una sesión revocada se cuenta como revocada', async () => {
+      const revocada = new Date(inicio.getTime() + 5 * 60_000);
+      prisma.mediPassSession.findMany.mockResolvedValue([
+        sesion({ revoked_at: revocada }),
+      ]);
+
+      const [acceso] = (await service.getMyHistory(PATIENT, 1, NOW)).accesos;
+
+      expect(acceso.estado).toBe('REVOCADO');
+      expect(acceso.revocadoEl).toBe(revocada.toISOString());
+    });
+
+    it('sin perfil cargado avisa qué hacer', async () => {
+      prisma.patient.findUnique.mockResolvedValue(null);
+
+      await expect(service.getMyHistory(PATIENT, 1, NOW)).rejects.toThrow(
+        ConflictException,
+      );
+      expect(prisma.mediPassSession.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unicidad del código (ENG-170)', () => {
+    /** El `P2002` que devuelve Prisma cuando choca la unique de `code`. */
+    function colisionDeCodigo() {
+      return Object.assign(new Error('Unique constraint failed'), {
+        code: 'P2002',
+        meta: { target: ['code'] },
+      });
+    }
+
+    beforeEach(() => {
+      // Sin código vigente, así que `getMyCode` entra al camino de creación.
+      prisma.mediPassCode.findFirst.mockResolvedValue(null);
+      prisma.mediPassCode.create.mockImplementation(
+        ({ data }: { data: { code: string; expires_at: Date } }) =>
+          Promise.resolve({ code: data.code, expires_at: data.expires_at }),
+      );
+    });
+
+    it('reintenta con otro código cuando el sorteado ya existía', async () => {
+      // Antes de ENG-170 no había unique y el duplicado entraba: dos pacientes
+      // con el mismo código vigente hacían que el canje devolviera la ficha del
+      // paciente equivocado.
+      prisma.mediPassCode.create
+        .mockRejectedValueOnce(colisionDeCodigo())
+        .mockImplementationOnce(
+          ({ data }: { data: { code: string; expires_at: Date } }) =>
+            Promise.resolve({ code: data.code, expires_at: data.expires_at }),
+        );
+
+      const res = await service.getMyCode(PATIENT);
+
+      expect(prisma.mediPassCode.create).toHaveBeenCalledTimes(2);
+      expect(res.codigo).toHaveLength(CODE_LENGTH);
+    });
+
+    it('el reintento sortea un código distinto del que chocó', async () => {
+      // Reintentar con el mismo valor sería un bucle garantizado.
+      prisma.mediPassCode.create.mockRejectedValueOnce(colisionDeCodigo());
+
+      await service.getMyCode(PATIENT);
+
+      const primero = prisma.mediPassCode.create.mock.calls[0][0] as {
+        data: { code: string };
+      };
+      const segundo = prisma.mediPassCode.create.mock.calls[1][0] as {
+        data: { code: string };
+      };
+      expect(segundo.data.code).not.toBe(primero.data.code);
+    });
+
+    it('no reintenta para siempre', async () => {
+      prisma.mediPassCode.create.mockRejectedValue(colisionDeCodigo());
+
+      await expect(service.getMyCode(PATIENT)).rejects.toThrow();
+      expect(prisma.mediPassCode.create).toHaveBeenCalledTimes(
+        CODE_MAX_ATTEMPTS,
+      );
+    });
+
+    it('una unique de otra columna NO se reintenta', async () => {
+      // Reintentar con un código nuevo no arreglaría una colisión en otra
+      // columna: solo la escondería detrás de tres intentos.
+      prisma.mediPassCode.create.mockRejectedValue(
+        Object.assign(new Error('Unique constraint failed'), {
+          code: 'P2002',
+          meta: { target: ['patient_id'] },
+        }),
+      );
+
+      await expect(service.getMyCode(PATIENT)).rejects.toThrow();
+      expect(prisma.mediPassCode.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('un error que no es de unicidad sale en el primer intento', async () => {
+      prisma.mediPassCode.create.mockRejectedValue(new Error('base caída'));
+
+      await expect(service.getMyCode(PATIENT)).rejects.toThrow('base caída');
+      expect(prisma.mediPassCode.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('listMyAccesses (ENG-74)', () => {
+    const SESSION_ROW = {
+      id: SESSION,
+      consultant_name: 'Dr. Pablo Rivas',
+      consultant_license: 'MP 12345',
+      started_at: new Date('2026-10-21T14:50:00.000Z'),
+      expires_at: new Date(Date.now() + 20 * 60_000),
+    };
+
+    it('devuelve los accesos vigentes del paciente', async () => {
+      prisma.mediPassSession.findMany.mockResolvedValue([SESSION_ROW]);
+
+      const accesos = await service.listMyAccesses(PATIENT);
+
+      expect(accesos).toHaveLength(1);
+      expect(accesos[0]).toMatchObject({
+        id: SESSION,
+        consultante: 'Dr. Pablo Rivas',
+        matricula: 'MP 12345',
+      });
+    });
+
+    it('solo pide sesiones del paciente, sin revocar y sin vencer', async () => {
+      // Es la autorización de esta ruta: el filtrado por `patient_id` lo hace
+      // este código y no RLS, porque el backend entra como dueño de la tabla.
+      await service.listMyAccesses(PATIENT);
+
+      const { where, orderBy } = prisma.mediPassSession.findMany.mock
+        .calls[0][0] as {
+        where: Record<string, unknown>;
+        orderBy: Record<string, unknown>;
+      };
+      expect(where.patient_id).toBe(PATIENT);
+      expect(where.revoked_at).toBeNull();
+      expect(where.expires_at).toEqual({ gt: expect.any(Date) });
+      expect(orderBy).toEqual({ expires_at: 'asc' });
+    });
+
+    it('sin accesos abiertos devuelve una lista vacía, no un error', async () => {
+      await expect(service.listMyAccesses(PATIENT)).resolves.toEqual([]);
+    });
+
+    it('un usuario sin fila de paciente recibe 409 y no consulta sesiones', async () => {
+      prisma.patient.findUnique.mockResolvedValue(null);
+
+      await expect(service.listMyAccesses(PATIENT)).rejects.toThrow(
+        ConflictException,
+      );
+      expect(prisma.mediPassSession.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('revokeAccess (ENG-75)', () => {
+    function sesionAbierta(overrides: Record<string, unknown> = {}) {
+      return {
+        patient_id: PATIENT,
+        revoked_at: null,
+        expires_at: new Date(Date.now() + 10 * 60_000),
+        consultant_name: 'Dr. Pablo Rivas',
+        consultant_license: 'MP 12345',
+        ...overrides,
+      };
+    }
+
+    it('marca la sesión como revocada y por quién', async () => {
+      prisma.mediPassSession.findUnique.mockResolvedValue(sesionAbierta());
+
+      await service.revokeAccess(PATIENT, SESSION);
+
+      const { where, data } = prisma.mediPassSession.updateMany.mock
+        .calls[0][0] as {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      };
+      expect(where).toMatchObject({
+        id: SESSION,
+        patient_id: PATIENT,
+        revoked_at: null,
+      });
+      expect(data.revoked_at).toBeInstanceOf(Date);
+      expect(data.revoked_by).toBe(PATIENT);
+    });
+
+    it('deja la revocación en audit_logs', async () => {
+      prisma.mediPassSession.findUnique.mockResolvedValue(sesionAbierta());
+
+      await service.revokeAccess(PATIENT, SESSION);
+
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          actor_id: PATIENT,
+          action: 'MEDIPASS_ACCESS_REVOKED',
+          resource_type: 'medipass_sessions',
+          resource_id: SESSION,
+          metadata: expect.objectContaining({
+            consultante: 'Dr. Pablo Rivas',
+            matricula: 'MP 12345',
+          }),
+        }),
+      });
+    });
+
+    it('la sesión de otro paciente es 404 y no se toca', async () => {
+      // Mismo 404 que una inexistente: un 403 confirmaría que ese id existe.
+      prisma.mediPassSession.findUnique.mockResolvedValue(
+        sesionAbierta({ patient_id: '99999999-9999-4999-8999-999999999999' }),
+      );
+
+      await expect(service.revokeAccess(PATIENT, SESSION)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prisma.mediPassSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('una sesión que no existe es 404', async () => {
+      prisma.mediPassSession.findUnique.mockResolvedValue(null);
+
+      await expect(service.revokeAccess(PATIENT, SESSION)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('revocar dos veces no da error ni escribe un segundo log', async () => {
+      // Doble click del paciente: el resultado es el que pedía, no una falla.
+      prisma.mediPassSession.findUnique.mockResolvedValue(
+        sesionAbierta({ revoked_at: new Date() }),
+      );
+
+      await expect(
+        service.revokeAccess(PATIENT, SESSION),
+      ).resolves.toBeUndefined();
+      expect(prisma.mediPassSession.updateMany).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('una sesión ya vencida no se marca como revocada', async () => {
+      // El paciente no cortó este acceso: se cerró solo. Marcarlo falsearía el
+      // historial que ENG-76 va a mostrar.
+      prisma.mediPassSession.findUnique.mockResolvedValue(
+        sesionAbierta({ expires_at: new Date(Date.now() - 60_000) }),
+      );
+
+      await expect(
+        service.revokeAccess(PATIENT, SESSION),
+      ).resolves.toBeUndefined();
+      expect(prisma.mediPassSession.updateMany).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('si pierde la carrera no escribe un log de algo que no pasó', async () => {
+      // El job de ENG-104 venció la fila entre la lectura y el update.
+      prisma.mediPassSession.findUnique.mockResolvedValue(sesionAbierta());
+      prisma.mediPassSession.updateMany.mockResolvedValue({ count: 0 });
+
+      await service.revokeAccess(PATIENT, SESSION);
+
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('si falla la auditoría, la revocación no queda silenciosamente a medias', async () => {
+      // Van en la misma transacción: el único resultado inaceptable es que el
+      // paciente crea que cortó un acceso que sigue abierto.
+      prisma.mediPassSession.findUnique.mockResolvedValue(sesionAbierta());
+      prisma.auditLog.create.mockRejectedValue(new Error('audit caído'));
+
+      await expect(service.revokeAccess(PATIENT, SESSION)).rejects.toThrow(
+        InternalServerErrorException,
+      );
     });
   });
 });

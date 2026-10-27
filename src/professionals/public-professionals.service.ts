@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import type { Prisma } from '../../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
+import { resolvePolicy, type CancellationPolicy } from './cancellation-policy';
 
 /** Especialidad tal como se expone en el perfil público. */
 export type PublicSpecialtyView = {
@@ -33,6 +34,16 @@ export type PublicProfessionalProfileView = {
   /** `null` si el profesional todavía no cargó su precio de consulta. */
   price: number | null;
   currency: string;
+  /**
+   * Política de cancelación (ENG-67). **Nunca `null`**: si el profesional no
+   * configuró la suya, viaja el default.
+   *
+   * Va en el perfil público porque es información que el paciente necesita
+   * **antes** de reservar, no después: es la respuesta a "si me surge algo, ¿me
+   * devuelven la plata?". Un perfil que no la trae obliga a la pantalla de
+   * reserva a pedirla aparte o, peor, a no mostrarla.
+   */
+  cancellationPolicy: CancellationPolicy;
 };
 
 /**
@@ -54,6 +65,13 @@ const PUBLIC_SELECT = {
   specialties: {
     select: { specialty: { select: { id: true, name: true } } },
     orderBy: { specialty: { name: 'asc' } },
+  },
+  cancellation_policy: {
+    select: {
+      hours_full_refund: true,
+      hours_partial_refund: true,
+      partial_refund_percent: true,
+    },
   },
   education: {
     select: { id: true, institution: true, degree: true, year: true },
@@ -110,5 +128,6 @@ function toPublicView(row: ProfessionalRow): PublicProfessionalProfileView {
     price:
       row.consultation_price === null ? null : Number(row.consultation_price),
     currency: row.currency,
+    cancellationPolicy: resolvePolicy(row.cancellation_policy).policy,
   };
 }

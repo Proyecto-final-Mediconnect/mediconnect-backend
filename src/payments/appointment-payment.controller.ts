@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   HttpCode,
@@ -14,6 +15,7 @@ import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { AppointmentPaymentService } from './appointment-payment.service';
+import { CreateCheckoutDto } from './dto/create-checkout.dto';
 
 /**
  * Pago del turno (ENG-63).
@@ -47,9 +49,16 @@ export class AppointmentPaymentController {
     @Req() req: Request,
     @Param('appointmentId', new ParseUUIDPipe({ version: '4' }))
     appointmentId: string,
+    @Body() body: CreateCheckoutDto,
   ) {
     const { userId, accessToken } = requireAuth(req);
-    return this.payments.createCheckout(accessToken, userId, appointmentId);
+    return this.payments.createCheckout(
+      accessToken,
+      userId,
+      appointmentId,
+      new Date(),
+      body.origen,
+    );
   }
 
   /**

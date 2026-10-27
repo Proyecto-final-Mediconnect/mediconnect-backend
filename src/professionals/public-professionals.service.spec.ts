@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../prisma/prisma.service';
+import { DEFAULT_CANCELLATION_POLICY } from './cancellation-policy';
 import { PublicProfessionalsService } from './public-professionals.service';
 
 describe('PublicProfessionalsService', () => {
@@ -25,6 +26,13 @@ describe('PublicProfessionalsService', () => {
       { id: 'e1', institution: 'UBA', degree: 'Médica', year: 2015 },
       { id: 'e2', institution: 'Hospital X', degree: 'Residencia', year: null },
     ],
+    // ENG-67: la política viaja en el perfil público porque es lo que el
+    // paciente necesita saber ANTES de reservar.
+    cancellation_policy: {
+      hours_full_refund: 48,
+      hours_partial_refund: 12,
+      partial_refund_percent: 30,
+    },
   };
 
   beforeEach(async () => {
@@ -52,6 +60,11 @@ describe('PublicProfessionalsService', () => {
         { id: 's1', name: 'Cardiología' },
         { id: 's2', name: 'Clínica médica' },
       ],
+      cancellationPolicy: {
+        hoursFullRefund: 48,
+        hoursPartialRefund: 12,
+        partialRefundPercent: 30,
+      },
       education: [
         { id: 'e1', institution: 'UBA', degree: 'Médica', year: 2015 },
         {
@@ -91,5 +104,45 @@ describe('PublicProfessionalsService', () => {
     await expect(service.getPublicProfile(ID)).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  describe('política de cancelación (ENG-67)', () => {
+    it('sin política configurada viaja el default, no null', async () => {
+      // Un paciente que está por reservar tiene que ver a qué atenerse. "Sin
+      // política" no es una respuesta frente a un turno que va a pagar.
+      findFirst.mockResolvedValue({
+        ...validatedRow,
+        cancellation_policy: null,
+      });
+
+      await expect(service.getPublicProfile(ID)).resolves.toMatchObject({
+        cancellationPolicy: DEFAULT_CANCELLATION_POLICY,
+      });
+    });
+
+    it('una política a medias también cae al default', async () => {
+      // Las tres columnas son nullable en el esquema. Mezclar lo propio con el
+      // default da una combinación que el profesional nunca eligió.
+      findFirst.mockResolvedValue({
+        ...validatedRow,
+        cancellation_policy: {
+          hours_full_refund: 48,
+          hours_partial_refund: null,
+          partial_refund_percent: 30,
+        },
+      });
+
+      await expect(service.getPublicProfile(ID)).resolves.toMatchObject({
+        cancellationPolicy: DEFAULT_CANCELLATION_POLICY,
+      });
+    });
+
+    it('no expone `configured`: al paciente no le dice nada', async () => {
+      findFirst.mockResolvedValue(validatedRow);
+
+      const perfil = await service.getPublicProfile(ID);
+
+      expect(perfil.cancellationPolicy).not.toHaveProperty('configured');
+    });
   });
 });

@@ -1,5 +1,5 @@
 /**
- * El bloque vital del MediPass (HU-32, ENG-103).
+ * El bloque vital del MediPass (HU-32, ENG-103, ENG-134).
  *
  * Es lo único que ve un consultante externo sin autorización expresa del
  * paciente, así que lo que entra acá es una decisión de privacidad, no de
@@ -59,17 +59,24 @@ export interface VitalBlock {
 }
 
 /**
- * Las columnas de `patients` que este módulo necesita para armar el bloque.
+ * Las columnas de `patients` que este módulo necesita.
  *
- * Tipado a mano y no con `Prisma.PatientGetPayload` a propósito: deja ver de un
- * vistazo que hoy el bloque vital se construye con **tres columnas**, y que todo
- * lo demás está en `null` porque los campos clínicos todavía no existen en la
- * tabla.
+ * Los cuatro `jsonb` entran como `unknown` a propósito: Prisma los tipa como
+ * `JsonValue`, pero el tipo no dice nada sobre la forma real de lo guardado.
+ * Postgres acepta cualquier JSON válido en esas columnas y no hay CHECK que lo
+ * acote (ver la migración de ENG-134), así que la forma se verifica al leer y no
+ * se asume.
  */
 export interface PatientVitalSource {
   first_name: string;
   last_name: string;
   birth_date: Date | null;
+  sex: string | null;
+  blood_type: string | null;
+  allergies: unknown;
+  medications: unknown;
+  conditions: unknown;
+  emergency_contact: unknown;
 }
 
 /** `select` de Prisma que corresponde a `PatientVitalSource`. */
@@ -77,6 +84,12 @@ export const VITAL_SELECT = {
   first_name: true,
   last_name: true,
   birth_date: true,
+  sex: true,
+  blood_type: true,
+  allergies: true,
+  medications: true,
+  conditions: true,
+  emergency_contact: true,
 } as const;
 
 /**
@@ -99,20 +112,105 @@ export function ageAt(birthDate: Date, now: Date): number {
   return edad;
 }
 
+/** Un string con contenido, o `null`. Lo que no es texto útil no se devuelve. */
+function texto(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const limpio = value.trim();
+  return limpio.length > 0 ? limpio : null;
+}
+
+/** Igual que `texto` pero devuelve `''`: para las claves que el contrato de la
+ *  web tipa como obligatorias y que no se pueden omitir. */
+function textoOpcional(value: unknown): string {
+  return texto(value) ?? '';
+}
+
+/** `true` si es un objeto plano con el que vale la pena intentar. */
+function esObjeto(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
- * Arma el bloque vital con lo que hay hoy en `patients`.
+ * Mapea una columna `jsonb` que tiene que ser una lista.
  *
- * **Los campos clínicos salen en `null` a propósito, no por olvido.** La tabla
- * `patients` tiene cinco columnas (nombre, apellido, fecha de nacimiento, DNI y
- * teléfono) y ninguna es clínica: grupo sanguíneo, alergias, medicación crónica,
- * condiciones y contacto de emergencia los agrega **ENG-134**, y el formulario
- * para que el paciente los cargue es **ENG-136**.
+ * Lo que no es un array se descarta entero, y dentro del array se descarta
+ * entrada por entrada: una alergia mal cargada no puede hacer desaparecer las
+ * otras tres. Una lista que queda vacía vuelve como `null`, que es lo que la
+ * pantalla sabe omitir — un array vacío la haría dibujar la sección con nada
+ * adentro.
+ */
+function lista<T>(
+  value: unknown,
+  mapper: (entry: unknown) => T | null,
+): T[] | null {
+  if (!Array.isArray(value)) return null;
+
+  const items = value.map(mapper).filter((item): item is T => item !== null);
+
+  return items.length > 0 ? items : null;
+}
+
+/**
+ * Una alergia es útil si dice **a qué**. La gravedad puede faltar: saber que es
+ * alérgico a la penicilina sin saber cuán grave sigue siendo la información que
+ * cambia una decisión en una guardia. Lo que no se hace es inventar un valor
+ * —"sin especificar" sería texto que el paciente nunca escribió frente a un
+ * médico—, así que va vacío y la pantalla no lo muestra.
+ */
+function toAllergy(entry: unknown): VitalAllergy | null {
+  if (!esObjeto(entry)) return null;
+  const que = texto(entry.que);
+  if (!que) return null;
+  return { que, gravedad: textoOpcional(entry.gravedad) };
+}
+
+/** Una medicación es útil si dice la droga. La dosis puede faltar. */
+function toMedication(entry: unknown): VitalMedication | null {
+  if (!esObjeto(entry)) return null;
+  const droga = texto(entry.droga);
+  if (!droga) return null;
+  return {
+    droga,
+    dosis: textoOpcional(entry.dosis),
+    nota: texto(entry.nota),
+  };
+}
+
+/** Una condición es útil si tiene nombre. El código de clasificación es extra. */
+function toCondition(entry: unknown): VitalCondition | null {
+  if (!esObjeto(entry)) return null;
+  const nombre = texto(entry.nombre);
+  if (!nombre) return null;
+  return { nombre, codigo: textoOpcional(entry.codigo) };
+}
+
+/**
+ * El contacto de emergencia necesita **nombre y teléfono**: sin el teléfono no
+ * se puede llamar a nadie, y es lo único para lo que existe el campo. El vínculo
+ * es contexto y puede faltar.
+ */
+function toContact(value: unknown): VitalContact | null {
+  if (!esObjeto(value)) return null;
+  const nombre = texto(value.nombre);
+  const telefono = texto(value.telefono);
+  if (!nombre || !telefono) return null;
+  return { nombre, telefono, vinculo: textoOpcional(value.vinculo) };
+}
+
+/**
+ * Arma el bloque vital con la fila de `patients`.
  *
- * Se devuelven en `null` en vez de postergar el endpoint porque la pantalla del
- * MediPass ya está en producción y hoy falla: con el nombre y la edad deja de
- * fallar, y los campos aparecen solos cuando ENG-134 entre. Cuando eso pase,
- * esta función es el único lugar que hay que tocar — sumar las columnas a
- * `VITAL_SELECT` y mapearlas acá.
+ * Desde ENG-134 las seis columnas clínicas existen, así que esto devuelve lo que
+ * el paciente haya cargado y `null` en lo que no. Lo que **no** se lee de la
+ * base es `pais`: el tipo de la web lo tiene, pero ENG-134 no definió columna
+ * para él y no se inventó una. Queda en `null` hasta que se decida si el
+ * MediPass lo necesita.
+ *
+ * Los cuatro `jsonb` se parsean a la defensiva. No es paranoia de más: la
+ * columna acepta cualquier JSON, el seed y una corrección manual en la base
+ * escriben ahí, y esta función corre en la ficha de emergencia de alguien en una
+ * urgencia. Una fila mal cargada tiene que degradar a "ese campo no se muestra",
+ * nunca a un 500 que deje al médico sin la ficha entera.
  */
 export function toVitalBlock(
   patient: PatientVitalSource,
@@ -121,13 +219,13 @@ export function toVitalBlock(
   return {
     nombre: `${patient.first_name} ${patient.last_name}`.trim(),
     edad: patient.birth_date ? ageAt(patient.birth_date, now) : null,
-    // Pendientes de ENG-134 (columnas) y ENG-136 (carga).
-    sexo: null,
-    grupoSanguineo: null,
+    sexo: texto(patient.sex),
+    grupoSanguineo: texto(patient.blood_type),
+    // Sin columna en ENG-134: ver el comentario de arriba.
     pais: null,
-    alergias: null,
-    medicacion: null,
-    condiciones: null,
-    contacto: null,
+    alergias: lista(patient.allergies, toAllergy),
+    medicacion: lista(patient.medications, toMedication),
+    condiciones: lista(patient.conditions, toCondition),
+    contacto: toContact(patient.emergency_contact),
   };
 }

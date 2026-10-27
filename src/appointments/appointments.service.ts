@@ -7,6 +7,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { AppointmentPaymentService } from '../payments/appointment-payment.service';
+import {
+  CancellationRefund,
+  CancellationRefundService,
+} from '../payments/cancellation-refund.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
@@ -28,6 +32,7 @@ import { AvailabilityQueryDto } from './dto/availability-query.dto';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { UNPAID_HOLD_MS } from './unpaid-hold';
 import { UnpaidReleaseService } from './unpaid-release.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 
 /**
  * Ver disponibilidad y reservar un turno (ENG-54).
@@ -87,8 +92,9 @@ const MAX_RANGE_DAYS = BOOKING_HORIZON_DAYS + 2;
  *  tiene que cambiar el otro o la base y la app dejan de coincidir. */
 const ACTIVE_STATUSES = ['RESERVADO_SIN_PAGAR', 'CONFIRMADO'] as const;
 
-/** `23505 unique_violation` de Postgres, que PostgREST propaga tal cual. */
-const UNIQUE_VIOLATION = '23505';
+/** `P2002` de Prisma: el `23505 unique_violation` de Postgres, que acá es el
+ *  índice parcial de horario ocupado. */
+const PRISMA_UNIQUE_VIOLATION = 'P2002';
 
 /** `P2025` de Prisma: el `where` del update no encontró ninguna fila. */
 const PRISMA_RECORD_NOT_FOUND = 'P2025';
@@ -135,6 +141,11 @@ export interface AppointmentView {
   cancelledAt: string | null;
 }
 
+/** Turno recién cancelado, con lo que se devolvió (ENG-65). */
+export interface CancelledAppointmentView extends AppointmentView {
+  refund: CancellationRefund;
+}
+
 /** Fila cruda de `appointments` tal como la devuelve PostgREST. */
 interface AppointmentRow {
   id: string;
@@ -159,6 +170,8 @@ export class AppointmentsService {
     private readonly supabase: SupabaseService,
     private readonly payments: AppointmentPaymentService,
     private readonly unpaidRelease: UnpaidReleaseService,
+    private readonly inApp: InAppNotificationsService,
+    private readonly refunds: CancellationRefundService,
   ) {}
 
   /**
@@ -281,26 +294,29 @@ export class AppointmentsService {
       slot.durationMinutes,
     );
 
-    const { data, error } = await client
-      .from('appointments')
-      .insert({
-        patient_id: userId,
-        professional_id: dto.professionalId,
-        scheduled_at: scheduledAt.toISOString(),
-        duration_minutes: slot.durationMinutes,
-        price: professional.consultationPrice,
-        // `status` no se manda: lo pone el DEFAULT de la columna
-        // (RESERVADO_SIN_PAGAR). Mandarlo desde acá sería el primer paso para que
-        // algún día se acepte del cliente.
-      })
-      .select(APPOINTMENT_SELECT)
-      .single();
-
-    if (error) {
+    // Se inserta como owner (Prisma) y no con el JWT del paciente: desde ENG-175
+    // `authenticated` no tiene INSERT sobre `appointments`. Con el INSERT
+    // abierto, cualquiera podía reservar por PostgREST un turno CONFIRMADO, a
+    // $1 o fuera de la agenda; así, todo lo que se escribe sale de acá. El
+    // `patient_id` es el del JWT, nunca uno del body.
+    let created;
+    try {
+      created = await this.prisma.appointment.create({
+        data: {
+          patient_id: userId,
+          professional_id: dto.professionalId,
+          scheduled_at: scheduledAt,
+          duration_minutes: slot.durationMinutes,
+          price: professional.consultationPrice,
+          // `status` no se manda: lo pone el DEFAULT de la columna
+          // (RESERVADO_SIN_PAGAR).
+        },
+      });
+    } catch (err) {
       // La carrera real: dos pacientes confirman el mismo horario a la vez y los
       // dos pasan la validación de arriba, porque miran un estado que ya cambió
       // cuando el INSERT llega. El árbitro es el índice parcial de la base.
-      if ((error as { code?: string }).code === UNIQUE_VIOLATION) {
+      if ((err as { code?: string }).code === PRISMA_UNIQUE_VIOLATION) {
         throw new ConflictException(
           'Ese turno lo acaba de reservar otra persona. Elegí otro horario.',
         );
@@ -310,7 +326,18 @@ export class AppointmentsService {
       );
     }
 
-    const [view] = await this.toViews([data as unknown as AppointmentRow]);
+    const data: AppointmentRow = {
+      id: created.id,
+      patient_id: created.patient_id,
+      professional_id: created.professional_id,
+      scheduled_at: created.scheduled_at.toISOString(),
+      duration_minutes: created.duration_minutes,
+      // `Decimal` no es `string | number`; `toString()` conserva los decimales.
+      price: created.price.toString(),
+      status: created.status,
+    };
+
+    const [view] = await this.toViews([data]);
     return view;
   }
 
@@ -346,9 +373,9 @@ export class AppointmentsService {
   /**
    * Cancela un turno futuro del paciente (ENG-55).
    *
-   * **Sin reembolso.** Devolver la plata de un turno ya pago es ENG-65, con la
-   * política de `cancellation_policies`, encima de este mismo camino. Lo que sí
-   * se hace acá es vencer el link de pago (ENG-63): si no, la pestaña de
+   * Si el turno estaba pago, devuelve lo que diga la política de cancelación
+   * congelada al reservar (ENG-65, ver `CancellationRefundService`). También
+   * vence el link de pago (ENG-63): si no, la pestaña de
    * MercadoPago que el paciente dejó abierta cobraría un turno cancelado. Es
    * best-effort —si MercadoPago no contesta, el link vence solo a los 15 minutos
    * como mucho— y no hace fallar la cancelación.
@@ -376,7 +403,125 @@ export class AppointmentsService {
     userId: string,
     appointmentId: string,
     now: Date = new Date(),
-  ): Promise<AppointmentView> {
+  ): Promise<CancelledAppointmentView> {
+    const row = await this.readCancellable(
+      accessToken,
+      userId,
+      appointmentId,
+      now,
+    );
+
+    let view: AppointmentView;
+    try {
+      const updated = await this.prisma.appointment.update({
+        where: {
+          id: appointmentId,
+          patient_id: userId,
+          status: { in: [...ACTIVE_STATUSES] },
+          scheduled_at: { gt: now },
+        },
+        data: {
+          status: 'CANCELADO',
+          cancelled_at: now,
+          // La columna tiene DEFAULT now() pero no `@updatedAt`: Prisma no la
+          // toca sola y quedaría con la fecha de la reserva.
+          updated_at: now,
+        },
+      });
+
+      [view] = await this.toViews([
+        {
+          id: updated.id,
+          patient_id: updated.patient_id,
+          professional_id: updated.professional_id,
+          scheduled_at: updated.scheduled_at.toISOString(),
+          duration_minutes: updated.duration_minutes,
+          // `Decimal` no es `string | number`; `toString()` conserva los
+          // decimales que un `Number` intermedio podría redondear.
+          price: updated.price.toString(),
+          status: updated.status,
+          created_at: updated.created_at.toISOString(),
+          cancelled_at: updated.cancelled_at?.toISOString() ?? null,
+        },
+      ]);
+    } catch (err) {
+      if ((err as { code?: string }).code === PRISMA_RECORD_NOT_FOUND) {
+        throw new ConflictException(
+          'El turno cambió de estado mientras lo cancelabas. Actualizá la lista.',
+        );
+      }
+      throw new InternalServerErrorException(
+        'No pudimos cancelar el turno. Probá de nuevo en unos minutos.',
+      );
+    }
+
+    // Todo lo que sigue va después del update y nunca tira: la cancelación ya
+    // está escrita, y un error de MercadoPago o de la campanita no puede
+    // convertirla en un 500 que haga creer al paciente que no se canceló.
+    //
+    // Si la cancelación falla, el link tiene que seguir sirviendo: por eso se
+    // vence recién acá.
+    await this.payments.expireCheckout(appointmentId, now);
+    // `row.status` se leyó antes del UPDATE: si el webhook confirmó el pago en el
+    // medio, el turno estaba `RESERVADO_SIN_PAGAR` en la lectura y pago al
+    // escribirse la cancelación. Por eso el reembolso se intenta siempre;
+    // `refundCancellation` lee el pago fresco y devuelve `status: null` si no hay
+    // nada aprobado que devolver.
+    const refund = await this.refunds.refundCancellation(appointmentId, now);
+    // Al profesional solo se le avisa de un turno que conoce (ENG-69): el
+    // confirmado, o el que resultó pago. De una reserva sin pagar nunca se le
+    // avisó, y "te cancelaron" sería de un turno que no conoce.
+    if (refund.status !== null || row.status === 'CONFIRMADO') {
+      await this.inApp.notifyProfessional(
+        appointmentId,
+        'TURNO_CANCELADO',
+        now,
+      );
+    }
+
+    return { ...view, refund };
+  }
+
+  /**
+   * Cuánto se le devolvería al paciente si cancela ahora (ENG-65). Es lo que
+   * muestra la pantalla antes de confirmar la cancelación; no cambia nada.
+   *
+   * Pasa por las mismas validaciones que `cancel`: si el turno no se puede
+   * cancelar, tampoco tiene sentido cotizar el reembolso.
+   */
+  async cancellationQuote(
+    accessToken: string,
+    userId: string,
+    appointmentId: string,
+    now: Date = new Date(),
+  ): Promise<CancellationRefund> {
+    await this.readCancellable(
+      accessToken,
+      userId,
+      appointmentId,
+      now,
+      'No pudimos calcular el reembolso. Probá de nuevo en unos minutos.',
+    );
+
+    // Sin pago aprobado `quote` da 0: no hace falta mirar el estado del turno.
+    return this.refunds.quote(appointmentId, now);
+  }
+
+  /**
+   * Lee el turno con el JWT del usuario y valida que lo pueda cancelar.
+   *
+   * La lectura por PostgREST es la autorización: `appointments_select_own`
+   * decide si el usuario participa del turno; si no, no hay fila y la respuesta
+   * es 404 sin que este service tenga que confiar en su propia comparación de
+   * ids.
+   */
+  private async readCancellable(
+    accessToken: string,
+    userId: string,
+    appointmentId: string,
+    now: Date,
+    readErrorMessage = 'No pudimos cancelar el turno. Probá de nuevo en unos minutos.',
+  ): Promise<AppointmentRow> {
     const client = this.supabase.getClientForToken(accessToken);
 
     const { data, error } = await client
@@ -386,9 +531,7 @@ export class AppointmentsService {
       .maybeSingle();
 
     if (error) {
-      throw new InternalServerErrorException(
-        'No pudimos cancelar el turno. Probá de nuevo en unos minutos.',
-      );
+      throw new InternalServerErrorException(readErrorMessage);
     }
     // También cae acá el turno de otra persona: RLS no lo devuelve, así que para
     // este usuario no existe. Un 403 confirmaría que el id es real.
@@ -417,52 +560,7 @@ export class AppointmentsService {
       throw new ConflictException('Ese turno ya no está activo.');
     }
 
-    try {
-      const updated = await this.prisma.appointment.update({
-        where: {
-          id: appointmentId,
-          patient_id: userId,
-          status: { in: [...ACTIVE_STATUSES] },
-          scheduled_at: { gt: now },
-        },
-        data: {
-          status: 'CANCELADO',
-          cancelled_at: now,
-          // La columna tiene DEFAULT now() pero no `@updatedAt`: Prisma no la
-          // toca sola y quedaría con la fecha de la reserva.
-          updated_at: now,
-        },
-      });
-
-      const [view] = await this.toViews([
-        {
-          id: updated.id,
-          patient_id: updated.patient_id,
-          professional_id: updated.professional_id,
-          scheduled_at: updated.scheduled_at.toISOString(),
-          duration_minutes: updated.duration_minutes,
-          // `Decimal` no es `string | number`; `toString()` conserva los
-          // decimales que un `Number` intermedio podría redondear.
-          price: updated.price.toString(),
-          status: updated.status,
-          created_at: updated.created_at.toISOString(),
-          cancelled_at: updated.cancelled_at?.toISOString() ?? null,
-        },
-      ]);
-      // Después del update, no antes: si la cancelación falla, el link tiene
-      // que seguir sirviendo. `expireCheckout` nunca tira.
-      await this.payments.expireCheckout(appointmentId, now);
-      return view;
-    } catch (err) {
-      if ((err as { code?: string }).code === PRISMA_RECORD_NOT_FOUND) {
-        throw new ConflictException(
-          'El turno cambió de estado mientras lo cancelabas. Actualizá la lista.',
-        );
-      }
-      throw new InternalServerErrorException(
-        'No pudimos cancelar el turno. Probá de nuevo en unos minutos.',
-      );
-    }
+    return row;
   }
 
   /** Valida el rango pedido: coherente, acotado y dentro del horizonte. */

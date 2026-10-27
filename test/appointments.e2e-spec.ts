@@ -33,7 +33,6 @@ describe('Turnos (e2e)', () => {
   let privateKey: CryptoKey;
   let publicKey: CryptoKey;
   let results: { data: unknown; error: unknown }[];
-  let inserts: unknown[];
 
   const RULE_ROW = {
     weekday: 1,
@@ -60,13 +59,18 @@ describe('Turnos (e2e)', () => {
     status: 'RESERVADO_SIN_PAGAR',
   };
 
-  /** Fila que devuelve Prisma tras cancelar: `Date` y `Decimal`, no strings. */
-  const CANCELLED_ROW = {
+  /** Fila que devuelve Prisma tras reservar: `Date` y `Decimal`, no strings. */
+  const CREATED_ROW = {
     ...APPOINTMENT_ROW,
     scheduled_at: new Date(APPOINTMENT_ROW.scheduled_at),
     price: { toString: () => '15000.00' },
-    status: 'CANCELADO',
     created_at: new Date('2026-10-01T12:00:00.000Z'),
+  };
+
+  /** Ídem tras cancelar. */
+  const CANCELLED_ROW = {
+    ...CREATED_ROW,
+    status: 'CANCELADO',
     cancelled_at: new Date('2026-10-02T12:00:00.000Z'),
   };
 
@@ -79,8 +83,7 @@ describe('Turnos (e2e)', () => {
             return (resolve: (v: unknown) => void) =>
               resolve(results.shift() ?? { data: null, error: null });
           }
-          return (...args: unknown[]) => {
-            if (prop === 'insert') inserts.push(args[0]);
+          return () => {
             return builder;
           };
         },
@@ -114,6 +117,8 @@ describe('Turnos (e2e)', () => {
       scheduleBlock: { findMany: jest.fn().mockResolvedValue([]) },
       appointment: {
         findMany: jest.fn().mockResolvedValue([]),
+        // Desde ENG-175 `book()` inserta como owner por Prisma, no por Supabase.
+        create: jest.fn().mockResolvedValue(CREATED_ROW),
         update: jest.fn().mockResolvedValue(CANCELLED_ROW),
       },
       profile: { findUnique: jest.fn() },
@@ -132,7 +137,6 @@ describe('Turnos (e2e)', () => {
 
   beforeEach(async () => {
     results = [];
-    inserts = [];
     prisma = makePrismaMock();
 
     // El horizonte de reserva y el marcado de horarios pasados dependen del
@@ -266,14 +270,13 @@ describe('Turnos (e2e)', () => {
         .send(VALID)
         .expect(401);
 
-      expect(inserts).toHaveLength(0);
+      expect(prisma.appointment.create).not.toHaveBeenCalled();
     });
 
     it('reserva y devuelve 201 con el turno en hora local', async () => {
       results = [
         { data: { profile_id: PATIENT_ID }, error: null },
         { data: [], error: null },
-        { data: APPOINTMENT_ROW, error: null },
       ];
 
       const res = await request(app.getHttpServer())
@@ -288,21 +291,25 @@ describe('Turnos (e2e)', () => {
         status: 'RESERVADO_SIN_PAGAR',
         price: 15000,
       });
-      expect(inserts[0]).toMatchObject({ patient_id: PATIENT_ID });
+      expect(prisma.appointment.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          patient_id: PATIENT_ID,
+          professional_id: PRO_ID,
+          price: 15000,
+        }),
+      });
+      // El estado lo pone el DEFAULT de la columna, no el cliente.
+      expect(
+        prisma.appointment.create.mock.calls[0][0].data,
+      ).not.toHaveProperty('status');
     });
 
     it('libera las retenciones vencidas antes de insertar el turno (ENG-101)', async () => {
       // Si se insertara primero, una retención vencida que el job todavía no
       // liberó haría chocar el índice único y la reserva daría 409.
-      let insertsAtRelease: number | undefined;
-      prisma.$queryRaw.mockImplementation(() => {
-        insertsAtRelease = inserts.length;
-        return Promise.resolve([]);
-      });
       results = [
         { data: { profile_id: PATIENT_ID }, error: null },
         { data: [], error: null },
-        { data: APPOINTMENT_ROW, error: null },
       ];
 
       await request(app.getHttpServer())
@@ -312,8 +319,10 @@ describe('Turnos (e2e)', () => {
         .expect(201);
 
       expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
-      expect(insertsAtRelease).toBe(0);
-      expect(inserts).toHaveLength(1);
+      expect(prisma.appointment.create).toHaveBeenCalledTimes(1);
+      expect(prisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+        prisma.appointment.create.mock.invocationCallOrder[0],
+      );
     });
 
     it('rechaza que el cliente mande precio o estado', async () => {
@@ -325,7 +334,7 @@ describe('Turnos (e2e)', () => {
         .send({ ...VALID, price: 0, status: 'CONFIRMADO' })
         .expect(400);
 
-      expect(inserts).toHaveLength(0);
+      expect(prisma.appointment.create).not.toHaveBeenCalled();
     });
 
     it('rechaza que el cliente mande patientId', async () => {
@@ -341,8 +350,9 @@ describe('Turnos (e2e)', () => {
       results = [
         { data: { profile_id: PATIENT_ID }, error: null },
         { data: [], error: null },
-        { data: null, error: { code: '23505' } },
       ];
+      // El índice parcial único arbitra la carrera (Prisma P2002).
+      prisma.appointment.create.mockRejectedValueOnce({ code: 'P2002' });
 
       const res = await request(app.getHttpServer())
         .post('/appointments')

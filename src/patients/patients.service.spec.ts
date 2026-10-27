@@ -138,3 +138,119 @@ describe('PatientsService', () => {
     });
   });
 });
+
+/**
+ * Datos vitales del MediPass (ENG-134).
+ *
+ * El saneado de los `jsonb` mal cargados se prueba en
+ * `src/medipass/vital-block.spec.ts`: ahí es donde se leen para la ficha de
+ * emergencia. Acá se verifica el otro lado, el de la edición: que el reemplazo
+ * sea reemplazo, que no cree la fila y que el perfil los devuelva para poder
+ * precargar el formulario.
+ */
+describe('PatientsService · datos vitales', () => {
+  const ROW_CON_VITALES = {
+    ...PATIENT_ROW,
+    sex: 'femenino',
+    blood_type: '0+',
+    allergies: [{ que: 'Penicilina', gravedad: 'alta' }],
+    medications: null,
+    conditions: null,
+    emergency_contact: {
+      nombre: 'Jorge',
+      vinculo: 'padre',
+      telefono: '1155551234',
+    },
+  };
+
+  describe('getMyProfile', () => {
+    it('devuelve los seis campos para precargar el formulario de ENG-136', async () => {
+      const service = makeService([{ data: ROW_CON_VITALES, error: null }]);
+
+      const profile = await service.getMyProfile('token', 'user-1');
+
+      expect(profile.sex).toBe('femenino');
+      expect(profile.bloodType).toBe('0+');
+      expect(profile.allergies).toEqual([
+        { que: 'Penicilina', gravedad: 'alta' },
+      ]);
+      expect(profile.emergencyContact).toEqual({
+        nombre: 'Jorge',
+        vinculo: 'padre',
+        telefono: '1155551234',
+      });
+    });
+
+    it('un perfil sin completar los devuelve en null, no undefined', async () => {
+      const service = makeService([{ data: null, error: null }]);
+
+      const profile = await service.getMyProfile('token', 'user-1');
+
+      expect(profile.bloodType).toBeNull();
+      expect(profile.allergies).toBeNull();
+      expect(profile.emergencyContact).toBeNull();
+    });
+  });
+
+  describe('updateMyVitalInfo', () => {
+    it('guarda lo que viene y devuelve el perfil ya actualizado', async () => {
+      const service = makeService([
+        { data: [{ profile_id: 'user-1' }], error: null },
+        { data: ROW_CON_VITALES, error: null },
+      ]);
+
+      const profile = await service.updateMyVitalInfo('token', 'user-1', {
+        bloodType: '0+',
+        allergies: [{ que: 'Penicilina', gravedad: 'alta' }],
+      });
+
+      expect(profile.bloodType).toBe('0+');
+    });
+
+    it('un bloque vacío borra lo que había: es reemplazo, no merge', async () => {
+      // Es lo que permite que un paciente se saque una alergia que ya no tiene.
+      // Un PATCH no podría distinguirlo de "no toqué las alergias", y en una
+      // ficha de emergencia una alergia fantasma es tan mala como una que falta.
+      const service = makeService([
+        { data: [{ profile_id: 'user-1' }], error: null },
+        {
+          data: {
+            ...PATIENT_ROW,
+            sex: null,
+            blood_type: null,
+            allergies: null,
+            medications: null,
+            conditions: null,
+            emergency_contact: null,
+          },
+          error: null,
+        },
+      ]);
+
+      const profile = await service.updateMyVitalInfo('token', 'user-1', {});
+
+      expect(profile.allergies).toBeNull();
+      expect(profile.bloodType).toBeNull();
+    });
+
+    it('sin perfil cargado no crea la fila: 409 diciendo qué hacer', async () => {
+      // `first_name` y `last_name` son NOT NULL y nacen con el perfil (ENG-47):
+      // datos clínicos sin nombre no tendrían a quién atribuirse.
+      const service = makeService([{ data: [], error: null }]);
+
+      await expect(
+        service.updateMyVitalInfo('token', 'user-1', { bloodType: '0+' }),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('un error de la base no se filtra al cliente', async () => {
+      const service = makeService([
+        { data: null, error: { code: '42501', message: 'permission denied' } },
+      ]);
+
+      await expect(
+        service.updateMyVitalInfo('token', 'user-1', { bloodType: '0+' }),
+      ).rejects.toThrow(InternalServerErrorException);
+    });
+  });
+});
