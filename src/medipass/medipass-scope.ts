@@ -55,8 +55,9 @@ export function resolveScope(raw: unknown): MediPassScope {
 
 /**
  * La ficha recortada por el scope. Un bloque apagado **no aparece**: ni vacío
- * ni en `null`, para que el consultante no pueda distinguir "lo ocultó" de "no
- * lo cargó".
+ * ni en `null`. La pantalla del consultante lo muestra como "Not shared by the
+ * patient" y no como "None": un médico que lee "No known allergies" puede
+ * indicar justo lo que no debe.
  */
 export function applyScope(
   vital: VitalBlock,
