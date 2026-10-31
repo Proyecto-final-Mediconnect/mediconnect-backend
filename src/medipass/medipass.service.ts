@@ -14,6 +14,8 @@ import {
   type AccessStatus,
 } from './access-history';
 import { OpenEmergencySessionDto } from './dto/open-emergency-session.dto';
+import { UpdateMediPassScopeDto } from './dto/update-medipass-scope.dto';
+import { applyScope, MediPassScope, resolveScope } from './medipass-scope';
 import {
   CODE_ALPHABET,
   CODE_LENGTH,
@@ -195,10 +197,42 @@ export class MediPassService {
     );
   }
 
-  /** El bloque vital del propio paciente, que es lo que ve en su pantalla. */
+  /**
+   * El bloque vital del propio paciente, **entero**: es su información, y la
+   * pantalla marca qué bloques no ve el consultante según el scope (ENG-149).
+   */
   async getMyVitalBlock(patientId: string): Promise<VitalBlock> {
     const patient = await this.assertPatientExists(patientId);
     return toVitalBlock(patient, new Date());
+  }
+
+  /** Qué bloques ve un consultante externo (ENG-149). Sin configurar, todos. */
+  async getMyScope(patientId: string): Promise<MediPassScope> {
+    await this.assertPatientExists(patientId);
+    const fila = await this.prisma.patient.findUnique({
+      where: { profile_id: patientId },
+      select: { medipass_scope: true },
+    });
+    return resolveScope(fila?.medipass_scope);
+  }
+
+  /**
+   * Cambia qué ve un consultante externo (ENG-149). Filtra por el `profile_id`
+   * del JWT: un paciente solo puede tocar su propia fila. Vale también para las
+   * sesiones ya abiertas, en su próximo refresco: el recorte se aplica al leer,
+   * no al abrir la sesión.
+   */
+  async updateMyScope(
+    patientId: string,
+    dto: UpdateMediPassScopeDto,
+  ): Promise<MediPassScope> {
+    await this.assertPatientExists(patientId);
+    const scope = resolveScope(dto);
+    await this.prisma.patient.update({
+      where: { profile_id: patientId },
+      data: { medipass_scope: { ...scope }, updated_at: new Date() },
+    });
+    return scope;
   }
 
   /**
@@ -233,7 +267,7 @@ export class MediPassService {
         id: true,
         patient_id: true,
         used_at: true,
-        patient: { select: VITAL_SELECT },
+        patient: { select: { ...VITAL_SELECT, medipass_scope: true } },
       },
     });
 
@@ -274,7 +308,10 @@ export class MediPassService {
     return {
       sesionId: sessionId,
       expiraEl: expiraEl.toISOString(),
-      vital: toVitalBlock(code.patient, ahora),
+      vital: applyScope(
+        toVitalBlock(code.patient, ahora),
+        resolveScope(code.patient.medipass_scope),
+      ),
     };
   }
 
@@ -309,7 +346,7 @@ export class MediPassService {
       select: {
         expires_at: true,
         revoked_at: true,
-        patient: { select: VITAL_SELECT },
+        patient: { select: { ...VITAL_SELECT, medipass_scope: true } },
       },
     });
 
@@ -322,7 +359,12 @@ export class MediPassService {
 
     return {
       expiraEl: session.expires_at.toISOString(),
-      vital: toVitalBlock(session.patient, ahora),
+      // El scope se lee en cada refresco: un cambio del paciente llega a las
+      // sesiones ya abiertas (ENG-149).
+      vital: applyScope(
+        toVitalBlock(session.patient, ahora),
+        resolveScope(session.patient.medipass_scope),
+      ),
     };
   }
 

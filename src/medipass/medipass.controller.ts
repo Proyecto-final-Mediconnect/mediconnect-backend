@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Delete,
   Get,
@@ -6,6 +7,7 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Put,
   Query,
   Req,
   UseGuards,
@@ -14,6 +16,7 @@ import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { MediPassHistoryQueryDto } from './dto/medipass-history-query.dto';
+import { UpdateMediPassScopeDto } from './dto/update-medipass-scope.dto';
 import { MediPassService } from './medipass.service';
 
 /**
@@ -61,6 +64,23 @@ export class MediPassController {
    * mitad del control: compartir el código sirve si después se puede ver qué
    * se hizo con él.
    */
+  /** Qué bloques ve un consultante externo (ENG-149). Sin configurar, todos. */
+  @Get('me/scope')
+  getMyScope(@Req() req: Request) {
+    const { userId } = requireAuth(req);
+    return this.medipass.getMyScope(userId);
+  }
+
+  /**
+   * Cambia qué ve un consultante externo (ENG-149). Vale también para los
+   * accesos ya abiertos, en su próximo refresco.
+   */
+  @Put('me/scope')
+  updateMyScope(@Req() req: Request, @Body() dto: UpdateMediPassScopeDto) {
+    const { userId } = requireAuth(req);
+    return this.medipass.updateMyScope(userId, dto);
+  }
+
   @Get('me/historial')
   getMyHistory(@Req() req: Request, @Query() query: MediPassHistoryQueryDto) {
     const { userId } = requireAuth(req);

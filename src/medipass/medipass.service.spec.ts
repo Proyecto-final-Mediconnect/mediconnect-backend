@@ -24,7 +24,7 @@ const PATIENT_ROW = {
 };
 
 type PrismaMock = {
-  patient: { findUnique: jest.Mock };
+  patient: { findUnique: jest.Mock; update: jest.Mock };
   mediPassCode: {
     findFirst: jest.Mock;
     updateMany: jest.Mock;
@@ -48,7 +48,10 @@ describe('MediPassService', () => {
 
   beforeEach(() => {
     prisma = {
-      patient: { findUnique: jest.fn().mockResolvedValue(PATIENT_ROW) },
+      patient: {
+        findUnique: jest.fn().mockResolvedValue(PATIENT_ROW),
+        update: jest.fn().mockResolvedValue({}),
+      },
       mediPassCode: {
         findFirst: jest.fn(),
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -263,6 +266,91 @@ describe('MediPassService', () => {
       };
       expect(where.where.code).toBe('BCD23FGH');
       expect(where.where.expires_at.gt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('scope (ENG-149)', () => {
+    const ALERGICA = {
+      ...PATIENT_ROW,
+      blood_type: '0+',
+      allergies: [{ que: 'Penicilina', gravedad: 'Anafilaxia' }],
+      medications: [{ droga: 'Enalapril', dosis: '10 mg' }],
+    };
+
+    it('sin configurar devuelve todo visible', async () => {
+      await expect(service.getMyScope(PATIENT)).resolves.toEqual({
+        grupoSanguineo: true,
+        alergias: true,
+        medicacion: true,
+        condiciones: true,
+        contacto: true,
+      });
+    });
+
+    it('test_should_persist_scope_given_patient_updates_it', async () => {
+      const scope = {
+        grupoSanguineo: true,
+        alergias: true,
+        medicacion: false,
+        condiciones: true,
+        contacto: false,
+      };
+
+      await expect(service.updateMyScope(PATIENT, scope)).resolves.toEqual(
+        scope,
+      );
+      // Solo la fila del paciente del JWT.
+      expect(prisma.patient.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { profile_id: PATIENT },
+          data: expect.objectContaining({ medipass_scope: scope }),
+        }),
+      );
+    });
+
+    it('el consultante no ve un bloque apagado al canjear el código', async () => {
+      prisma.mediPassCode.findFirst.mockResolvedValue({
+        id: CODE_ID,
+        patient_id: PATIENT,
+        used_at: null,
+        patient: { ...ALERGICA, medipass_scope: { medicacion: false } },
+      });
+
+      const res = await service.openSession({
+        codigo: 'BCD23FGH',
+        nombre: 'Dra. Ferrer',
+      });
+
+      expect('medicacion' in res.vital).toBe(false);
+      expect(res.vital.alergias).toHaveLength(1);
+    });
+
+    it('un cambio de scope llega a la sesión ya abierta en el próximo refresco', async () => {
+      prisma.mediPassSession.findUnique.mockResolvedValue({
+        expires_at: new Date(Date.now() + 600_000),
+        revoked_at: null,
+        patient: { ...ALERGICA, medipass_scope: { alergias: false } },
+      });
+
+      const res = await service.getSessionStatus(SESSION);
+
+      expect('alergias' in res.vital).toBe(false);
+      expect(res.vital.medicacion).toHaveLength(1);
+    });
+
+    it('test_should_reject_scope_update_given_patient_without_profile', async () => {
+      prisma.patient.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.updateMyScope(PATIENT, {
+          grupoSanguineo: true,
+          alergias: true,
+          medicacion: true,
+          condiciones: true,
+          contacto: true,
+        }),
+      ).rejects.toThrow(/completá tu perfil/i);
+      expect(prisma.patient.update).not.toHaveBeenCalled();
     });
   });
 
