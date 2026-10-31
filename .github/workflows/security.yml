@@ -35,11 +35,12 @@ jobs:
         with:
           version: 10
 
+      # Sin `cache: pnpm`: este job no instala nada (`pnpm audit` lee el
+      # lockfile), y setup-node falla al guardar una caché que no existe.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
-          cache: pnpm
 
       # Solo las de producción: una herramienta de desarrollo vulnerable no
       # llega al servidor. Las transitivas que no arregló el paquete de arriba
