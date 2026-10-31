@@ -13,6 +13,8 @@ import { SPIKE_ROOM_PREFIX } from '../daily.config';
  */
 @Injectable()
 export class SpikeRoomNamePipe implements PipeTransform<string, string> {
+  // Armada con constantes del código, no con input de nadie (ENG-166).
+  // eslint-disable-next-line security/detect-non-literal-regexp
   private static readonly PATTERN = new RegExp(
     `^${SPIKE_ROOM_PREFIX}-[0-9a-f]{8}$`,
   );

@@ -7,6 +7,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { PayloadTooLargeFilter } from './common/filters/payload-too-large.filter';
+import { securityHeaders } from './common/http/security-headers';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -19,6 +20,9 @@ async function bootstrap() {
   // 23/09/2026, ENG-84). Por eso el rate limit no usa `req.ip`: identifica al
   // cliente por `CF-Connecting-IP` — ver `ClientIpThrottlerGuard`.
   app.set('trust proxy', 1);
+  // Antes que todo lo demás, para que también las respuestas de error los
+  // lleven (ENG-166).
+  app.use(securityHeaders());
   app.use(cookieParser());
   app.enableCors({
     origin: process.env.WEB_ORIGIN ?? 'http://localhost:5173',

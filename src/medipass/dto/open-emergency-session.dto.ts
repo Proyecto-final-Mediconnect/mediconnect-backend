@@ -10,6 +10,8 @@ import {
 import { CODE_ALPHABET, CODE_LENGTH } from '../medipass.config';
 
 /** El código tal como tiene que llegar: `CODE_LENGTH` caracteres del alfabeto. */
+// Armada con constantes del código, no con input de nadie (ENG-166).
+// eslint-disable-next-line security/detect-non-literal-regexp
 export const CODIGO_PATTERN = new RegExp(
   `^[${CODE_ALPHABET}]{${CODE_LENGTH}}$`,
 );

@@ -1,0 +1,18 @@
+# Alertas y PRs de actualización de dependencias (Sprint 0 §5.5.5, ENG-166).
+# Semanal para no inundar de PRs; las de seguridad las abre GitHub igual, apenas
+# sale el aviso.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Las de desarrollo juntas en un solo PR: no llegan a producción.
+      desarrollo:
+        dependency-type: development
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
