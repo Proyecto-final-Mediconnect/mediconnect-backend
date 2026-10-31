@@ -40,6 +40,7 @@ type PrismaMock = {
   mediPassAccessLog: { create: jest.Mock };
   auditLog: { create: jest.Mock };
   $transaction: jest.Mock;
+  $executeRaw: jest.Mock;
 };
 
 describe('MediPassService', () => {
@@ -64,6 +65,7 @@ describe('MediPassService', () => {
       mediPassAccessLog: { create: jest.fn() },
       auditLog: { create: jest.fn() },
       $transaction: jest.fn(),
+      $executeRaw: jest.fn().mockResolvedValue(0),
     };
     // Transacción interactiva: el callback corre contra el mismo mock.
     prisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
@@ -263,6 +265,25 @@ describe('MediPassService', () => {
       };
       expect(where.where.code).toBe('BCD23FGH');
       expect(where.where.expires_at.gt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('closeExpiredSessions (ENG-104)', () => {
+    it('cierra las vencidas y las cortadas con un solo UPDATE idempotente', async () => {
+      prisma.$executeRaw.mockResolvedValue(3);
+      const ahora = new Date('2026-10-31T12:00:00.000Z');
+
+      await expect(service.closeExpiredSessions(ahora)).resolves.toBe(3);
+
+      const [sql, ...valores] = prisma.$executeRaw.mock.calls[0] as [
+        TemplateStringsArray,
+        ...unknown[],
+      ];
+      const texto = sql.join('?');
+      // Solo las abiertas, con la hora de corte que se cerraron de verdad.
+      expect(texto).toContain('closed_at is null');
+      expect(texto).toContain('coalesce(revoked_at, expires_at)');
+      expect(valores).toEqual([ahora]);
     });
   });
 

@@ -202,6 +202,24 @@ export class MediPassService {
   }
 
   /**
+   * Cierra los accesos que vencieron o se cortaron (ENG-104): completa
+   * `closed_at` con `revoked_at` o con `expires_at`. Lo llama el job cada 5
+   * minutos.
+   *
+   * Es idempotente (solo toca las que siguen con `closed_at` en null) y no es
+   * lo que impide ver una sesión vencida: eso ya lo hace cada lectura contra el
+   * reloj del servidor. Un SQL y no `updateMany` porque el valor sale de otra
+   * columna de la misma fila.
+   */
+  async closeExpiredSessions(now: Date = new Date()): Promise<number> {
+    return this.prisma.$executeRaw`
+      update medipass_sessions
+         set closed_at = coalesce(revoked_at, expires_at)
+       where closed_at is null
+         and (revoked_at is not null or expires_at <= ${now})`;
+  }
+
+  /**
    * Abre un acceso de emergencia canjeando un código (HU-34, ENG-73).
    *
    * ## El código no es de un solo uso
