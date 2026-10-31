@@ -147,6 +147,36 @@ export class InAppNotificationsService {
     }
   }
 
+  /**
+   * Avisa al paciente que alguien abrió su MediPass (ENG-177). Uno por cada
+   * canje del código: cada canje es un acceso distinto, y el paciente tiene
+   * que poder reconocer cada uno y cortarlo.
+   *
+   * **Nunca tira**: el acceso ya se abrió y quedó en la bitácora; que el aviso
+   * falle no puede dejar al médico sin la ficha en medio de una guardia.
+   */
+  async notifyMediPassAccess(
+    patientId: string,
+    access: { sesionId: string; consultante: string; matricula: string | null },
+    now: Date = new Date(),
+  ): Promise<void> {
+    try {
+      await this.prisma.notification.create({
+        data: {
+          user_id: patientId,
+          type: 'MEDIPASS_ACCESO',
+          channel: 'IN_APP',
+          payload: { ...access },
+          sent_at: now,
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `No se pudo avisar del acceso ${access.sesionId} al MediPass de ${patientId}: ${String(err)}`,
+      );
+    }
+  }
+
   /** Apaga el aviso de mensaje nuevo de una conversación al abrirla (ENG-70). */
   async markConversationRead(
     userId: string,

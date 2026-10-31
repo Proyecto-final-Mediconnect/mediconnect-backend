@@ -75,6 +75,14 @@ export function renderInAppNotification(
         body: from ? `${from} te escribió.` : 'Tenés un mensaje sin leer.',
       };
     }
+    case 'MEDIPASS_ACCESO': {
+      const quien = text(p.consultante) ?? 'Alguien';
+      const matricula = text(p.matricula);
+      return {
+        title: 'Abrieron tu MediPass',
+        body: `${quien}${matricula ? ` (matrícula ${matricula})` : ''} abrió tu MediPass con tu código. Si no lo reconocés, cortale el acceso.`,
+      };
+    }
     case 'RESENA_MODERADA':
       return {
         title: 'Tu reseña fue revisada',

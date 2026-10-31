@@ -91,6 +91,7 @@ enum notification_type {
   RESENA_MODERADA
   TURNO_CANCELADO
   TURNO_REPROGRAMADO
+  MEDIPASS_ACCESO
 }
 
 enum notification_channel {
