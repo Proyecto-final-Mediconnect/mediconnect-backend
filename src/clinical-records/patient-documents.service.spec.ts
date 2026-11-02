@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   InternalServerErrorException,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { PrismaService } from '../prisma/prisma.service';
@@ -11,6 +12,8 @@ import type { SupabaseService } from '../supabase/supabase.service';
 import type { ClinicalRecordsService } from './clinical-records.service';
 import {
   DOWNLOAD_URL_TTL_SECONDS,
+  MAX_ACTIVE_DOCUMENTS_PER_PATIENT,
+  MAX_TOTAL_BYTES_PER_PATIENT,
   PATIENT_DOCUMENTS_BUCKET,
   PatientDocumentsService,
 } from './patient-documents.service';
@@ -48,7 +51,8 @@ describe('PatientDocumentsService', () => {
       create: jest.Mock;
       findMany: jest.Mock;
       findUnique: jest.Mock;
-      update: jest.Mock;
+      updateMany: jest.Mock;
+      aggregate: jest.Mock;
     };
     auditLog: { create: jest.Mock };
   };
@@ -65,7 +69,11 @@ describe('PatientDocumentsService', () => {
         create: jest.fn().mockResolvedValue(ROW),
         findMany: jest.fn().mockResolvedValue([ROW]),
         findUnique: jest.fn().mockResolvedValue(STORED),
-        update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        aggregate: jest.fn().mockResolvedValue({
+          _count: { _all: 0 },
+          _sum: { size_bytes: null },
+        }),
       },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
     };
@@ -82,6 +90,7 @@ describe('PatientDocumentsService', () => {
       prisma as unknown as PrismaService,
       {
         getClientForToken: () => ({ storage: { from } }),
+        getServiceClient: () => ({ storage: { from } }),
       } as unknown as SupabaseService,
       records as unknown as ClinicalRecordsService,
     );
@@ -101,7 +110,7 @@ describe('PatientDocumentsService', () => {
 
   describe('upload', () => {
     it('guarda el archivo en el bucket privado y su SHA-256 en la tabla', async () => {
-      const view = await service.upload(TOKEN, PATIENT, file(), dto);
+      const view = await service.upload(PATIENT, file(), dto);
 
       expect(from).toHaveBeenCalledWith(PATIENT_DOCUMENTS_BUCKET);
       const [path] = storage.upload.mock.calls[0] as [string];
@@ -132,7 +141,7 @@ describe('PatientDocumentsService', () => {
 
     it('rechaza un tipo que no es PDF, JPG ni PNG', async () => {
       await expect(
-        service.upload(TOKEN, PATIENT, file(PDF, 'application/zip'), dto),
+        service.upload(PATIENT, file(PDF, 'application/zip'), dto),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(storage.upload).not.toHaveBeenCalled();
     });
@@ -140,32 +149,87 @@ describe('PatientDocumentsService', () => {
     // El Content-Type lo pone el cliente: se mira el contenido.
     it('rechaza un archivo que dice ser PDF y no lo es', async () => {
       await expect(
-        service.upload(TOKEN, PATIENT, file(Buffer.from('MZ\x90\x00')), dto),
+        service.upload(PATIENT, file(Buffer.from('MZ\x90\x00')), dto),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    // `ALLOWED[...]` con un objeto resolvería a algo del prototipo y daría 500.
+    it.each(['constructor', '__proto__', 'toString'])(
+      'un Content-Type "%s" da 400 y no 500',
+      async (mimetype) => {
+        await expect(
+          service.upload(PATIENT, file(PDF, mimetype), dto),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      },
+    );
+
+    it('un archivo vacío da el mensaje de vacío', async () => {
+      await expect(
+        service.upload(PATIENT, file(Buffer.alloc(0)), dto),
+      ).rejects.toThrow('vacío');
+    });
+
+    it('sube con service role y guarda la fecha como día UTC', async () => {
+      await service.upload(PATIENT, file(), dto);
+      expect(prisma.patientDocument.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            document_date: new Date('2026-09-10T00:00:00.000Z'),
+          }),
+        }),
+      );
+    });
+
+    it('rechaza al llegar al máximo de documentos activos', async () => {
+      prisma.patientDocument.aggregate.mockResolvedValue({
+        _count: { _all: MAX_ACTIVE_DOCUMENTS_PER_PATIENT },
+        _sum: { size_bytes: 1000 },
+      });
+      await expect(service.upload(PATIENT, file(), dto)).rejects.toBeInstanceOf(
+        UnprocessableEntityException,
+      );
+      expect(storage.upload).not.toHaveBeenCalled();
+      // Solo cuenta los no retirados.
+      expect(prisma.patientDocument.aggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { patient_id: PATIENT, withdrawn_at: null },
+        }),
+      );
+    });
+
+    it('rechaza si pasaría el tope de bytes del paciente', async () => {
+      prisma.patientDocument.aggregate.mockResolvedValue({
+        _count: { _all: 3 },
+        _sum: { size_bytes: MAX_TOTAL_BYTES_PER_PATIENT - 1 },
+      });
+      await expect(service.upload(PATIENT, file(), dto)).rejects.toBeInstanceOf(
+        UnprocessableEntityException,
+      );
+      expect(storage.upload).not.toHaveBeenCalled();
     });
 
     it('rechaza más de 10 MB', async () => {
       const grande = Buffer.concat([PDF, Buffer.alloc(10 * 1024 * 1024)]);
-      await expect(
-        service.upload(TOKEN, PATIENT, file(grande), dto),
-      ).rejects.toThrow('10 MB');
+      await expect(service.upload(PATIENT, file(grande), dto)).rejects.toThrow(
+        '10 MB',
+      );
     });
 
     it('sin perfil de paciente pide completarlo', async () => {
       prisma.patient.findUnique.mockResolvedValue(null);
 
-      await expect(
-        service.upload(TOKEN, PATIENT, file(), dto),
-      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(service.upload(PATIENT, file(), dto)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
       expect(storage.upload).not.toHaveBeenCalled();
     });
 
     it('si Storage falla, no guarda la fila', async () => {
       storage.upload.mockResolvedValue({ error: { message: 'boom' } });
 
-      await expect(
-        service.upload(TOKEN, PATIENT, file(), dto),
-      ).rejects.toBeInstanceOf(InternalServerErrorException);
+      await expect(service.upload(PATIENT, file(), dto)).rejects.toBeInstanceOf(
+        InternalServerErrorException,
+      );
       expect(prisma.patientDocument.create).not.toHaveBeenCalled();
     });
   });
@@ -181,9 +245,45 @@ describe('PatientDocumentsService', () => {
       );
     });
 
-    it('un profesional pasa por las reglas de la HC', async () => {
+    it('un profesional pasa por las reglas de la HC y queda auditado', async () => {
       await service.listFor(PRO, PATIENT);
       expect(records.assertCanReadFor).toHaveBeenCalledWith(PRO, PATIENT);
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          actor_id: PRO,
+          action: 'PATIENT_DOCUMENT_LIST',
+          resource_type: 'patient_documents',
+          resource_id: PATIENT,
+        }),
+      });
+    });
+
+    it('el paciente que lista lo suyo no deja auditoría de profesional', async () => {
+      await service.listFor(PATIENT, PATIENT);
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    // Falla cerrado, como la descarga.
+    it('si no se puede auditar el listado, no lo entrega', async () => {
+      prisma.auditLog.create.mockRejectedValue(new Error('db'));
+      await expect(service.listFor(PRO, PATIENT)).rejects.toBeInstanceOf(
+        InternalServerErrorException,
+      );
+    });
+
+    it('pagina con tope y orden estable por id', async () => {
+      await service.listForPatient(PATIENT, { limit: 1000, offset: 20 });
+      expect(prisma.patientDocument.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          take: 100,
+          skip: 20,
+          orderBy: [{ uploaded_at: 'desc' }, { id: 'desc' }],
+        }),
+      );
+      await service.listForPatient(PATIENT);
+      expect(prisma.patientDocument.findMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({ take: 50, skip: 0 }),
+      );
     });
 
     it('un profesional sin relación recibe 403', async () => {
@@ -202,6 +302,7 @@ describe('PatientDocumentsService', () => {
       expect(storage.createSignedUrl).toHaveBeenCalledWith(
         STORED.storage_path,
         DOWNLOAD_URL_TTL_SECONDS,
+        { download: true },
       );
       expect(result.url).toBe('https://x/signed');
       expect(prisma.auditLog.create).toHaveBeenCalledWith({
@@ -251,20 +352,21 @@ describe('PatientDocumentsService', () => {
   });
 
   describe('withdraw', () => {
-    it('marca withdrawn_at y nada más', async () => {
+    it('retira con un solo UPDATE condicional y nada más', async () => {
       const now = new Date('2026-11-02T16:00:00.000Z');
       await service.withdraw(PATIENT, DOC, now);
-      expect(prisma.patientDocument.update).toHaveBeenCalledWith({
-        where: { id: DOC },
+      expect(prisma.patientDocument.updateMany).toHaveBeenCalledWith({
+        where: { id: DOC, patient_id: PATIENT, withdrawn_at: null },
         data: { withdrawn_at: now },
       });
     });
 
-    it('no deja retirar el documento de otro', async () => {
+    // Ajeno, ya retirado (p. ej. el segundo de dos DELETE a la vez) o inexistente.
+    it('si no actualizó nada da 404, también para el documento de otro', async () => {
+      prisma.patientDocument.updateMany.mockResolvedValue({ count: 0 });
       await expect(service.withdraw(PRO, DOC)).rejects.toBeInstanceOf(
-        ForbiddenException,
+        NotFoundException,
       );
-      expect(prisma.patientDocument.update).not.toHaveBeenCalled();
     });
   });
 });

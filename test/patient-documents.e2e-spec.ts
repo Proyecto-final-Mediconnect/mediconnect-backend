@@ -44,7 +44,8 @@ describe('Documentos del paciente (e2e)', () => {
       create: jest.Mock;
       findMany: jest.Mock;
       findUnique: jest.Mock;
-      update: jest.Mock;
+      updateMany: jest.Mock;
+      aggregate: jest.Mock;
     };
   };
   let upload: jest.Mock;
@@ -70,7 +71,11 @@ describe('Documentos del paciente (e2e)', () => {
           storage_path: `${PATIENT}/x.pdf`,
           withdrawn_at: null,
         }),
-        update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        aggregate: jest.fn().mockResolvedValue({
+          _count: { _all: 0 },
+          _sum: { size_bytes: null },
+        }),
       },
     };
     upload = jest.fn().mockResolvedValue({ error: null });
@@ -78,6 +83,17 @@ describe('Documentos del paciente (e2e)', () => {
     const supabase = {
       getClient: () => ({ from: () => ({}), auth: {} }),
       getClientForToken: () => ({
+        storage: {
+          from: () => ({
+            createSignedUrl: () =>
+              Promise.resolve({
+                data: { signedUrl: 'https://x/signed' },
+                error: null,
+              }),
+          }),
+        },
+      }),
+      getServiceClient: () => ({
         storage: {
           from: () => ({
             upload,
@@ -224,6 +240,39 @@ describe('Documentos del paciente (e2e)', () => {
       .delete(`/patients/me/documents/${DOC}`)
       .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
       .expect(204);
-    expect(prisma.patientDocument.update).toHaveBeenCalled();
+    expect(prisma.patientDocument.updateMany).toHaveBeenCalled();
+  });
+
+  it('retirar uno ajeno o ya retirado devuelve 404', async () => {
+    prisma.patientDocument.updateMany.mockResolvedValueOnce({ count: 0 });
+    await request(app.getHttpServer())
+      .delete(`/patients/me/documents/${DOC}`)
+      .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+      .expect(404);
+  });
+
+  it.each(['2999-01-01', '2026-02-31', '2026-09-10T10:00:00Z', '10/09/2026'])(
+    'la fecha "%s" da 400 y no sube nada',
+    async (documentDate) => {
+      await request(app.getHttpServer())
+        .post('/patients/me/documents')
+        .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+        .field('type', 'ESTUDIO')
+        .field('title', 'Hemograma')
+        .field('documentDate', documentDate)
+        .attach('file', PDF, {
+          filename: 'a.pdf',
+          contentType: 'application/pdf',
+        })
+        .expect(400);
+      expect(upload).not.toHaveBeenCalled();
+    },
+  );
+
+  it('un listado con limit fuera de rango da 400', async () => {
+    await request(app.getHttpServer())
+      .get('/patients/me/documents?limit=101')
+      .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+      .expect(400);
   });
 });

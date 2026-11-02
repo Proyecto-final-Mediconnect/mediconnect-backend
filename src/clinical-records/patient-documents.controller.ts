@@ -9,6 +9,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   Req,
   UploadedFile,
   UseGuards,
@@ -19,6 +20,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
+import { ListPatientDocumentsQueryDto } from './dto/list-patient-documents-query.dto';
 import { UploadPatientDocumentDto } from './dto/upload-patient-document.dto';
 import {
   MAX_DOCUMENT_BYTES,
@@ -48,26 +50,36 @@ export class PatientDocumentsController {
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
   // Un byte más que el tope: lo que pase de 10 MB lo corta Multer, y el mensaje
-  // claro lo da el service para el caso justo en el borde.
+  // claro lo da el service para el caso justo en el borde. El resto de los
+  // límites acota lo que se bufferea en memoria: un archivo, los 4 campos del
+  // DTO (con margen) y pocas partes.
   @UseInterceptors(
-    FileInterceptor('file', { limits: { fileSize: MAX_DOCUMENT_BYTES + 1 } }),
+    FileInterceptor('file', {
+      limits: {
+        fileSize: MAX_DOCUMENT_BYTES + 1,
+        files: 1,
+        fields: 8,
+        parts: 10,
+        fieldSize: 4 * 1024,
+      },
+    }),
   )
   upload(
     @Req() req: Request,
     @UploadedFile() file: UploadedDocumentFile | undefined,
     @Body() dto: UploadPatientDocumentDto,
   ) {
-    const { userId, accessToken } = requireAuth(req);
+    const { userId } = requireAuth(req);
     if (!file) {
       throw new BadRequestException('Adjuntá el archivo en el campo "file".');
     }
-    return this.documents.upload(accessToken, userId, file, dto);
+    return this.documents.upload(userId, file, dto);
   }
 
   @Get('patients/me/documents')
-  listMine(@Req() req: Request) {
+  listMine(@Req() req: Request, @Query() query: ListPatientDocumentsQueryDto) {
     const { userId } = requireAuth(req);
-    return this.documents.listForPatient(userId);
+    return this.documents.listForPatient(userId, query);
   }
 
   /** Retira un documento propio: deja de verse, pero queda registrado. */
@@ -88,9 +100,10 @@ export class PatientDocumentsController {
     @Req() req: Request,
     @Param('patientId', new ParseUUIDPipe({ version: '4' }))
     patientId: string,
+    @Query() query: ListPatientDocumentsQueryDto,
   ) {
     const { userId } = requireAuth(req);
-    return this.documents.listFor(userId, patientId);
+    return this.documents.listFor(userId, patientId, query);
   }
 
   /** Una URL firmada de cinco minutos para abrir el archivo. */

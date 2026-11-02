@@ -731,11 +731,6 @@ model MediPassAccessLog {
 // EP-10 — Plataforma y Auditoría
 // ===========================================================================
 
-/// Bitácora inmutable de accesos a HC/MediPass y acciones sensibles.
-///
-/// Append-only por trigger, TRUNCATE incluido (ENG-87): ni UPDATE ni DELETE,
-/// tampoco para el owner. `actor` es RESTRICT y no SET NULL: borrar un perfil no
-/// puede borrarle a los registros quién accedió.
 /// Tipo de documento que aporta el paciente (ENG-164).
 enum patient_document_type {
   ESTUDIO
@@ -768,6 +763,11 @@ model PatientDocument {
   @@map("patient_documents")
 }
 
+/// Bitácora inmutable de accesos a HC/MediPass y acciones sensibles.
+///
+/// Append-only por trigger, TRUNCATE incluido (ENG-87): ni UPDATE ni DELETE,
+/// tampoco para el owner. `actor` es RESTRICT y no SET NULL: borrar un perfil no
+/// puede borrarle a los registros quién accedió.
 model AuditLog {
   id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   actor_id      String?  @db.Uuid

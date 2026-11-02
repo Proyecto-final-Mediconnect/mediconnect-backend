@@ -111,13 +111,14 @@ end $$;
 -- Privado: nada se lee por URL pública, solo con URLs firmadas de pocos minutos
 -- que arma el backend con el token de quien pide (Sprint 0 §5.3.1).
 --
--- Las rutas son `<patient_id>/<uuid>.<ext>`. Subir solo a la carpeta propia.
+-- Las rutas son `<patient_id>/<uuid>.<ext>`. Subir: nadie desde el
+-- cliente, solo el backend con service role (que saltea las políticas).
 -- Leer (y por lo tanto firmar una URL): el propio paciente, o un profesional
 -- con la misma relación que habilita leer su HC —un turno que implique consulta
 -- o haber firmado una entrada de su historia—, espejando
 -- `clinical_record_entries_select_assigned_professional` (ENG-60) y el segundo
--- camino de `assertCanReadFor`. Sin UPDATE ni DELETE: un archivo aportado no se
--- reemplaza ni se borra.
+-- camino de `assertCanReadFor`. Sin INSERT, UPDATE ni DELETE: un archivo
+-- aportado no se reemplaza ni se borra.
 --
 -- Como en ENG-48, el schema `storage` no existe en el Postgres local: el bloque
 -- se saltea y el DDL va por `execute` para que ni se parsee.
@@ -145,15 +146,12 @@ begin
           allowed_mime_types = excluded.allowed_mime_types
   $sql$;
 
+  -- Sin política de INSERT: se sube solo por el backend con service role (firma de
+  -- archivo, rate limit, cuota y fila en `patient_documents`). Si hubiera una
+  -- para `authenticated`, el paciente subiría directo salteando todo eso y
+  -- dejaría archivos huérfanos que nadie puede borrar. Se saca por si una
+  -- versión anterior de esta migración ya la había creado.
   execute 'drop policy if exists "own patient document insert" on storage.objects';
-  execute $sql$
-    create policy "own patient document insert"
-      on storage.objects for insert to authenticated
-      with check (
-        bucket_id = 'patient-documents'
-        and (storage.foldername(name))[1] = auth.uid()::text
-      )
-  $sql$;
 
   execute 'drop policy if exists "patient document select" on storage.objects';
   execute $sql$
