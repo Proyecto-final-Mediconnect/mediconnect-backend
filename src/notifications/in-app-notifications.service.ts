@@ -11,6 +11,20 @@ const PRISMA_UNIQUE_VIOLATION = 'P2002';
 /** Cuántos avisos devuelve la bandeja. Los viejos no se borran, solo no se listan. */
 const INBOX_LIMIT = 30;
 
+/**
+ * Ventana en la que un mismo consultante (nombre + matrícula) no vuelve a avisar
+ * del MediPass de un mismo paciente. El canje es público: sin esto, repetirlo
+ * inunda la campanita, que muestra solo `INBOX_LIMIT` avisos.
+ */
+const MEDIPASS_AVISO_DEDUPE_MS = 10 * 60 * 1000;
+
+/** Cuántos avisos recientes se miran para detectar el duplicado. */
+const MEDIPASS_AVISO_DEDUPE_SCAN = 50;
+
+/** Para comparar lo que tipeó el consultante sin que mayúsculas o espacios lo distingan. */
+const normalizar = (v: unknown): string =>
+  typeof v === 'string' ? v.trim().toLowerCase() : '';
+
 /** Avisos al profesional sobre sus turnos (ENG-69). */
 export type ProfessionalAppointmentNotice =
   | 'PAGO_CONFIRMADO'
@@ -150,7 +164,10 @@ export class InAppNotificationsService {
   /**
    * Avisa al paciente que alguien abrió su MediPass (ENG-177). Uno por cada
    * canje del código: cada canje es un acceso distinto, y el paciente tiene
-   * que poder reconocer cada uno y cortarlo.
+   * que poder reconocer cada uno y cortarlo. La sesión se crea siempre; lo que
+   * se omite es el aviso repetido del mismo consultante (nombre + matrícula)
+   * dentro de `MEDIPASS_AVISO_DEDUPE_MS`, para que un anónimo no pueda llenar la
+   * bandeja repitiendo el canje.
    *
    * **Nunca tira**: el acceso ya se abrió y quedó en la bitácora; que el aviso
    * falle no puede dejar al médico sin la ficha en medio de una guardia.
@@ -161,6 +178,29 @@ export class InAppNotificationsService {
     now: Date = new Date(),
   ): Promise<void> {
     try {
+      const recientes = await this.prisma.notification.findMany({
+        where: {
+          user_id: patientId,
+          type: 'MEDIPASS_ACCESO',
+          sent_at: {
+            gte: new Date(now.getTime() - MEDIPASS_AVISO_DEDUPE_MS),
+          },
+        },
+        select: { payload: true },
+        orderBy: { sent_at: 'desc' },
+        take: MEDIPASS_AVISO_DEDUPE_SCAN,
+      });
+      const quien = normalizar(access.consultante);
+      const matricula = normalizar(access.matricula);
+      const repetido = recientes.some((n) => {
+        const p = (n.payload ?? {}) as Record<string, unknown>;
+        return (
+          normalizar(p.consultante) === quien &&
+          normalizar(p.matricula) === matricula
+        );
+      });
+      if (repetido) return;
+
       await this.prisma.notification.create({
         data: {
           user_id: patientId,

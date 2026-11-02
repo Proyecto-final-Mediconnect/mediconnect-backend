@@ -12,7 +12,7 @@ describe('renderInAppNotification', () => {
       }),
     ).toEqual({
       title: 'Abrieron tu MediPass',
-      body: 'Dra. Paula Ferrer (matrícula MP 12345) abrió tu MediPass con tu código. Si no lo reconocés, cortale el acceso.',
+      body: 'Alguien que dijo ser Dra. Paula Ferrer (matrícula MP 12345) abrió tu MediPass con tu código. Si no lo reconocés, cortale el acceso.',
     });
     expect(renderInAppNotification('MEDIPASS_ACCESO', {}).body).toMatch(
       /^Alguien abrió/,

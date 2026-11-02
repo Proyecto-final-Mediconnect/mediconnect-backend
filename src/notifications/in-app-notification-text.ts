@@ -76,11 +76,13 @@ export function renderInAppNotification(
       };
     }
     case 'MEDIPASS_ACCESO': {
-      const quien = text(p.consultante) ?? 'Alguien';
+      const quien = text(p.consultante);
       const matricula = text(p.matricula);
+      // Nombre y matrícula los escribe quien canjea, sin verificar: se muestran
+      // como un dicho, no como un hecho.
       return {
         title: 'Abrieron tu MediPass',
-        body: `${quien}${matricula ? ` (matrícula ${matricula})` : ''} abrió tu MediPass con tu código. Si no lo reconocés, cortale el acceso.`,
+        body: `${quien ? `Alguien que dijo ser ${quien}` : 'Alguien'}${matricula ? ` (matrícula ${matricula})` : ''} abrió tu MediPass con tu código. Si no lo reconocés, cortale el acceso.`,
       };
     }
     case 'RESENA_MODERADA':

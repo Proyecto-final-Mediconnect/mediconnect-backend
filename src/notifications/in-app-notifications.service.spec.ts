@@ -185,6 +185,26 @@ describe('InAppNotificationsService', () => {
       });
     });
 
+    it('omite el aviso si el mismo consultante ya avisó en la ventana', async () => {
+      prisma.notification.findMany.mockResolvedValue([
+        { payload: { consultante: ' dra. ferrer ', matricula: null } },
+      ]);
+
+      await service.notifyMediPassAccess('paciente-1', ACCESO, NOW_AVISO);
+
+      expect(prisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('avisa igual si cambia la matrícula o el nombre', async () => {
+      prisma.notification.findMany.mockResolvedValue([
+        { payload: { consultante: 'Dra. Ferrer', matricula: 'MP 1' } },
+      ]);
+
+      await service.notifyMediPassAccess('paciente-1', ACCESO, NOW_AVISO);
+
+      expect(prisma.notification.create).toHaveBeenCalledTimes(1);
+    });
+
     it('si falla, no tira: la ficha del médico no puede depender del aviso', async () => {
       prisma.notification.create.mockRejectedValue(new Error('base caída'));
       jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
