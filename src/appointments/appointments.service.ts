@@ -10,6 +10,7 @@ import { AppointmentPaymentService } from '../payments/appointment-payment.servi
 import {
   CancellationRefund,
   CancellationRefundService,
+  RefundOutcome,
 } from '../payments/cancellation-refund.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -144,6 +145,22 @@ export interface AppointmentView {
   /** Cuándo se reservó y cuándo se canceló (ISO-8601), para la historia del turno. */
   createdAt: string | null;
   cancelledAt: string | null;
+  /**
+   * En qué quedó el reembolso de un turno cancelado o liberado que estaba pago
+   * (ENG-174): el último registrado en `refunds`. `null` si no hubo ninguno.
+   *
+   * Es lo que se lee al volver al turno. El estado del pago solo pasa a
+   * `REEMBOLSADO` con un reembolso total ya procesado, así que sin esto un
+   * parcial, uno pendiente o uno rechazado no se veían.
+   */
+  refundState: AppointmentRefundState | null;
+}
+
+/** El reembolso de un turno, tal como quedó registrado. */
+export interface AppointmentRefundState {
+  /** Monto devuelto (o a devolver), en la moneda del pago. */
+  amount: number;
+  status: RefundOutcome;
 }
 
 /** Turno recién cancelado, con lo que se devolvió (ENG-65). */
@@ -165,6 +182,9 @@ interface AppointmentRow {
   created_at?: string | null;
   cancelled_at?: string | null;
 }
+
+/** Estados en los que un turno pago puede haber tenido un reembolso (ENG-174). */
+const ESTADOS_CON_REEMBOLSO = new Set(['CANCELADO', 'LIBERADO']);
 
 const APPOINTMENT_SELECT =
   'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status, created_at, cancelled_at, rescheduled_at';
@@ -1023,7 +1043,14 @@ export class AppointmentsService {
     ];
     const patientIds = [...new Set(rows.map((row) => row.patient_id))];
 
-    const [professionals, patients] = await Promise.all([
+    // Solo un turno que se cayó puede tener un reembolso que mostrar. Uno
+    // confirmado con un segundo pago devuelto (ENG-144) sigue pago: decirle
+    // "te devolvimos" confundiría.
+    const caidos = rows
+      .filter((row) => ESTADOS_CON_REEMBOLSO.has(row.status))
+      .map((row) => row.id);
+
+    const [professionals, patients, refunds] = await Promise.all([
       this.prisma.professional.findMany({
         where: { profile_id: { in: professionalIds } },
         select: {
@@ -1037,7 +1064,30 @@ export class AppointmentsService {
         where: { profile_id: { in: patientIds } },
         select: { profile_id: true, first_name: true, last_name: true },
       }),
+      caidos.length === 0
+        ? Promise.resolve([])
+        : this.prisma.refund.findMany({
+            where: { payment: { appointment_id: { in: caidos } } },
+            select: {
+              amount: true,
+              status: true,
+              payment: { select: { appointment_id: true } },
+            },
+            orderBy: { created_at: 'desc' },
+          }),
     ]);
+
+    // Ordenados del más nuevo al más viejo: el primero de cada turno es el que vale.
+    const refundById = new Map<string, AppointmentRefundState>();
+    for (const refund of refunds) {
+      const id = refund.payment.appointment_id;
+      if (!refundById.has(id)) {
+        refundById.set(id, {
+          amount: Number(refund.amount),
+          status: refund.status,
+        });
+      }
+    }
 
     const byId = (
       people: { profile_id: string; first_name: string; last_name: string }[],
@@ -1083,6 +1133,7 @@ export class AppointmentsService {
           : null,
         createdAt: isoOrNull(row.created_at),
         cancelledAt: isoOrNull(row.cancelled_at),
+        refundState: refundById.get(row.id) ?? null,
       };
     });
   }
