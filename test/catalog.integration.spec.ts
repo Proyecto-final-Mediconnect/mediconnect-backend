@@ -330,6 +330,8 @@ describe('Catálogo público (integration)', () => {
       'photoUrl',
       'price',
       'primarySpecialty',
+      // El promedio de reseñas aprobadas (ENG-82): público, como en el perfil.
+      'rating',
       'specialties',
     ]);
   });

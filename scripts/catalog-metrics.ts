@@ -14,6 +14,7 @@ import { PrismaClient, Prisma } from '../generated/prisma';
 import { CatalogService } from '../src/catalog/catalog.service';
 import { ListProfessionalsQueryDto } from '../src/catalog/dto/list-professionals-query.dto';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { ReviewsService } from '../src/reviews/reviews.service';
 
 // 20k filas: con unos cientos el planner elige seq scan aunque el índice
 // exista (la tabla entra en pocas páginas), y el EXPLAIN no diría nada sobre
@@ -23,7 +24,10 @@ const ITERATIONS = Number(process.env.METRICS_ITERATIONS ?? 30);
 const EMAIL_DOMAIN = 'metrics.test';
 
 const prisma = new PrismaClient();
-const service = new CatalogService(prisma as unknown as PrismaService);
+const service = new CatalogService(
+  prisma as unknown as PrismaService,
+  new ReviewsService(prisma as unknown as PrismaService),
+);
 
 const SPECIALTIES = [
   'Cardiología',
@@ -57,7 +61,11 @@ async function cleanup(): Promise<void> {
 
 async function seed(): Promise<Record<string, string>> {
   for (const name of SPECIALTIES) {
-    await prisma.specialty.upsert({ where: { name }, update: {}, create: { name } });
+    await prisma.specialty.upsert({
+      where: { name },
+      update: {},
+      create: { name },
+    });
   }
   const rows = await prisma.specialty.findMany({
     where: { name: { in: SPECIALTIES } },
@@ -76,7 +84,11 @@ async function seed(): Promise<Record<string, string>> {
     // una especialidad y la deje vacía.
     const status = i % 7 === 0 ? 'PENDIENTE_VALIDACION_MATRICULA' : 'VALIDADO';
 
-    profiles.push({ id, email: `pro-${i}@${EMAIL_DOMAIN}`, role: 'PROFESIONAL' });
+    profiles.push({
+      id,
+      email: `pro-${i}@${EMAIL_DOMAIN}`,
+      role: 'PROFESIONAL',
+    });
     professionals.push({
       profile_id: id,
       first_name: `Nombre${String(i).padStart(5, '0')}`,
@@ -147,7 +159,11 @@ async function measure(
   );
 }
 
-async function explain(label: string, sql: string, params: unknown[]): Promise<void> {
+async function explain(
+  label: string,
+  sql: string,
+  params: unknown[],
+): Promise<void> {
   const plan = await prisma.$queryRawUnsafe<{ 'QUERY PLAN': string }[]>(
     `explain (analyze, buffers) ${sql}`,
     ...params,
@@ -170,11 +186,15 @@ async function main(): Promise<void> {
   }
 
   console.log(`\nENG-49 — métricas del catálogo público`);
-  console.log(`Sembrando ${TOTAL_PROFESSIONALS} profesionales (80% validados)…`);
+  console.log(
+    `Sembrando ${TOTAL_PROFESSIONALS} profesionales (80% validados)…`,
+  );
   await cleanup();
   const specialtyIds = await seed();
 
-  const validated = await prisma.professional.count({ where: { status: 'VALIDADO' } });
+  const validated = await prisma.professional.count({
+    where: { status: 'VALIDADO' },
+  });
   console.log(`Listos: ${validated} validados visibles en el catálogo.\n`);
 
   console.log(`Latencia del service (${ITERATIONS} corridas por escenario)\n`);
@@ -211,7 +231,11 @@ async function main(): Promise<void> {
       specialtyIds['Pediatría'],
     ],
   });
-  await measure('filtro sin resultados', { page: 1, limit: 20, minPrice: 999999 });
+  await measure('filtro sin resultados', {
+    page: 1,
+    limit: 20,
+    minPrice: 999999,
+  });
 
   console.log('\n\nPlanes de ejecución (índices de ENG-49)');
   await explain(
