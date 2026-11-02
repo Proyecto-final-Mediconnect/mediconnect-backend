@@ -38,4 +38,10 @@ describe('securityHeaders', () => {
 
     expect(res.headers['x-powered-by']).toBeUndefined();
   });
+
+  it('prohíbe cachear las respuestas (datos médicos)', async () => {
+    const res = await request(app).get('/health').expect(200);
+
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
 });

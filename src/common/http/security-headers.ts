@@ -1,3 +1,4 @@
+import type { RequestHandler } from 'express';
 import helmet from 'helmet';
 
 /**
@@ -13,11 +14,15 @@ import helmet from 'helmet';
  * dominio y lee las respuestas con CORS (ver `enableCors` en `main.ts`); con el
  * default de helmet (`same-origin`) el navegador las bloquearía.
  *
+ * `Cache-Control: no-store`: Helmet 8 ya no lo setea, y la API devuelve datos
+ * médicos (historias clínicas, turnos): ni el navegador ni un proxy intermedio
+ * deben guardar copias. Una ruta que necesite otra política puede pisarlo.
+ *
  * HSTS va con un año y subdominios: en producción todo es HTTPS detrás de
  * Render y Cloudflare.
  */
-export function securityHeaders() {
-  return helmet({
+export function securityHeaders(): RequestHandler {
+  const helmetMiddleware = helmet({
     contentSecurityPolicy: {
       useDefaults: false,
       directives: {
@@ -32,4 +37,8 @@ export function securityHeaders() {
     referrerPolicy: { policy: 'no-referrer' },
     strictTransportSecurity: { maxAge: 31_536_000, includeSubDomains: true },
   });
+  return (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    helmetMiddleware(req, res, next);
+  };
 }

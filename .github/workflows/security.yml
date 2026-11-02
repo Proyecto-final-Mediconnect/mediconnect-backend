@@ -2,9 +2,10 @@ name: Security
 
 # Controles de seguridad que promete el Sprint 0 (§4.8.1 y §5.5.5, ENG-166):
 #
-#   - Auditoría de dependencias de producción en cada PR y en main: falla con
-#     una vulnerabilidad high o critical. Las moderadas no frenan, pero quedan
-#     en el log y Dependabot abre el PR para subirlas.
+#   - Auditoría de dependencias de producción: falla con una vulnerabilidad high
+#     o critical. Las moderadas no frenan, pero quedan en el log y Dependabot
+#     abre el PR para subirlas. Bloquea en main, en release/** y en el cron
+#     semanal; en un PR solo avisa (ver el job `audit`).
 #   - Escaneo de secretos (gitleaks) sobre los commits del PR: falla si alguien
 #     commitea una clave, un token o una contraseña.
 #
@@ -17,6 +18,14 @@ on:
       - 'main'
   pull_request:
     types: [opened, synchronize, reopened, edited]
+  # Los lunes a las 09:00 UTC. Una CVE nueva puede aparecer sin que nadie toque
+  # el repo; el cron la detecta sin esperar al próximo push.
+  schedule:
+    - cron: '0 9 * * 1'
+
+# Solo lectura del repo: ningún job de este workflow escribe nada.
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -44,8 +53,25 @@ jobs:
 
       # Solo las de producción: una herramienta de desarrollo vulnerable no
       # llega al servidor. Las transitivas que no arregló el paquete de arriba
-      # se fuerzan con `pnpm.overrides` en package.json.
+      # se fuerzan con `pnpm.overrides` en package.json (ver el README).
+      #
+      # En un PR NO bloquea (`continue-on-error`): una CVE publicada hoy sobre
+      # una dependencia que el PR no tocó no puede trabar el trabajo ajeno. El
+      # step queda con la advertencia en el log. En main, release/** y el cron
+      # semanal sí falla.
+      #
+      # Cómo se destraba un rojo en main o en el cron:
+      #   1. Mirar el advisory en el log y la ruta que lo trae.
+      #   2. Subir la dependencia directa que lo arrastra (Dependabot suele
+      #      tener el PR abierto) o, si el paquete de arriba no lo arregló,
+      #      agregar un override acotado al padre en `pnpm.overrides`
+      #      (`padre>dependencia`) y documentarlo en el README.
+      #   3. `pnpm install` y confirmar con `pnpm audit --prod --audit-level=high`.
+      # Si no hay versión corregida, no se silencia el check: se abre un issue y
+      # se evalúa si la ruta es alcanzable; recién ahí se acepta el riesgo, por
+      # escrito en el issue.
       - name: pnpm audit --prod --audit-level=high
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
         run: pnpm audit --prod --audit-level=high
 
   secrets:
@@ -62,8 +88,17 @@ jobs:
       # El binario y no la action oficial: la action pide una licencia paga en
       # repos de organizaciones. Se escanean solo los commits del PR (base..head),
       # con los secretos tapados en el log.
+      #
+      # La imagen va fijada por digest (v8.21.2): un tag se puede mover. Para
+      # actualizar: `docker buildx imagetools inspect ghcr.io/gitleaks/gitleaks:<tag>`.
+      # `base_ref` y `head.sha` pasan por `env` y no se interpolan en el script:
+      # el nombre de la rama lo controla quien abre el PR (script injection).
       - name: gitleaks
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.21.2 \
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            ghcr.io/gitleaks/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46 \
             git /repo --redact --verbose \
-            --log-opts="origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}"
+            --log-opts="origin/${BASE_REF}..${HEAD_SHA}"
