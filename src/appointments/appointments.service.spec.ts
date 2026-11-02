@@ -522,7 +522,7 @@ describe('AppointmentsService', () => {
     });
 
     // ENG-174: al volver a un turno cancelado se ve en qué quedó el reembolso.
-    it('un turno cancelado trae su último reembolso, con el monto parcial', async () => {
+    it('un turno cancelado trae los reembolsos sumados, con el estado que falta resolver', async () => {
       results = [
         { data: [{ ...INSERTED_ROW, status: 'CANCELADO' }], error: null },
       ];
@@ -541,13 +541,49 @@ describe('AppointmentsService', () => {
 
       const [view] = await service.listMine(TOKEN, PATIENT_ID);
 
-      expect(view.refundState).toEqual({ amount: 7500, status: 'PROCESADO' });
+      expect(view.refundState).toEqual({ amount: 15000, status: 'PENDIENTE' });
       expect(prisma.refund.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { payment: { appointment_id: { in: [INSERTED_ROW.id] } } },
-          orderBy: { created_at: 'desc' },
+          orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
         }),
       );
+    });
+
+    it('el profesional no recibe el reembolso del paciente ni lo consulta', async () => {
+      results = [
+        { data: [{ ...INSERTED_ROW, status: 'CANCELADO' }], error: null },
+      ];
+
+      const [view] = await service.listMine(
+        TOKEN,
+        INSERTED_ROW.professional_id,
+      );
+
+      expect(view.refundState).toBeNull();
+      expect(prisma.refund.findMany).not.toHaveBeenCalled();
+    });
+
+    it('un reembolso rechazado no suma al monto devuelto', async () => {
+      results = [
+        { data: [{ ...INSERTED_ROW, status: 'CANCELADO' }], error: null },
+      ];
+      prisma.refund.findMany.mockResolvedValue([
+        {
+          amount: { toString: () => '5000.00' },
+          status: 'RECHAZADO',
+          payment: { appointment_id: INSERTED_ROW.id },
+        },
+        {
+          amount: { toString: () => '7500.00' },
+          status: 'PROCESADO',
+          payment: { appointment_id: INSERTED_ROW.id },
+        },
+      ]);
+
+      const [view] = await service.listMine(TOKEN, PATIENT_ID);
+
+      expect(view.refundState).toEqual({ amount: 7500, status: 'RECHAZADO' });
     });
 
     it('un turno cancelado sin reembolso trae refundState null', async () => {

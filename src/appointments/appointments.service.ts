@@ -147,7 +147,8 @@ export interface AppointmentView {
   cancelledAt: string | null;
   /**
    * En qué quedó el reembolso de un turno cancelado o liberado que estaba pago
-   * (ENG-174): el último registrado en `refunds`. `null` si no hubo ninguno.
+   * (ENG-174): lo registrado en `refunds`, sumado si hay más de uno. `null` si no
+   * hubo ninguno o si quien pide no es el paciente del turno.
    *
    * Es lo que se lee al volver al turno. El estado del pago solo pasa a
    * `REEMBOLSADO` con un reembolso total ya procesado, así que sin esto un
@@ -327,7 +328,7 @@ export class AppointmentsService {
       status: created.status,
     };
 
-    const [view] = await this.toViews([data]);
+    const [view] = await this.toViews([data], userId);
     return view;
   }
 
@@ -357,7 +358,7 @@ export class AppointmentsService {
       );
     }
 
-    return this.toViews((data ?? []) as unknown as AppointmentRow[]);
+    return this.toViews((data ?? []) as unknown as AppointmentRow[], userId);
   }
 
   /**
@@ -419,22 +420,25 @@ export class AppointmentsService {
         },
       });
 
-      [view] = await this.toViews([
-        {
-          id: updated.id,
-          patient_id: updated.patient_id,
-          professional_id: updated.professional_id,
-          scheduled_at: updated.scheduled_at.toISOString(),
-          duration_minutes: updated.duration_minutes,
-          // `Decimal` no es `string | number`; `toString()` conserva los
-          // decimales que un `Number` intermedio podría redondear.
-          price: updated.price.toString(),
-          status: updated.status,
-          created_at: updated.created_at.toISOString(),
-          cancelled_at: updated.cancelled_at?.toISOString() ?? null,
-          rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
-        },
-      ]);
+      [view] = await this.toViews(
+        [
+          {
+            id: updated.id,
+            patient_id: updated.patient_id,
+            professional_id: updated.professional_id,
+            scheduled_at: updated.scheduled_at.toISOString(),
+            duration_minutes: updated.duration_minutes,
+            // `Decimal` no es `string | number`; `toString()` conserva los
+            // decimales que un `Number` intermedio podría redondear.
+            price: updated.price.toString(),
+            status: updated.status,
+            created_at: updated.created_at.toISOString(),
+            cancelled_at: updated.cancelled_at?.toISOString() ?? null,
+            rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
+          },
+        ],
+        userId,
+      );
     } catch (err) {
       if ((err as { code?: string }).code === PRISMA_RECORD_NOT_FOUND) {
         throw new ConflictException(
@@ -732,18 +736,21 @@ export class AppointmentsService {
       );
     }
 
-    const [view] = await this.toViews([
-      {
-        id: updated.id,
-        patient_id: updated.patient_id,
-        professional_id: updated.professional_id,
-        scheduled_at: updated.scheduled_at.toISOString(),
-        duration_minutes: updated.duration_minutes,
-        price: updated.price.toString(),
-        status: updated.status,
-        rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
-      },
-    ]);
+    const [view] = await this.toViews(
+      [
+        {
+          id: updated.id,
+          patient_id: updated.patient_id,
+          professional_id: updated.professional_id,
+          scheduled_at: updated.scheduled_at.toISOString(),
+          duration_minutes: updated.duration_minutes,
+          price: updated.price.toString(),
+          status: updated.status,
+          rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
+        },
+      ],
+      userId,
+    );
     return view;
   }
 
@@ -1034,8 +1041,15 @@ export class AppointmentsService {
    * decidir QUÉ turnos ve el usuario; esto solo resuelve los nombres de los ids
    * que esa decisión dejó pasar, y nunca lee una persona que no aparezca en un
    * turno del propio usuario.
+   *
+   * `viewerId` es quien pide la vista. El reembolso es un dato del paciente: el
+   * profesional que ve el mismo turno en su lista no lo recibe (`refundState`
+   * queda en `null`) y ni siquiera se consulta.
    */
-  private async toViews(rows: AppointmentRow[]): Promise<AppointmentView[]> {
+  private async toViews(
+    rows: AppointmentRow[],
+    viewerId: string,
+  ): Promise<AppointmentView[]> {
     if (rows.length === 0) return [];
 
     const professionalIds = [
@@ -1045,9 +1059,12 @@ export class AppointmentsService {
 
     // Solo un turno que se cayó puede tener un reembolso que mostrar. Uno
     // confirmado con un segundo pago devuelto (ENG-144) sigue pago: decirle
-    // "te devolvimos" confundiría.
+    // "te devolvimos" confundiría. Y solo el paciente dueño lo ve.
     const caidos = rows
-      .filter((row) => ESTADOS_CON_REEMBOLSO.has(row.status))
+      .filter(
+        (row) =>
+          row.patient_id === viewerId && ESTADOS_CON_REEMBOLSO.has(row.status),
+      )
       .map((row) => row.id);
 
     const [professionals, patients, refunds] = await Promise.all([
@@ -1073,20 +1090,40 @@ export class AppointmentsService {
               status: true,
               payment: { select: { appointment_id: true } },
             },
-            orderBy: { created_at: 'desc' },
+            // `refunds.payment_id` está indexado (ENG-174) y `caidos` ya es solo
+            // lo que se está listando; el `id` desempata filas del mismo instante.
+            orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
           }),
     ]);
 
-    // Ordenados del más nuevo al más viejo: el primero de cada turno es el que vale.
-    const refundById = new Map<string, AppointmentRefundState>();
+    // Con más de un reembolso por turno (parciales, ENG-144) se suma lo devuelto.
+    // El estado agregado es el que todavía requiere atención: un pendiente manda
+    // sobre un rechazado y este sobre un procesado. Un rechazado no devolvió
+    // plata: solo suma si es lo único que hay.
+    const prioridad: Record<RefundOutcome, number> = {
+      PENDIENTE: 2,
+      RECHAZADO: 1,
+      PROCESADO: 0,
+    };
+    const porTurno = new Map<string, typeof refunds>();
     for (const refund of refunds) {
       const id = refund.payment.appointment_id;
-      if (!refundById.has(id)) {
-        refundById.set(id, {
-          amount: Number(refund.amount),
-          status: refund.status,
-        });
-      }
+      porTurno.set(id, [...(porTurno.get(id) ?? []), refund]);
+    }
+    const refundById = new Map<string, AppointmentRefundState>();
+    for (const [id, list] of porTurno) {
+      const devueltos = list.filter((r) => r.status !== 'RECHAZADO');
+      const status = list.reduce<RefundOutcome>(
+        (peor, r) => (prioridad[r.status] > prioridad[peor] ? r.status : peor),
+        list[0].status,
+      );
+      refundById.set(id, {
+        amount: (devueltos.length > 0 ? devueltos : list).reduce(
+          (total, r) => total + Number(r.amount),
+          0,
+        ),
+        status,
+      });
     }
 
     const byId = (

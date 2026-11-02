@@ -507,6 +507,7 @@ model Refund {
 
   payment Payment @relation(fields: [payment_id], references: [id])
 
+  @@index([payment_id])
   @@map("refunds")
 }
 
