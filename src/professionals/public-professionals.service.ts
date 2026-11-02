@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import type { Prisma } from '../../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReviewsService, type RatingSummary } from '../reviews/reviews.service';
 import { resolvePolicy, type CancellationPolicy } from './cancellation-policy';
 
 /** Especialidad tal como se expone en el perfil público. */
@@ -44,6 +45,8 @@ export type PublicProfessionalProfileView = {
    * reserva a pedirla aparte o, peor, a no mostrarla.
    */
   cancellationPolicy: CancellationPolicy;
+  /** Promedio y cantidad de reseñas aprobadas (ENG-82); `null` si no tiene. */
+  rating: RatingSummary | null;
 };
 
 /**
@@ -89,7 +92,10 @@ type ProfessionalRow = Prisma.ProfessionalGetPayload<{
 
 @Injectable()
 export class PublicProfessionalsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly reviews: ReviewsService,
+  ) {}
 
   /**
    * Devuelve el perfil público del profesional `id` (= `profiles.id`). Lee con
@@ -106,11 +112,17 @@ export class PublicProfessionalsService {
       throw new NotFoundException('No se encontró el profesional.');
     }
 
-    return toPublicView(row);
+    const ratings = await this.reviews.ratingSummaries([row.profile_id]);
+    return {
+      ...toPublicView(row),
+      rating: ratings.get(row.profile_id) ?? null,
+    };
   }
 }
 
-function toPublicView(row: ProfessionalRow): PublicProfessionalProfileView {
+function toPublicView(
+  row: ProfessionalRow,
+): Omit<PublicProfessionalProfileView, 'rating'> {
   return {
     id: row.profile_id,
     firstName: row.first_name,

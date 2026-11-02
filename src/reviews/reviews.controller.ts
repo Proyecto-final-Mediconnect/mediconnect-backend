@@ -1,0 +1,85 @@
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import type { Request } from 'express';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { requireAuth } from '../common/http/require-auth';
+import { CreateReviewDto } from './dto/create-review.dto';
+import { ModerateReviewDto } from './dto/moderate-review.dto';
+import {
+  ModerationQueryDto,
+  ReviewPageQueryDto,
+} from './dto/review-list-query.dto';
+import { ReviewsService } from './reviews.service';
+
+/** Dejar una reseña (ENG-80) y ver las propias. */
+@Controller()
+@UseGuards(JwtAuthGuard)
+export class ReviewsController {
+  constructor(private readonly reviews: ReviewsService) {}
+
+  /** La reseña de la consulta de un turno propio y terminado. Una por turno. */
+  @Post('appointments/:appointmentId/review')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @HttpCode(HttpStatus.CREATED)
+  create(
+    @Req() req: Request,
+    @Param('appointmentId', new ParseUUIDPipe({ version: '4' }))
+    appointmentId: string,
+    @Body() dto: CreateReviewDto,
+  ) {
+    const { userId } = requireAuth(req);
+    return this.reviews.create(userId, appointmentId, dto);
+  }
+
+  /** Las que dejó el paciente: "Mis turnos" las usa para saber qué falta reseñar. */
+  @Get('reviews/me')
+  listMine(@Req() req: Request) {
+    const { userId } = requireAuth(req);
+    return this.reviews.listMine(userId);
+  }
+
+  /** La cola de moderación (ENG-81). Solo para el rol MODERADOR. */
+  @Get('moderation/reviews')
+  listForModeration(@Req() req: Request, @Query() query: ModerationQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.reviews.listForModeration(userId, query.status, query.page);
+  }
+
+  /** Aprobar o rechazar (con motivo) una reseña pendiente. */
+  @Patch('moderation/reviews/:reviewId')
+  moderate(
+    @Req() req: Request,
+    @Param('reviewId', new ParseUUIDPipe({ version: '4' })) reviewId: string,
+    @Body() dto: ModerateReviewDto,
+  ) {
+    const { userId } = requireAuth(req);
+    return this.reviews.moderate(userId, reviewId, dto);
+  }
+}
+
+/** Las reseñas aprobadas de un profesional (ENG-82). Público, como su perfil. */
+@Controller('professionals')
+export class PublicReviewsController {
+  constructor(private readonly reviews: ReviewsService) {}
+
+  @Get(':id/reviews')
+  list(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Query() query: ReviewPageQueryDto,
+  ) {
+    return this.reviews.listApproved(id, query.page);
+  }
+}

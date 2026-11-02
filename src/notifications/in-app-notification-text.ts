@@ -75,13 +75,27 @@ export function renderInAppNotification(
         body: from ? `${from} te escribió.` : 'Tenés un mensaje sin leer.',
       };
     }
-    case 'RESENA_MODERADA':
+    case 'RESENA_MODERADA': {
+      // ENG-81: el aviso dice qué se decidió y, si se rechazó, por qué.
+      const sobre = professional ? ` sobre ${professional}` : '';
+      if (p.decision === 'APROBADA') {
+        return {
+          title: 'Publicamos tu reseña',
+          body: `Tu reseña${sobre} ya se ve en su perfil.`,
+        };
+      }
+      if (p.decision === 'RECHAZADA') {
+        const motivo = text(p.reason);
+        return {
+          title: 'No publicamos tu reseña',
+          body: `Tu reseña${sobre} no se publicó${motivo ? `: ${motivo}` : '.'}`,
+        };
+      }
       return {
         title: 'Tu reseña fue revisada',
-        body: professional
-          ? `Revisamos tu reseña sobre ${professional}.`
-          : 'Revisamos tu reseña.',
+        body: `Revisamos tu reseña${sobre}.`,
       };
+    }
     default:
       return { title: 'Aviso', body: 'Tenés un aviso nuevo.' };
   }
