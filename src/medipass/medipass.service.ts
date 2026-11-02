@@ -208,12 +208,12 @@ export class MediPassService {
 
   /** Qué bloques ve un consultante externo (ENG-149). Sin configurar, todos. */
   async getMyScope(patientId: string): Promise<MediPassScope> {
-    await this.assertPatientExists(patientId);
     const fila = await this.prisma.patient.findUnique({
       where: { profile_id: patientId },
       select: { medipass_scope: true },
     });
-    return resolveScope(fila?.medipass_scope);
+    if (!fila) throw this.perfilIncompleto();
+    return resolveScope(fila.medipass_scope);
   }
 
   /**
@@ -226,12 +226,20 @@ export class MediPassService {
     patientId: string,
     dto: UpdateMediPassScopeDto,
   ): Promise<MediPassScope> {
-    await this.assertPatientExists(patientId);
     const scope = resolveScope(dto);
-    await this.prisma.patient.update({
-      where: { profile_id: patientId },
-      data: { medipass_scope: { ...scope }, updated_at: new Date() },
-    });
+    try {
+      await this.prisma.patient.update({
+        where: { profile_id: patientId },
+        data: { medipass_scope: { ...scope }, updated_at: new Date() },
+      });
+    } catch (err) {
+      // P2025: no hay fila de `patients` (perfil sin completar), mismo 409 que
+      // el resto de los endpoints del paciente.
+      if ((err as { code?: string }).code === 'P2025') {
+        throw this.perfilIncompleto();
+      }
+      throw err;
+    }
     return scope;
   }
 
@@ -601,13 +609,15 @@ export class MediPassService {
       select: VITAL_SELECT,
     });
 
-    if (!patient) {
-      throw new ConflictException(
-        'Completá tu perfil para poder usar el MediPass.',
-      );
-    }
+    if (!patient) throw this.perfilIncompleto();
 
     return patient;
+  }
+
+  private perfilIncompleto(): ConflictException {
+    return new ConflictException(
+      'Completá tu perfil para poder usar el MediPass.',
+    );
   }
 
   /**

@@ -7,9 +7,10 @@
 -- tener que acordarse de prender cada bloque.
 --
 -- Va en `patients` y no en una tabla aparte porque es una preferencia del
--- paciente, uno a uno con su fila; las políticas RLS de identidad que ya
--- existen sobre `patients` (`patients_select_own` / `patients_update_own`)
--- alcanzan. El backend lo escribe con Prisma filtrando por el `profile_id` del
--- JWT, y lo lee al armar la ficha del consultante.
+-- paciente, uno a uno con su fila. Las políticas RLS de `patients`
+-- (`patients_select_own` / `patients_update_own`) no son la protección: el
+-- backend conecta con un rol que bypassea RLS. La protección real es el
+-- `where: { profile_id }` tomado del JWT con el que Prisma lo escribe, y lo lee
+-- al armar la ficha del consultante.
 alter table public.patients
   add column if not exists "medipass_scope" jsonb;

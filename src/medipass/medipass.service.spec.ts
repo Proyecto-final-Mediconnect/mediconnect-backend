@@ -339,7 +339,8 @@ describe('MediPassService', () => {
     });
 
     it('test_should_reject_scope_update_given_patient_without_profile', async () => {
-      prisma.patient.findUnique.mockResolvedValue(null);
+      // P2025: el `where` no matcheó, no hay fila de `patients`.
+      prisma.patient.update.mockRejectedValue({ code: 'P2025' });
 
       await expect(
         service.updateMyScope(PATIENT, {
@@ -350,7 +351,14 @@ describe('MediPassService', () => {
           contacto: true,
         }),
       ).rejects.toThrow(/completá tu perfil/i);
-      expect(prisma.patient.update).not.toHaveBeenCalled();
+    });
+
+    it('test_should_reject_scope_read_given_patient_without_profile', async () => {
+      prisma.patient.findUnique.mockResolvedValue(null);
+
+      await expect(service.getMyScope(PATIENT)).rejects.toThrow(
+        /completá tu perfil/i,
+      );
     });
   });
 

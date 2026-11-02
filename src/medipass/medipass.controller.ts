@@ -59,11 +59,6 @@ export class MediPassController {
     return this.medipass.getMyVitalBlock(userId);
   }
 
-  /**
-   * Quién abrió el MediPass, cuándo y qué miró (HU-38, ENG-76). Es la otra
-   * mitad del control: compartir el código sirve si después se puede ver qué
-   * se hizo con él.
-   */
   /** Qué bloques ve un consultante externo (ENG-149). Sin configurar, todos. */
   @Get('me/scope')
   getMyScope(@Req() req: Request) {
@@ -81,6 +76,11 @@ export class MediPassController {
     return this.medipass.updateMyScope(userId, dto);
   }
 
+  /**
+   * Quién abrió el MediPass, cuándo y qué miró (HU-38, ENG-76). Es la otra
+   * mitad del control: compartir el código sirve si después se puede ver qué
+   * se hizo con él.
+   */
   @Get('me/historial')
   getMyHistory(@Req() req: Request, @Query() query: MediPassHistoryQueryDto) {
     const { userId } = requireAuth(req);
