@@ -62,8 +62,9 @@ describe('ClinicalRecordAccessesService (ENG-165)', () => {
       resource_type: 'clinical_record_entries',
       resource_id: PACIENTE,
       NOT: { actor_id: PACIENTE },
+      metadata: { path: ['role'], equals: 'PROFESIONAL' },
     });
-    expect(orderBy).toEqual({ created_at: 'desc' });
+    expect(orderBy).toEqual([{ created_at: 'desc' }, { id: 'desc' }]);
   });
 
   it('test_should_paginate_accesses_given_more_than_page_size', async () => {

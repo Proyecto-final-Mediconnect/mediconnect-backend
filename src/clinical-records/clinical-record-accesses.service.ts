@@ -40,6 +40,13 @@ export interface ClinicalRecordAccessPage {
  * El filtro es `resource_id = id del JWT`: el recurso auditado de una lectura es
  * la HC del paciente, y la HC es del paciente. No hay parámetro de ruta con un
  * id, así que no hay forma de pedir los accesos de otro.
+ *
+ * ## Paginación
+ *
+ * Offset (`pagina`) con tope de 1000 páginas en el DTO, o sea `skip` <= 10.000.
+ * El índice `audit_logs_resource_id_action_created_at_id_idx` sirve filtro y
+ * orden, así que ese tope es barato; se mantiene `pagina` (como el historial
+ * del MediPass) en vez de pasar a cursor.
  */
 @Injectable()
 export class ClinicalRecordAccessesService {
@@ -55,8 +62,13 @@ export class ClinicalRecordAccessesService {
         resource_type: 'clinical_record_entries',
         resource_id: patientId,
         NOT: { actor_id: patientId },
+        // `recordAccess` escribe `metadata.role`; filtrarlo no depende sólo de
+        // que el actor sea distinto del paciente.
+        metadata: { path: ['role'], equals: 'PROFESIONAL' },
       },
-      orderBy: { created_at: 'desc' },
+      // `id` desempata filas con el mismo `created_at`: sin él, la paginación
+      // por offset puede repetir u omitir accesos entre páginas.
+      orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
       skip: (pagina - 1) * PAGE_SIZE,
       take: PAGE_SIZE + 1,
       select: {

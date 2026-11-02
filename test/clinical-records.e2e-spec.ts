@@ -212,6 +212,19 @@ describe('Historia clínica (e2e)', () => {
         .expect(400);
       expect(prisma.auditLog.findMany).not.toHaveBeenCalled();
     });
+
+    it.each(['1001', 'abc'])(
+      'pagina=%s es 400 y no llega a la base',
+      async (pagina) => {
+        const token = await signToken(PATIENT);
+
+        await request(app.getHttpServer())
+          .get(`/patients/me/clinical-record/accesses?pagina=${pagina}`)
+          .set('Authorization', `Bearer ${token}`)
+          .expect(400);
+        expect(prisma.auditLog.findMany).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('POST', () => {
