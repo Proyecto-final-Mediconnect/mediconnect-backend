@@ -45,6 +45,7 @@ function appointment(
             amount: new Prisma.Decimal('15000.00'),
             status: 'APROBADO',
             mercadopago_payment_id: 'mp-123',
+            refunds: [],
             ...overrides.payment,
           },
   };
@@ -114,24 +115,37 @@ describe('CancellationRefundService', () => {
 
     it('si el webhook ya anotó devolver el pago entero, informa esa y no pide otra (ENG-180)', async () => {
       // El pago entró mientras se cancelaba: el webhook vio el turno cancelado.
-      prisma.refund.findFirst.mockResolvedValue({
-        amount: new Prisma.Decimal(15000),
-        status: 'PENDIENTE',
-      });
       prisma.appointment.findUnique.mockResolvedValue(
-        appointment({ scheduled_at: inHours(10) }),
+        appointment({
+          scheduled_at: inHours(10),
+          payment: {
+            refunds: [
+              { amount: new Prisma.Decimal(15000), status: 'PENDIENTE' },
+            ],
+          },
+        }),
       );
 
       await expect(
         service.refundCancellation(APPOINTMENT_ID, NOW),
       ).resolves.toEqual({ percent: 100, amount: 15000, status: 'PENDIENTE' });
-      expect(prisma.refund.findFirst).toHaveBeenCalledWith({
-        where: {
-          payment_id: 'pay-1',
-          reason: { startsWith: 'PAGO_SOBRE_TURNO_INACTIVO:' },
-        },
-        select: { amount: true, status: true },
-      });
+      // La devolución del webhook viaja con el turno: sin consulta aparte.
+      expect(prisma.appointment.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: expect.objectContaining({
+            payment: {
+              select: expect.objectContaining({
+                refunds: expect.objectContaining({
+                  where: {
+                    reason: { startsWith: 'PAGO_SOBRE_TURNO_INACTIVO:' },
+                  },
+                }),
+              }),
+            },
+          }),
+        }),
+      );
+      expect(prisma.refund.findFirst).not.toHaveBeenCalled();
       expect(prisma.refund.create).not.toHaveBeenCalled();
       expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
     });

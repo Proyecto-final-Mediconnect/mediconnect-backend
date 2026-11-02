@@ -40,8 +40,14 @@ interface RefundableAppointment {
     amount: Prisma.Decimal;
     status: string;
     mercadopago_payment_id: string | null;
+    /** La devolución entera que anotó el webhook (ENG-180), si la hay. */
+    refunds: { amount: Prisma.Decimal; status: RefundOutcome }[];
   } | null;
 }
+
+/** `reason` del pago aprobado sobre un turno ya cancelado o liberado. */
+const INACTIVE_APPOINTMENT_REASON: UnappliedPaymentReason =
+  'PAGO_SOBRE_TURNO_INACTIVO';
 
 const REFUNDABLE_SELECT = {
   id: true,
@@ -55,6 +61,12 @@ const REFUNDABLE_SELECT = {
       amount: true,
       status: true,
       mercadopago_payment_id: true,
+      // Viaja en la misma consulta del turno: evita un viaje más por cancelación.
+      refunds: {
+        where: { reason: { startsWith: `${INACTIVE_APPOINTMENT_REASON}:` } },
+        select: { amount: true, status: true },
+        take: 1,
+      },
     },
   },
 } as const;
@@ -67,10 +79,6 @@ const IDEMPOTENCY_KEY_TTL_MS = 24 * 3_600_000;
 
 /** Motivo que queda en `refunds.reason`. */
 const CANCELLATION_REASON = 'CANCELACION_PACIENTE';
-
-/** `reason` del pago aprobado sobre un turno ya cancelado o liberado. */
-const INACTIVE_APPOINTMENT_REASON: UnappliedPaymentReason =
-  'PAGO_SOBRE_TURNO_INACTIVO';
 
 /**
  * Por qué se devuelve un pago que no se pudo aplicar a un turno (ENG-144). Va en
@@ -290,7 +298,7 @@ export class CancellationRefundService {
   ): Promise<CancellationRefund> {
     const appointment = await this.read(appointmentId);
 
-    const unapplied = await this.unappliedRefundOf(appointment?.payment);
+    const unapplied = this.unappliedRefundOf(appointment?.payment);
     if (unapplied) return unapplied;
 
     const { percent, amount } = this.compute(appointment, now);
@@ -389,20 +397,14 @@ export class CancellationRefundService {
    *
    * No hace falta un lock: el orden inverso no existe, porque sin el commit del
    * webhook el pago no está aprobado y la cancelación no tiene nada que
-   * devolver.
+   * devolver. La fila viene con el turno (`REFUNDABLE_SELECT`), en una sola
+   * lectura; el índice único parcial `refunds_payment_reason_uq` (ENG-144)
+   * garantiza a lo sumo una por pago.
    */
-  private async unappliedRefundOf(
+  private unappliedRefundOf(
     payment: RefundableAppointment['payment'] | undefined,
-  ): Promise<CancellationRefund | null> {
-    if (!payment) return null;
-
-    const refund = await this.prisma.refund.findFirst({
-      where: {
-        payment_id: payment.id,
-        reason: { startsWith: `${INACTIVE_APPOINTMENT_REASON}:` },
-      },
-      select: { amount: true, status: true },
-    });
+  ): CancellationRefund | null {
+    const refund = payment?.refunds[0];
     if (!refund) return null;
 
     return {

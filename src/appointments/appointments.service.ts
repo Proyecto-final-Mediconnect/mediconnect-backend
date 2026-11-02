@@ -746,12 +746,6 @@ export class AppointmentsService {
   }
 
   /**
-   * Que el horario exista en la agenda del profesional y esté libre, contra la
-   * agenda recalculada en el servidor y no contra lo que diga el cliente: el
-   * front puede tener la grilla vieja o manipulada. Lo comparten la reserva y
-   * la reprogramación.
-   */
-  /**
    * La política congelada en el turno, o la vigente del profesional si el turno
    * es anterior a ENG-65 y no la tiene.
    */
@@ -768,6 +762,12 @@ export class AppointmentsService {
       : this.policies.policyFor(row.professional_id);
   }
 
+  /**
+   * Que el horario exista en la agenda del profesional y esté libre, contra la
+   * agenda recalculada en el servidor y no contra lo que diga el cliente: el
+   * front puede tener la grilla vieja o manipulada. Lo comparten la reserva y
+   * la reprogramación.
+   */
   private async assertSlotBookable(
     professionalId: string,
     date: string,
