@@ -182,6 +182,7 @@ model Patient {
   appointments            Appointment[]
   reviews                 Review[]
   clinical_record_entries ClinicalRecordEntry[]
+  documents               PatientDocument[]
   chain_head_snapshot     ChainHeadSnapshot?
   conversations           Conversation[]
   medipass_codes          MediPassCode[]
@@ -735,6 +736,38 @@ model MediPassAccessLog {
 /// Append-only por trigger, TRUNCATE incluido (ENG-87): ni UPDATE ni DELETE,
 /// tampoco para el owner. `actor` es RESTRICT y no SET NULL: borrar un perfil no
 /// puede borrarle a los registros quién accedió.
+/// Tipo de documento que aporta el paciente (ENG-164).
+enum patient_document_type {
+  ESTUDIO
+  EPICRISIS
+  INFORME
+  RECETA
+  OTRO
+}
+
+/// Documentación clínica previa que aporta el paciente (ENG-164). **No es una
+/// entrada de HC**: va fuera de la cadena de hash y se muestra como no validada.
+/// Append-only por trigger: solo se puede marcar `withdrawn_at`, una vez.
+model PatientDocument {
+  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id         String                @db.Uuid
+  type               patient_document_type
+  title              String                @db.VarChar(120)
+  document_date      DateTime?             @db.Date
+  source_institution String?               @db.VarChar(120)
+  storage_path       String                @unique
+  sha256             String                @db.Char(64)
+  mime_type          String                @db.VarChar(40)
+  size_bytes         Int
+  uploaded_at        DateTime              @default(now()) @db.Timestamptz(6)
+  withdrawn_at       DateTime?             @db.Timestamptz(6)
+
+  patient Patient @relation(fields: [patient_id], references: [profile_id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([patient_id, uploaded_at(sort: Desc)])
+  @@map("patient_documents")
+}
+
 model AuditLog {
   id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   actor_id      String?  @db.Uuid
