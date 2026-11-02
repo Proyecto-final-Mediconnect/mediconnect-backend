@@ -6,10 +6,12 @@ import type { PrismaService } from '../src/prisma/prisma.service';
 /**
  * Cierre de accesos vencidos al MediPass (ENG-104), contra Postgres de verdad.
  *
- * El cierre es un `UPDATE` en SQL crudo (`closed_at = coalesce(revoked_at,
- * expires_at)`): un mock no puede probar que la condición y el valor sean los
+ * El cierre es un `UPDATE` en SQL crudo (`closed_at = least(coalesce(
+ * revoked_at, expires_at), expires_at)`): un mock no puede probar que la condición y el valor sean los
  * que Postgres entiende. Acá se siembran sesiones en los cuatro estados y se
- * mira qué quedó en la base.
+ * mira qué quedó en la base. El UPDATE es global (toca cualquier sesión abierta
+ * de la tabla), así que los tests miran solo las filas que sembraron y nunca el
+ * conteo devuelto.
  */
 describe('Cierre de accesos vencidos al MediPass (integration)', () => {
   const prisma = new PrismaClient();
@@ -85,9 +87,7 @@ describe('Cierre de accesos vencidos al MediPass (integration)', () => {
     const revocada = await sesion(new Date(ahora.getTime() + 600_000), cortada);
     const vigente = await sesion(new Date(ahora.getTime() + 600_000));
 
-    await expect(
-      service.closeExpiredSessions(ahora),
-    ).resolves.toBeGreaterThanOrEqual(2);
+    await service.closeExpiredSessions(ahora);
 
     expect(await closedAt(vencida)).toEqual(vencio);
     expect(await closedAt(revocada)).toEqual(cortada);
@@ -96,9 +96,24 @@ describe('Cierre de accesos vencidos al MediPass (integration)', () => {
 
   it('es idempotente: la segunda corrida no vuelve a tocar las cerradas', async () => {
     const ahora = new Date();
-    await sesion(new Date(ahora.getTime() - 30_000));
+    const vencio = new Date(ahora.getTime() - 30_000);
+    const id = await sesion(vencio);
+    await service.closeExpiredSessions(ahora);
+    const primero = await closedAt(id);
+
     await service.closeExpiredSessions(ahora);
 
-    await expect(service.closeExpiredSessions(ahora)).resolves.toBe(0);
+    expect(primero).toEqual(vencio);
+    expect(await closedAt(id)).toEqual(primero);
+  });
+
+  it('si el corte es posterior al vencimiento, closed_at no pasa de expires_at', async () => {
+    const ahora = new Date();
+    const vencio = new Date(ahora.getTime() - 120_000);
+    const id = await sesion(vencio, new Date(ahora.getTime() - 60_000));
+
+    await service.closeExpiredSessions(ahora);
+
+    expect(await closedAt(id)).toEqual(vencio);
   });
 });

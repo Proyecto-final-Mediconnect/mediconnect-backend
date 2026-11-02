@@ -269,7 +269,7 @@ describe('MediPassService', () => {
   });
 
   describe('closeExpiredSessions (ENG-104)', () => {
-    it('cierra las vencidas y las cortadas con un solo UPDATE idempotente', async () => {
+    it('cierra las vencidas y las cortadas con un UPDATE por lotes idempotente', async () => {
       prisma.$executeRaw.mockResolvedValue(3);
       const ahora = new Date('2026-10-31T12:00:00.000Z');
 
@@ -282,8 +282,21 @@ describe('MediPassService', () => {
       const texto = sql.join('?');
       // Solo las abiertas, con la hora de corte que se cerraron de verdad.
       expect(texto).toContain('closed_at is null');
-      expect(texto).toContain('coalesce(revoked_at, expires_at)');
-      expect(valores).toEqual([ahora]);
+      expect(texto).toContain(
+        'least(coalesce(revoked_at, expires_at), expires_at)',
+      );
+      expect(valores).toEqual([ahora, 1000]);
+      // Un lote incompleto es el último: no vuelve a consultar.
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('sigue con otro lote mientras el anterior vino lleno y respeta el tope', async () => {
+      prisma.$executeRaw.mockResolvedValue(1000);
+
+      await expect(service.closeExpiredSessions(new Date())).resolves.toBe(
+        20_000,
+      );
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(20);
     });
   });
 
