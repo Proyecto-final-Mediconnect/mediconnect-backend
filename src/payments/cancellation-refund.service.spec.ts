@@ -45,6 +45,7 @@ function appointment(
             amount: new Prisma.Decimal('15000.00'),
             status: 'APROBADO',
             mercadopago_payment_id: 'mp-123',
+            refunds: [],
             ...overrides.payment,
           },
   };
@@ -110,6 +111,43 @@ describe('CancellationRefundService', () => {
         where: { id: 'pay-1' },
         data: { status: 'REEMBOLSADO' },
       });
+    });
+
+    it('si el webhook ya anotó devolver el pago entero, informa esa y no pide otra (ENG-180)', async () => {
+      // El pago entró mientras se cancelaba: el webhook vio el turno cancelado.
+      prisma.appointment.findUnique.mockResolvedValue(
+        appointment({
+          scheduled_at: inHours(10),
+          payment: {
+            refunds: [
+              { amount: new Prisma.Decimal(15000), status: 'PENDIENTE' },
+            ],
+          },
+        }),
+      );
+
+      await expect(
+        service.refundCancellation(APPOINTMENT_ID, NOW),
+      ).resolves.toEqual({ percent: 100, amount: 15000, status: 'PENDIENTE' });
+      // La devolución del webhook viaja con el turno: sin consulta aparte.
+      expect(prisma.appointment.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: expect.objectContaining({
+            payment: {
+              select: expect.objectContaining({
+                refunds: expect.objectContaining({
+                  where: {
+                    reason: { startsWith: 'PAGO_SOBRE_TURNO_INACTIVO:' },
+                  },
+                }),
+              }),
+            },
+          }),
+        }),
+      );
+      expect(prisma.refund.findFirst).not.toHaveBeenCalled();
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
     });
 
     it('en la ventana parcial devuelve el porcentaje y el pago sigue APROBADO', async () => {
