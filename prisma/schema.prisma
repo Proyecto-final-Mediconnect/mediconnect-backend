@@ -91,6 +91,7 @@ enum notification_type {
   RESENA_MODERADA
   TURNO_CANCELADO
   TURNO_REPROGRAMADO
+  MEDIPASS_ACCESO
 }
 
 enum notification_channel {
@@ -177,11 +178,14 @@ model Patient {
   medications       Json?   @db.JsonB
   conditions        Json?   @db.JsonB
   emergency_contact Json?   @db.JsonB
+  // Qué bloques ve un consultante externo (ENG-149). `null` = todo visible.
+  medipass_scope    Json?   @db.JsonB
 
   profile                 Profile               @relation(fields: [profile_id], references: [id], onDelete: Cascade)
   appointments            Appointment[]
   reviews                 Review[]
   clinical_record_entries ClinicalRecordEntry[]
+  documents               PatientDocument[]
   chain_head_snapshot     ChainHeadSnapshot?
   conversations           Conversation[]
   medipass_codes          MediPassCode[]
@@ -507,6 +511,7 @@ model Refund {
 
   payment Payment @relation(fields: [payment_id], references: [id])
 
+  @@index([payment_id])
   @@map("refunds")
 }
 
@@ -700,6 +705,12 @@ model MediPassSession {
   revoked_at            DateTime? @db.Timestamptz(6)
   revoked_by            String?   @db.Uuid
   started_at            DateTime  @default(now()) @db.Timestamptz(6)
+  /// Cuándo se cerró (ENG-104): `revoked_at` si se cortó, `expires_at` si venció.
+  /// Lo completa el job; las lecturas no dependen de él. Es informativo: puede
+  /// quedar en null hasta 5 min después del cierre real, así que no se usa para
+  /// autorizar (eso es `expires_at`/`revoked_at`). Sus índices son parciales y
+  /// viven solo en la migración, Prisma no los modela: no los borres al regenerar.
+  closed_at             DateTime? @db.Timestamptz(6)
 
   patient     Patient             @relation(fields: [patient_id], references: [profile_id])
   code        MediPassCode        @relation(fields: [medipass_code_id], references: [id])
@@ -730,6 +741,38 @@ model MediPassAccessLog {
 // EP-10 — Plataforma y Auditoría
 // ===========================================================================
 
+/// Tipo de documento que aporta el paciente (ENG-164).
+enum patient_document_type {
+  ESTUDIO
+  EPICRISIS
+  INFORME
+  RECETA
+  OTRO
+}
+
+/// Documentación clínica previa que aporta el paciente (ENG-164). **No es una
+/// entrada de HC**: va fuera de la cadena de hash y se muestra como no validada.
+/// Append-only por trigger: solo se puede marcar `withdrawn_at`, una vez.
+model PatientDocument {
+  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id         String                @db.Uuid
+  type               patient_document_type
+  title              String                @db.VarChar(120)
+  document_date      DateTime?             @db.Date
+  source_institution String?               @db.VarChar(120)
+  storage_path       String                @unique
+  sha256             String                @db.Char(64)
+  mime_type          String                @db.VarChar(40)
+  size_bytes         Int
+  uploaded_at        DateTime              @default(now()) @db.Timestamptz(6)
+  withdrawn_at       DateTime?             @db.Timestamptz(6)
+
+  patient Patient @relation(fields: [patient_id], references: [profile_id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([patient_id, uploaded_at(sort: Desc)])
+  @@map("patient_documents")
+}
+
 /// Bitácora inmutable de accesos a HC/MediPass y acciones sensibles.
 ///
 /// Append-only por trigger, TRUNCATE incluido (ENG-87): ni UPDATE ni DELETE,
@@ -746,6 +789,8 @@ model AuditLog {
 
   actor Profile? @relation(fields: [actor_id], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  /// Historial de accesos a la HC (ENG-165): filtro por recurso y acción, orden por fecha.
+  @@index([resource_id, action, created_at(sort: Desc), id(sort: Desc)])
   @@map("audit_logs")
 }
 

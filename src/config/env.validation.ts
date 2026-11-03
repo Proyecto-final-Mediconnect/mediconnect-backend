@@ -40,8 +40,8 @@ class EnvironmentVariables {
   @IsString()
   SUPABASE_ANON_KEY!: string;
 
-  // No usada hoy por el código; se documenta en .env.example para operaciones
-  // futuras con privilegios de service_role. Opcional para no romper CI/local.
+  // La usa solo la subida de documentos clínicos (ENG-164), que no tiene política
+  // de INSERT en Storage. Opcional para no romper CI/local: sin ella, subir da 500.
   @IsOptional()
   @IsString()
   SUPABASE_SERVICE_ROLE_KEY?: string;

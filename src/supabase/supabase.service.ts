@@ -86,6 +86,24 @@ export class SupabaseService implements OnModuleInit {
   }
 
   /**
+   * Cliente con la service role key: **saltea RLS y las políticas de Storage**.
+   * Solo para escrituras que el cliente no debe poder hacer por su cuenta (ej.
+   * subir un documento clínico, ENG-164), siempre después de que el service haya
+   * validado quién es el usuario y qué puede hacer. Falla si la key no está
+   * configurada. Nunca se devuelve ni se loguea.
+   */
+  getServiceClient(): SupabaseAnonClient {
+    const url = this.config.getOrThrow<string>('SUPABASE_URL');
+    const serviceKey = this.config.getOrThrow<string>(
+      'SUPABASE_SERVICE_ROLE_KEY',
+    );
+
+    return createClient<LooseDatabase>(url, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+
+  /**
    * Cliente nuevo y descartable, con la sesión solo en memoria. Es para flujos
    * que necesitan **abrir** una sesión del lado del backend y operar con ella
    * —ej. `verifyOtp` + `updateUser` al restablecer la contraseña (ENG-142)—.

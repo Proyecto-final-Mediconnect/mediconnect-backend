@@ -75,6 +75,16 @@ export function renderInAppNotification(
         body: from ? `${from} te escribió.` : 'Tenés un mensaje sin leer.',
       };
     }
+    case 'MEDIPASS_ACCESO': {
+      const quien = text(p.consultante);
+      const matricula = text(p.matricula);
+      // Nombre y matrícula los escribe quien canjea, sin verificar: se muestran
+      // como un dicho, no como un hecho.
+      return {
+        title: 'Abrieron tu MediPass',
+        body: `${quien ? `Alguien que dijo ser ${quien}` : 'Alguien'}${matricula ? ` (matrícula ${matricula})` : ''} abrió tu MediPass con tu código. Si no lo reconocés, cortale el acceso.`,
+      };
+    }
     case 'RESENA_MODERADA': {
       // ENG-81: el aviso dice qué se decidió y, si se rechazó, por qué.
       const sobre = professional ? ` sobre ${professional}` : '';

@@ -60,6 +60,21 @@ pnpm run db:seed      # (si cambió el catálogo)
 > SQL que referencia el schema `auth`, que no existe en la shadow-DB que `migrate
 > dev` necesita.
 
+## Overrides de dependencias (`pnpm.overrides`)
+
+`package.json` fuerza versiones parchadas de transitivas que el paquete de arriba
+todavía no actualizó. Van acotados al padre (`padre>dependencia`) para no tocar
+otras rutas del árbol, y son los que hacen pasar `pnpm audit --prod` (job
+`Security` del CI). Cuando el padre publique una versión que ya trae el arreglo,
+se saca el override.
+
+| Override | Advisories que cubre |
+|---|---|
+| `@nestjs/platform-express>multer` `^2.5.0` | GHSA-72gw-mp4g-v24j, GHSA-wc9g-mqfw-jrwm, GHSA-535w-7cp7-47q4, GHSA-q7qp-rjg7-q26m (DoS, high); GHSA-3p4h-7m6x-2hcm (moderate); GHSA-qvfw-j98x-7q72 (low) |
+| `express>proxy-addr` `^2.0.8` | GHSA-jqcg-44mw-7w3h (critical, spoofing de IP con IPv4 mapeado) |
+| `express>body-parser` `^2.4.0` | GHSA-27r3-jxmh-p828 (DoS, high) |
+| `@prisma/config>deepmerge-ts` `^8.0.0` | GHSA-ggr8-5vv4-36mx (agotamiento de pila, high). Sube de major (7 a 8); lo usa solo la CLI de Prisma para mergear la config, y `prisma validate`, `prisma generate` y el build siguen andando |
+
 ## Notas sobre Supabase (producción)
 
 - El esquema se aplica con `prisma migrate deploy` contra la connection string de

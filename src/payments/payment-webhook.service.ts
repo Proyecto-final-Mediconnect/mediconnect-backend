@@ -336,6 +336,11 @@ export class PaymentWebhookService {
         // La fila del reembolso se anota en el mismo commit que el pago: si el
         // proceso muere antes de llamar a MercadoPago, el reintento de la
         // notificación (`ya-procesado`) la encuentra y lo completa.
+        // INVARIANTE (ENG-180): no puede haber un pago APROBADO sobre un turno
+        // inactivo sin esta fila. `CancellationRefundService` la usa para no
+        // pedir una segunda devolución al cancelar: si algún día se aprueba el
+        // pago fuera de esta transacción, se devuelve dos veces. El índice
+        // único `refunds_payment_reason_uq` solo frena el duplicado exacto.
         await tx.refund.create({
           data: {
             payment_id: payment.id,

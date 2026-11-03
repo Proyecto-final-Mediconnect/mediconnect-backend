@@ -7,6 +7,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   accessStatus,
@@ -14,6 +15,8 @@ import {
   type AccessStatus,
 } from './access-history';
 import { OpenEmergencySessionDto } from './dto/open-emergency-session.dto';
+import { UpdateMediPassScopeDto } from './dto/update-medipass-scope.dto';
+import { applyScope, MediPassScope, resolveScope } from './medipass-scope';
 import {
   CODE_ALPHABET,
   CODE_LENGTH,
@@ -74,6 +77,10 @@ export interface MediPassHistoryResponse {
 /** Accesos por página del historial. */
 const HISTORY_PAGE_SIZE = 10;
 
+/** Sesiones que cierra cada UPDATE del job, y tope de UPDATEs por corrida. */
+const CLOSE_BATCH = 1000;
+const CLOSE_MAX_BATCHES = 20;
+
 /** Forma de un UUID v4, para no pegarle a la base con cualquier cosa. */
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -104,7 +111,10 @@ const UUID_PATTERN =
 export class MediPassService {
   private readonly logger = new Logger(MediPassService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly inApp: InAppNotificationsService,
+  ) {}
 
   /**
    * El código vigente del paciente; si no tiene uno, lo genera.
@@ -195,10 +205,94 @@ export class MediPassService {
     );
   }
 
-  /** El bloque vital del propio paciente, que es lo que ve en su pantalla. */
+  /**
+   * El bloque vital del propio paciente, **entero**: es su información, y la
+   * pantalla marca qué bloques no ve el consultante según el scope (ENG-149).
+   */
   async getMyVitalBlock(patientId: string): Promise<VitalBlock> {
     const patient = await this.assertPatientExists(patientId);
     return toVitalBlock(patient, new Date());
+  }
+
+  /** Qué bloques ve un consultante externo (ENG-149). Sin configurar, todos. */
+  async getMyScope(patientId: string): Promise<MediPassScope> {
+    const fila = await this.prisma.patient.findUnique({
+      where: { profile_id: patientId },
+      select: { medipass_scope: true },
+    });
+    if (!fila) throw this.perfilIncompleto();
+    return resolveScope(fila.medipass_scope);
+  }
+
+  /**
+   * Cambia qué ve un consultante externo (ENG-149). Filtra por el `profile_id`
+   * del JWT: un paciente solo puede tocar su propia fila. Vale también para las
+   * sesiones ya abiertas, en su próximo refresco: el recorte se aplica al leer,
+   * no al abrir la sesión.
+   */
+  async updateMyScope(
+    patientId: string,
+    dto: UpdateMediPassScopeDto,
+  ): Promise<MediPassScope> {
+    const scope = resolveScope(dto);
+    try {
+      await this.prisma.patient.update({
+        where: { profile_id: patientId },
+        data: { medipass_scope: { ...scope }, updated_at: new Date() },
+      });
+    } catch (err) {
+      // P2025: no hay fila de `patients` (perfil sin completar), mismo 409 que
+      // el resto de los endpoints del paciente.
+      if ((err as { code?: string }).code === 'P2025') {
+        throw this.perfilIncompleto();
+      }
+      throw err;
+    }
+    return scope;
+  }
+
+  /**
+   * Cierra los accesos que vencieron o se cortaron (ENG-104): completa
+   * `closed_at` con `revoked_at` o con `expires_at`, lo que haya pasado antes.
+   * Lo llama el job cada 5 minutos.
+   *
+   * Es idempotente (solo toca las que siguen con `closed_at` en null) y no es
+   * lo que impide ver una sesión vencida: eso ya lo hace cada lectura contra el
+   * reloj del servidor.
+   *
+   * **`closed_at` es informativo, no autoriza nada.** Puede quedar desfasado
+   * hasta 5 minutos (una sesión ya vencida o cortada y todavía en null hasta la
+   * próxima corrida), así que para decidir si un acceso sigue abierto hay que
+   * mirar `expires_at` y `revoked_at`.
+   *
+   * Trabaja de a `CLOSE_BATCH` filas, con un tope de vueltas por corrida: la
+   * primera corrida después del deploy tiene que cerrar todo el histórico y no
+   * puede pasarse del `--max-time 60` del workflow. Lo que no entre queda para
+   * la corrida siguiente y converge solo.
+   *
+   * Un SQL y no `updateMany` porque el valor sale de otra columna de la misma
+   * fila. Las dos condiciones van en un `union` y no en un `or` para que cada
+   * una use su índice parcial (ver la migración de ENG-104).
+   */
+  async closeExpiredSessions(now: Date = new Date()): Promise<number> {
+    let total = 0;
+    for (let i = 0; i < CLOSE_MAX_BATCHES; i++) {
+      const cerradas = await this.prisma.$executeRaw`
+        update medipass_sessions
+           set closed_at = least(coalesce(revoked_at, expires_at), expires_at)
+         where id in (
+           select id from (
+             select id from medipass_sessions
+              where closed_at is null and expires_at <= ${now}
+             union
+             select id from medipass_sessions
+              where closed_at is null and revoked_at is not null
+           ) abiertas
+           limit ${CLOSE_BATCH})`;
+      total += cerradas;
+      if (cerradas < CLOSE_BATCH) break;
+    }
+    return total;
   }
 
   /**
@@ -233,7 +327,7 @@ export class MediPassService {
         id: true,
         patient_id: true,
         used_at: true,
-        patient: { select: VITAL_SELECT },
+        patient: { select: { ...VITAL_SELECT, medipass_scope: true } },
       },
     });
 
@@ -271,10 +365,25 @@ export class MediPassService {
       });
     });
 
+    // Después del commit: el acceso ya existe y quedó en la bitácora. El aviso
+    // no puede frenar la ficha del médico, así que no espera ni tira (ENG-177).
+    void this.inApp.notifyMediPassAccess(
+      code.patient_id,
+      {
+        sesionId: sessionId,
+        consultante: dto.nombre,
+        matricula: dto.matricula ?? null,
+      },
+      ahora,
+    );
+
     return {
       sesionId: sessionId,
       expiraEl: expiraEl.toISOString(),
-      vital: toVitalBlock(code.patient, ahora),
+      vital: applyScope(
+        toVitalBlock(code.patient, ahora),
+        resolveScope(code.patient.medipass_scope),
+      ),
     };
   }
 
@@ -309,7 +418,7 @@ export class MediPassService {
       select: {
         expires_at: true,
         revoked_at: true,
-        patient: { select: VITAL_SELECT },
+        patient: { select: { ...VITAL_SELECT, medipass_scope: true } },
       },
     });
 
@@ -322,7 +431,12 @@ export class MediPassService {
 
     return {
       expiraEl: session.expires_at.toISOString(),
-      vital: toVitalBlock(session.patient, ahora),
+      // El scope se lee en cada refresco: un cambio del paciente llega a las
+      // sesiones ya abiertas (ENG-149).
+      vital: applyScope(
+        toVitalBlock(session.patient, ahora),
+        resolveScope(session.patient.medipass_scope),
+      ),
     };
   }
 
@@ -559,13 +673,15 @@ export class MediPassService {
       select: VITAL_SELECT,
     });
 
-    if (!patient) {
-      throw new ConflictException(
-        'Completá tu perfil para poder usar el MediPass.',
-      );
-    }
+    if (!patient) throw this.perfilIncompleto();
 
     return patient;
+  }
+
+  private perfilIncompleto(): ConflictException {
+    return new ConflictException(
+      'Completá tu perfil para poder usar el MediPass.',
+    );
   }
 
   /**
