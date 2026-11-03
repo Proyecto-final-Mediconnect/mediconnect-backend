@@ -2,6 +2,7 @@ import { PrismaClient, Prisma } from '../generated/prisma';
 import { CatalogService } from '../src/catalog/catalog.service';
 import { ListProfessionalsQueryDto } from '../src/catalog/dto/list-professionals-query.dto';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { ReviewsService } from '../src/reviews/reviews.service';
 
 /**
  * ENG-49 contra PostgreSQL real: lo que los unit tests no pueden afirmar —
@@ -11,7 +12,10 @@ import type { PrismaService } from '../src/prisma/prisma.service';
  */
 describe('Catálogo público (integration)', () => {
   const prisma = new PrismaClient();
-  const service = new CatalogService(prisma as unknown as PrismaService);
+  const service = new CatalogService(
+    prisma as unknown as PrismaService,
+    new ReviewsService(prisma as unknown as PrismaService),
+  );
 
   // Nombres pensados para ejercitar el orden: dos homónimos de apellido
   // (Álvarez) y un acento, que en collation C ordenaría distinto que en es_AR.
@@ -326,6 +330,8 @@ describe('Catálogo público (integration)', () => {
       'photoUrl',
       'price',
       'primarySpecialty',
+      // El promedio de reseñas aprobadas (ENG-82): público, como en el perfil.
+      'rating',
       'specialties',
     ]);
   });

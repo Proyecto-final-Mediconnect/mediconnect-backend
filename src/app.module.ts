@@ -15,6 +15,7 @@ import { AuthModule } from './auth/auth.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { ConversationsModule } from './conversations/conversations.module';
 import { ClinicalRecordsModule } from './clinical-records/clinical-records.module';
+import { ReviewsModule } from './reviews/reviews.module';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { ClientIpThrottlerGuard } from './common/throttler/client-ip-throttler.guard';
 import { canjeGlobalThrottler } from './medipass/canje-global-throttle.decorator';
@@ -63,6 +64,7 @@ import { VideoModule } from './video/video.module';
     SchedulesModule,
     AppointmentsModule,
     ClinicalRecordsModule,
+    ReviewsModule,
     MediPassModule,
     ConversationsModule,
     PaymentsModule,

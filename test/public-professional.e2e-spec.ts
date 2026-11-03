@@ -50,7 +50,11 @@ describe('GET /professionals/:id — perfil público (e2e)', () => {
         getIssuer: () => ISSUER,
       })
       .overrideProvider(PrismaService)
-      .useValue({ professional: { findFirst } })
+      // ENG-82: el perfil suma el promedio de reseñas aprobadas; sin reseñas, `rating: null`.
+      .useValue({
+        professional: { findFirst },
+        review: { groupBy: () => Promise.resolve([]) },
+      })
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -87,6 +91,7 @@ describe('GET /professionals/:id — perfil público (e2e)', () => {
             { id: 'e1', institution: 'UBA', degree: 'Médica', year: 2015 },
           ],
           price: 15000,
+          rating: null,
           currency: 'ARS',
           // ENG-67: el paciente tiene que ver a qué atenerse ANTES de reservar.
           // Sin política configurada viaja el default, nunca `null`.

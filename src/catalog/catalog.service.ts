@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReviewsService, type RatingSummary } from '../reviews/reviews.service';
 import type { ListProfessionalsQueryDto } from './dto/list-professionals-query.dto';
 
 /** Especialidad tal como se expone en el catálogo público. */
@@ -25,6 +26,8 @@ export type ProfessionalCardView = {
   /** `null` si el profesional todavía no cargó su precio de consulta. */
   price: number | null;
   currency: string;
+  /** Promedio y cantidad de reseñas aprobadas (ENG-82); `null` si no tiene. */
+  rating: RatingSummary | null;
 };
 
 export type PaginationMeta = {
@@ -68,7 +71,10 @@ type ProfessionalRow = Prisma.ProfessionalGetPayload<{
 
 @Injectable()
 export class CatalogService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly reviews: ReviewsService,
+  ) {}
 
   /**
    * Los profesionales cuyo nombre, apellido o alguna especialidad contienen
@@ -136,9 +142,16 @@ export class CatalogService {
     ]);
 
     const totalPages = Math.ceil(total / limit);
+    // Una sola consulta agrupada para la página entera, no una por tarjeta.
+    const ratings = await this.reviews.ratingSummaries(
+      rows.map((r) => r.profile_id),
+    );
 
     return {
-      data: rows.map(toCardView),
+      data: rows.map((row) => ({
+        ...toCardView(row),
+        rating: ratings.get(row.profile_id) ?? null,
+      })),
       meta: {
         page,
         limit,
@@ -204,7 +217,9 @@ function buildWhere(
   return where;
 }
 
-function toCardView(row: ProfessionalRow): ProfessionalCardView {
+function toCardView(
+  row: ProfessionalRow,
+): Omit<ProfessionalCardView, 'rating'> {
   const specialties = row.specialties.map((link) => link.specialty);
 
   return {

@@ -1,6 +1,7 @@
 import { Test, type TestingModule } from '@nestjs/testing';
 import { Prisma } from '../../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReviewsService } from '../reviews/reviews.service';
 import { CatalogService, normalizeSearch } from './catalog.service';
 import { ListProfessionalsQueryDto } from './dto/list-professionals-query.dto';
 
@@ -32,8 +33,10 @@ describe('CatalogService', () => {
   const findMany = jest.fn();
   const count = jest.fn();
   const queryRaw = jest.fn();
+  const ratingSummaries = jest.fn();
 
   beforeEach(async () => {
+    ratingSummaries.mockReset().mockResolvedValue(new Map());
     findMany.mockReset().mockResolvedValue([]);
     count.mockReset().mockResolvedValue(0);
     queryRaw.mockReset().mockResolvedValue([]);
@@ -41,6 +44,11 @@ describe('CatalogService', () => {
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         CatalogService,
+        // ENG-82: el promedio de reseñas. Sin reseñas, cada tarjeta trae `rating: null`.
+        {
+          provide: ReviewsService,
+          useValue: { ratingSummaries: ratingSummaries },
+        },
         {
           provide: PrismaService,
           useValue: {
@@ -262,6 +270,7 @@ describe('CatalogService', () => {
           { id: 'spec-clinica', name: 'Clínica Médica' },
         ],
         price: 12000.5,
+        rating: null,
         currency: 'ARS',
       });
     });

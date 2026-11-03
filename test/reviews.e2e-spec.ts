@@ -1,0 +1,206 @@
+import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { Test, TestingModule } from '@nestjs/testing';
+import cookieParser from 'cookie-parser';
+import { generateKeyPair, SignJWT } from 'jose';
+import request from 'supertest';
+import { App } from 'supertest/types';
+import { AppModule } from './../src/app.module';
+import { legalAcceptedPrismaMock } from './legal-accepted.mock';
+import { PrismaService } from './../src/prisma/prisma.service';
+import { SupabaseService } from './../src/supabase/supabase.service';
+
+/**
+ * Reseñas a nivel HTTP (ENG-80, ENG-81, ENG-82), con la app real: guard,
+ * `ValidationPipe` y que el listado del perfil sea público. Las reglas están
+ * en el spec del service.
+ */
+const ISSUER = 'https://project-ref.supabase.co/auth/v1';
+const PATIENT = '11111111-1111-4111-8111-111111111111';
+const PRO = '22222222-2222-4222-8222-222222222222';
+const MOD = '33333333-3333-4333-8333-333333333333';
+const TURNO = '44444444-4444-4444-8444-444444444444';
+const RESENA = '55555555-5555-4555-8555-555555555555';
+const CREATED = new Date('2026-11-01T15:00:00.000Z');
+
+describe('Reseñas (e2e)', () => {
+  let app: INestApplication<App>;
+  let privateKey: CryptoKey;
+  let publicKey: CryptoKey;
+  let prisma: {
+    appointment: { findUnique: jest.Mock };
+    review: {
+      create: jest.Mock;
+      findMany: jest.Mock;
+      groupBy: jest.Mock;
+      updateMany: jest.Mock;
+      findUnique: jest.Mock;
+      findUniqueOrThrow: jest.Mock;
+    };
+    profile: { findUnique: jest.Mock };
+    auditLog: { create: jest.Mock };
+    notification: { create: jest.Mock };
+  };
+
+  beforeAll(async () => {
+    ({ publicKey, privateKey } = await generateKeyPair('ES256'));
+  });
+
+  beforeEach(async () => {
+    prisma = {
+      appointment: {
+        findUnique: jest.fn().mockResolvedValue({
+          patient_id: PATIENT,
+          professional_id: PRO,
+          status: 'COMPLETADO',
+          review: null,
+        }),
+      },
+      review: {
+        create: jest.fn().mockResolvedValue({
+          id: RESENA,
+          appointment_id: TURNO,
+          professional_id: PRO,
+          rating: 5,
+          comment: null,
+          status: 'PENDIENTE_MODERACION',
+          moderation_reason: null,
+          created_at: CREATED,
+        }),
+        findMany: jest.fn().mockResolvedValue([]),
+        groupBy: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUnique: jest.fn().mockResolvedValue({ id: RESENA }),
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: RESENA,
+          rating: 2,
+          comment: 'x',
+          status: 'RECHAZADA',
+          created_at: CREATED,
+          moderation_reason: 'Insultos',
+          moderated_at: CREATED,
+          patient: { first_name: 'Marina', last_name: 'López' },
+          professional: {
+            profile_id: PRO,
+            first_name: 'Ana',
+            last_name: 'García',
+          },
+          appointment_id: TURNO,
+          patient_id: PATIENT,
+        }),
+      },
+      profile: {
+        findUnique: jest.fn().mockResolvedValue({ role: 'MODERADOR' }),
+      },
+      auditLog: { create: jest.fn().mockResolvedValue({}) },
+      notification: { create: jest.fn().mockResolvedValue({}) },
+    };
+
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(SupabaseService)
+      .useValue({
+        getClient: () => ({ from: () => ({}), auth: {} }),
+        getJWKS: () => publicKey,
+        getIssuer: () => ISSUER,
+      })
+      .overrideProvider(PrismaService)
+      .useValue({ ...legalAcceptedPrismaMock(), ...prisma })
+      .compile();
+
+    app = moduleFixture.createNestApplication();
+    app.use(cookieParser());
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
+    await app.init();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  function signToken(sub: string): Promise<string> {
+    return new SignJWT({ email: 'x@test.com', role: 'authenticated' })
+      .setProtectedHeader({ alg: 'ES256' })
+      .setSubject(sub)
+      .setIssuer(ISSUER)
+      .setAudience('authenticated')
+      .setIssuedAt()
+      .setExpirationTime('1h')
+      .sign(privateKey);
+  }
+
+  it('dejar una reseña sin sesión da 401', async () => {
+    await request(app.getHttpServer())
+      .post(`/appointments/${TURNO}/review`)
+      .send({ rating: 5 })
+      .expect(401);
+    expect(prisma.review.create).not.toHaveBeenCalled();
+  });
+
+  it('deja una reseña y devuelve 201 pendiente de moderación', async () => {
+    const res = await request(app.getHttpServer())
+      .post(`/appointments/${TURNO}/review`)
+      .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+      .send({ rating: 5, comment: '  ' })
+      .expect(201);
+    expect(res.body).toMatchObject({ status: 'PENDIENTE_MODERACION' });
+    // Un comentario en blanco no se guarda como "".
+    expect(prisma.review.create.mock.calls[0][0].data.comment).toBeNull();
+  });
+
+  it('una calificación fuera de 1 a 5 da 400', async () => {
+    await request(app.getHttpServer())
+      .post(`/appointments/${TURNO}/review`)
+      .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+      .send({ rating: 6 })
+      .expect(400);
+    expect(prisma.review.create).not.toHaveBeenCalled();
+  });
+
+  it('las reseñas de un profesional son públicas', async () => {
+    const res = await request(app.getHttpServer())
+      .get(`/professionals/${PRO}/reviews`)
+      .expect(200);
+    expect(res.body).toEqual({
+      reviews: [],
+      rating: null,
+      page: 1,
+      hasMore: false,
+    });
+  });
+
+  it('rechazar sin motivo da 400 y no toca nada', async () => {
+    await request(app.getHttpServer())
+      .patch(`/moderation/reviews/${RESENA}`)
+      .set('Authorization', `Bearer ${await signToken(MOD)}`)
+      .send({ decision: 'RECHAZADA' })
+      .expect(400);
+    expect(prisma.review.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('rechazar con motivo devuelve la reseña moderada', async () => {
+    const res = await request(app.getHttpServer())
+      .patch(`/moderation/reviews/${RESENA}`)
+      .set('Authorization', `Bearer ${await signToken(MOD)}`)
+      .send({ decision: 'RECHAZADA', reason: 'Insultos' })
+      .expect(200);
+    expect(res.body).toMatchObject({
+      status: 'RECHAZADA',
+      moderationReason: 'Insultos',
+    });
+  });
+
+  it('un paciente no ve la cola de moderación', async () => {
+    prisma.profile.findUnique.mockResolvedValue({ role: 'PACIENTE' });
+    await request(app.getHttpServer())
+      .get('/moderation/reviews')
+      .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+      .expect(403);
+  });
+});

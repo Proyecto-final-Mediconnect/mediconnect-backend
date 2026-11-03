@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../prisma/prisma.service';
 import { DEFAULT_CANCELLATION_POLICY } from './cancellation-policy';
+import { ReviewsService } from '../reviews/reviews.service';
 import { PublicProfessionalsService } from './public-professionals.service';
 
 describe('PublicProfessionalsService', () => {
@@ -41,6 +42,11 @@ describe('PublicProfessionalsService', () => {
       providers: [
         PublicProfessionalsService,
         { provide: PrismaService, useValue: { professional: { findFirst } } },
+        // ENG-82: sin reseñas aprobadas el perfil trae `rating: null`.
+        {
+          provide: ReviewsService,
+          useValue: { ratingSummaries: () => Promise.resolve(new Map()) },
+        },
       ],
     }).compile();
 
@@ -75,6 +81,7 @@ describe('PublicProfessionalsService', () => {
         },
       ],
       price: 15000,
+      rating: null,
       currency: 'ARS',
     });
   });
