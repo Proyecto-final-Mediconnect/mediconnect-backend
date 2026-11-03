@@ -3,6 +3,8 @@ import { ClinicalRecordAccessesController } from './clinical-record-accesses.con
 import { ClinicalRecordAccessesService } from './clinical-record-accesses.service';
 import { ClinicalRecordsController } from './clinical-records.controller';
 import { ClinicalRecordsService } from './clinical-records.service';
+import { PatientDocumentsController } from './patient-documents.controller';
+import { PatientDocumentsService } from './patient-documents.service';
 
 /**
  * Historia Clínica (EP-06).
@@ -22,10 +24,21 @@ import { ClinicalRecordsService } from './clinical-records.service';
  * ENG-100 suma `POST :entryId/corrections`: una corrección es una entrada nueva
  * que referencia a la corregida, así que necesita su propia ruta y no un PATCH —
  * la tabla no admite UPDATE.
+ *
+ * ENG-164 suma la documentación que aporta el paciente: va acá porque se ve con
+ * las mismas reglas que la HC, pero en su propia tabla y fuera de la cadena.
  */
 @Module({
-  controllers: [ClinicalRecordAccessesController, ClinicalRecordsController],
-  providers: [ClinicalRecordsService, ClinicalRecordAccessesService],
+  controllers: [
+    ClinicalRecordsController,
+    PatientDocumentsController,
+    ClinicalRecordAccessesController,
+  ],
+  providers: [
+    ClinicalRecordsService,
+    PatientDocumentsService,
+    ClinicalRecordAccessesService,
+  ],
   exports: [ClinicalRecordsService],
 })
 export class ClinicalRecordsModule {}

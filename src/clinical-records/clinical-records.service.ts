@@ -744,8 +744,11 @@ export class ClinicalRecordsService {
    *
    * La consulta extra corre SOLO cuando no hay turno habilitante: el camino
    * normal —el profesional que está atendiendo— sigue costando una sola lectura.
+   *
+   * Es pública porque los documentos que aporta el paciente (ENG-164) se ven con
+   * las mismas reglas que su HC.
    */
-  private async assertCanReadFor(
+  async assertCanReadFor(
     professionalId: string,
     patientId: string,
   ): Promise<void> {
@@ -901,7 +904,7 @@ function violatesUniqueOn(error: unknown, column: string): boolean {
  * secas rechaza valores que la base considera iguales. Ya pasó una vez: el dueño
  * de una HC recibía 403 sobre su propia historia.
  */
-function sameUuid(a: string, b: string): boolean {
+export function sameUuid(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
