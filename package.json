@@ -41,7 +41,7 @@
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",
-    "@nestjs/throttler": "^6.5.0",
+    "@nestjs/throttler": "^6.7.1",
     "@prisma/client": "^6.19.3",
     "@sentry/nestjs": "10.69.0",
     "@supabase/supabase-js": "^2.110.0",
