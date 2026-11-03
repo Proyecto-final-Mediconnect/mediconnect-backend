@@ -756,6 +756,8 @@ model AuditLog {
 
   actor Profile? @relation(fields: [actor_id], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  /// Historial de accesos a la HC (ENG-165): filtro por recurso y acción, orden por fecha.
+  @@index([resource_id, action, created_at(sort: Desc), id(sort: Desc)])
   @@map("audit_logs")
 }
 

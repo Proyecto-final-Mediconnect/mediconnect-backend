@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { ClinicalRecordAccessesController } from './clinical-record-accesses.controller';
+import { ClinicalRecordAccessesService } from './clinical-record-accesses.service';
 import { ClinicalRecordsController } from './clinical-records.controller';
 import { ClinicalRecordsService } from './clinical-records.service';
 
@@ -22,8 +24,8 @@ import { ClinicalRecordsService } from './clinical-records.service';
  * la tabla no admite UPDATE.
  */
 @Module({
-  controllers: [ClinicalRecordsController],
-  providers: [ClinicalRecordsService],
+  controllers: [ClinicalRecordAccessesController, ClinicalRecordsController],
+  providers: [ClinicalRecordsService, ClinicalRecordAccessesService],
   exports: [ClinicalRecordsService],
 })
 export class ClinicalRecordsModule {}
