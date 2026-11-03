@@ -83,6 +83,7 @@ describe('AppointmentsService', () => {
   let prisma: {
     professional: { findFirst: jest.Mock; findMany: jest.Mock };
     patient: { findMany: jest.Mock };
+    refund: { findMany: jest.Mock };
     scheduleRule: { findMany: jest.Mock };
     scheduleBlock: { findMany: jest.Mock };
     appointment: { findMany: jest.Mock; update: jest.Mock; create: jest.Mock };
@@ -127,6 +128,7 @@ describe('AppointmentsService', () => {
           },
         ]),
       },
+      refund: { findMany: jest.fn().mockResolvedValue([]) },
       scheduleRule: { findMany: jest.fn().mockResolvedValue([RULE_ROW]) },
       scheduleBlock: { findMany: jest.fn().mockResolvedValue([]) },
       appointment: {
@@ -517,6 +519,93 @@ describe('AppointmentsService', () => {
       });
       expect(view.professional?.lastName).toBe('Médica');
       expect(view.patient?.lastName).toBe('Paciente');
+    });
+
+    // ENG-174: al volver a un turno cancelado se ve en qué quedó el reembolso.
+    it('un turno cancelado trae los reembolsos sumados, con el estado que falta resolver', async () => {
+      results = [
+        { data: [{ ...INSERTED_ROW, status: 'CANCELADO' }], error: null },
+      ];
+      prisma.refund.findMany.mockResolvedValue([
+        {
+          amount: { toString: () => '7500.00' },
+          status: 'PROCESADO',
+          payment: { appointment_id: INSERTED_ROW.id },
+        },
+        {
+          amount: { toString: () => '7500.00' },
+          status: 'PENDIENTE',
+          payment: { appointment_id: INSERTED_ROW.id },
+        },
+      ]);
+
+      const [view] = await service.listMine(TOKEN, PATIENT_ID);
+
+      expect(view.refundState).toEqual({ amount: 15000, status: 'PENDIENTE' });
+      expect(prisma.refund.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { payment: { appointment_id: { in: [INSERTED_ROW.id] } } },
+          orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
+        }),
+      );
+    });
+
+    it('el profesional no recibe el reembolso del paciente ni lo consulta', async () => {
+      results = [
+        { data: [{ ...INSERTED_ROW, status: 'CANCELADO' }], error: null },
+      ];
+
+      const [view] = await service.listMine(
+        TOKEN,
+        INSERTED_ROW.professional_id,
+      );
+
+      expect(view.refundState).toBeNull();
+      expect(prisma.refund.findMany).not.toHaveBeenCalled();
+    });
+
+    it('un reembolso rechazado no suma al monto devuelto', async () => {
+      results = [
+        { data: [{ ...INSERTED_ROW, status: 'CANCELADO' }], error: null },
+      ];
+      prisma.refund.findMany.mockResolvedValue([
+        {
+          amount: { toString: () => '5000.00' },
+          status: 'RECHAZADO',
+          payment: { appointment_id: INSERTED_ROW.id },
+        },
+        {
+          amount: { toString: () => '7500.00' },
+          status: 'PROCESADO',
+          payment: { appointment_id: INSERTED_ROW.id },
+        },
+      ]);
+
+      const [view] = await service.listMine(TOKEN, PATIENT_ID);
+
+      expect(view.refundState).toEqual({ amount: 7500, status: 'RECHAZADO' });
+    });
+
+    it('un turno cancelado sin reembolso trae refundState null', async () => {
+      results = [
+        { data: [{ ...INSERTED_ROW, status: 'CANCELADO' }], error: null },
+      ];
+
+      const [view] = await service.listMine(TOKEN, PATIENT_ID);
+
+      expect(view.refundState).toBeNull();
+    });
+
+    // Un confirmado con un segundo pago devuelto (ENG-144) sigue pago.
+    it('un turno que no se cayó no busca reembolsos', async () => {
+      results = [
+        { data: [{ ...INSERTED_ROW, status: 'CONFIRMADO' }], error: null },
+      ];
+
+      const [view] = await service.listMine(TOKEN, PATIENT_ID);
+
+      expect(view.refundState).toBeNull();
+      expect(prisma.refund.findMany).not.toHaveBeenCalled();
     });
 
     it('sin turnos no consulta nombres', async () => {
