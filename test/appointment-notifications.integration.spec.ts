@@ -164,6 +164,35 @@ describe('Emails de turno (integration)', () => {
     expect(await sentKinds(id)).toEqual(['RECORDATORIO_24H']);
   });
 
+  // ENG-86, derecho de oposición: quien apagó los recordatorios no los recibe,
+  // pero la confirmación de la reserva sí, porque es parte del servicio.
+  it('sin recordatorios si el paciente se opuso, pero con la confirmación', async () => {
+    await prisma.profile.update({
+      where: { id: patientId },
+      data: { email_reminders: false },
+    });
+    try {
+      const recordatorio = await appointment({
+        startsIn: 20 * HOUR,
+        createdAgo: 48 * HOUR,
+      });
+      const recien = await appointment({
+        startsIn: 72 * HOUR,
+        createdAgo: HOUR,
+      });
+
+      await service.sendDue(NOW);
+
+      expect(await sentKinds(recordatorio)).toEqual([]);
+      expect(await sentKinds(recien)).toEqual(['TURNO_RESERVADO']);
+    } finally {
+      await prisma.profile.update({
+        where: { id: patientId },
+        data: { email_reminders: true },
+      });
+    }
+  });
+
   it('sin recordatorio de 24 h si se reservó con menos de 24 h de anticipación', async () => {
     // Reservado hace 2 h para dentro de 20: la confirmación acaba de salir.
     const id = await appointment({ startsIn: 20 * HOUR, createdAgo: 2 * HOUR });

@@ -108,12 +108,20 @@ enum notification_channel {
 /// La fila se crea automáticamente vía trigger on_auth_user_created al
 /// registrarse el usuario en Supabase Auth (ver migración ep01_*).
 model Profile {
-  id          String    @id @db.Uuid
-  email       String    @unique
-  role        user_role
-  mfa_enabled Boolean   @default(false)
-  created_at  DateTime  @default(now()) @db.Timestamptz(6)
-  updated_at  DateTime  @default(now()) @db.Timestamptz(6)
+  id              String    @id @db.Uuid
+  email           String    @unique
+  role            user_role
+  mfa_enabled     Boolean   @default(false)
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @db.Timestamptz(6)
+  /// Baja de la cuenta por derecho de supresión (ENG-86, Ley 25.326 art. 16).
+  /// La fila no se borra: la historia clínica se conserva 10 años (Ley 26.529
+  /// art. 18) y la constancia de consentimiento es append-only. Ver
+  /// `AccountDeletionService`.
+  deleted_at      DateTime? @db.Timestamptz(6)
+  /// Oposición a los recordatorios por email de 24 h y 1 h (ENG-86, art. 27).
+  /// La confirmación del turno no entra: es parte del servicio, no publicidad.
+  email_reminders Boolean   @default(true)
 
   patient                Patient?
   professional           Professional?

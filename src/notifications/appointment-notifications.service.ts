@@ -206,6 +206,9 @@ export class AppointmentNotificationsService {
           lte: new Date(now.getTime() + lead),
         },
         notifications: { none: { type, channel: 'EMAIL' } },
+        // Oposición (ENG-86): quien apagó los recordatorios no los recibe.
+        // La confirmación de la reserva no pasa por acá y sigue saliendo.
+        patient: { profile: { email_reminders: true } },
       },
       select: APPOINTMENT_SELECT,
       orderBy: { scheduled_at: 'asc' },

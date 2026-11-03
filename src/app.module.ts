@@ -27,6 +27,7 @@ import { MediPassModule } from './medipass/medipass.module';
 import { PatientsModule } from './patients/patients.module';
 import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { PrivacyModule } from './privacy/privacy.module';
 import { ProfessionalsModule } from './professionals/professionals.module';
 import { SchedulesModule } from './schedules/schedules.module';
 import { SupabaseModule } from './supabase/supabase.module';
@@ -57,6 +58,7 @@ import { VideoModule } from './video/video.module';
     AuthModule,
     CatalogModule,
     UserModule,
+    PrivacyModule,
     HealthModule,
     ProfessionalsModule,
     PatientsModule,
