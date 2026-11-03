@@ -7,6 +7,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   accessStatus,
@@ -106,7 +107,10 @@ const UUID_PATTERN =
 export class MediPassService {
   private readonly logger = new Logger(MediPassService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly inApp: InAppNotificationsService,
+  ) {}
 
   /**
    * El código vigente del paciente; si no tiene uno, lo genera.
@@ -312,6 +316,18 @@ export class MediPassService {
         },
       });
     });
+
+    // Después del commit: el acceso ya existe y quedó en la bitácora. El aviso
+    // no puede frenar la ficha del médico, así que no espera ni tira (ENG-177).
+    void this.inApp.notifyMediPassAccess(
+      code.patient_id,
+      {
+        sesionId: sessionId,
+        consultante: dto.nombre,
+        matricula: dto.matricula ?? null,
+      },
+      ahora,
+    );
 
     return {
       sesionId: sessionId,

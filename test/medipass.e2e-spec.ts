@@ -85,6 +85,8 @@ describe('MediPass (e2e)', () => {
         findMany: sessionFindMany,
       },
       mediPassAccessLog: { create: accessLogCreate },
+      // El aviso al paciente al abrirse un acceso (ENG-177).
+      notification: { create: jest.fn().mockResolvedValue({ id: 'n-1' }) },
       $transaction: (fn: (tx: unknown) => unknown) => fn(prismaMock),
     };
 

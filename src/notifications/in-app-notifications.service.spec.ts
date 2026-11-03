@@ -16,6 +16,8 @@ const APPOINTMENT = {
   patient: { first_name: 'Julián', last_name: 'Pérez' },
 };
 
+const NOW_AVISO = new Date('2026-10-31T12:00:00.000Z');
+
 describe('InAppNotificationsService', () => {
   let prisma: {
     appointment: { findUnique: jest.Mock };
@@ -159,6 +161,57 @@ describe('InAppNotificationsService', () => {
         appointmentId: null,
         body: 'Julián Pérez te escribió.',
       });
+    });
+  });
+
+  describe('notifyMediPassAccess (ENG-177)', () => {
+    const ACCESO = {
+      sesionId: 's-1',
+      consultante: 'Dra. Ferrer',
+      matricula: null,
+    };
+
+    it('deja un aviso in-app para el paciente con quién entró', async () => {
+      await service.notifyMediPassAccess('paciente-1', ACCESO, NOW_AVISO);
+
+      expect(prisma.notification.create).toHaveBeenCalledWith({
+        data: {
+          user_id: 'paciente-1',
+          type: 'MEDIPASS_ACCESO',
+          channel: 'IN_APP',
+          payload: ACCESO,
+          sent_at: NOW_AVISO,
+        },
+      });
+    });
+
+    it('omite el aviso si el mismo consultante ya avisó en la ventana', async () => {
+      prisma.notification.findMany.mockResolvedValue([
+        { payload: { consultante: ' dra. ferrer ', matricula: null } },
+      ]);
+
+      await service.notifyMediPassAccess('paciente-1', ACCESO, NOW_AVISO);
+
+      expect(prisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('avisa igual si cambia la matrícula o el nombre', async () => {
+      prisma.notification.findMany.mockResolvedValue([
+        { payload: { consultante: 'Dra. Ferrer', matricula: 'MP 1' } },
+      ]);
+
+      await service.notifyMediPassAccess('paciente-1', ACCESO, NOW_AVISO);
+
+      expect(prisma.notification.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('si falla, no tira: la ficha del médico no puede depender del aviso', async () => {
+      prisma.notification.create.mockRejectedValue(new Error('base caída'));
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      await expect(
+        service.notifyMediPassAccess('paciente-1', ACCESO, NOW_AVISO),
+      ).resolves.toBeUndefined();
     });
   });
 

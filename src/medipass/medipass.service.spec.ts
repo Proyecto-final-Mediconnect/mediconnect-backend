@@ -11,6 +11,7 @@ import {
   CODE_LENGTH,
   CODE_MAX_ATTEMPTS,
 } from './medipass.config';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { MediPassService } from './medipass.service';
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
@@ -45,6 +46,7 @@ type PrismaMock = {
 describe('MediPassService', () => {
   let prisma: PrismaMock;
   let service: MediPassService;
+  let inApp: { notifyMediPassAccess: jest.Mock };
 
   beforeEach(() => {
     prisma = {
@@ -72,7 +74,11 @@ describe('MediPassService', () => {
     prisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
       fn(prisma),
     );
-    service = new MediPassService(prisma as unknown as PrismaService);
+    inApp = { notifyMediPassAccess: jest.fn().mockResolvedValue(undefined) };
+    service = new MediPassService(
+      prisma as unknown as PrismaService,
+      inApp as unknown as InAppNotificationsService,
+    );
   });
 
   describe('getMyCode', () => {
@@ -197,6 +203,22 @@ describe('MediPassService', () => {
       };
       expect(sesion.data.consultant_name).toBe('Dra. Paula Ferrer');
       expect(sesion.data.consultant_license).toBe('MP 12345');
+    });
+
+    it('le avisa al paciente quién abrió su MediPass (ENG-177)', async () => {
+      prisma.mediPassCode.findFirst.mockResolvedValue(codeVigente());
+
+      const res = await service.openSession(dto);
+
+      expect(inApp.notifyMediPassAccess).toHaveBeenCalledWith(
+        PATIENT,
+        {
+          sesionId: res.sesionId,
+          consultante: 'Dra. Paula Ferrer',
+          matricula: 'MP 12345',
+        },
+        expect.any(Date),
+      );
     });
 
     it('la sesión y su entrada en la bitácora van en la misma transacción', async () => {
