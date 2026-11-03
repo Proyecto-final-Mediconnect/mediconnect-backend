@@ -107,6 +107,17 @@ statements) y no el 6543 (transaction mode), porque Prisma los necesita.
 Para verificar qué tenés: `getent ahosts db.<project-ref>.supabase.co` devuelve
 solo direcciones `2600:...` (IPv6); el host del pooler devuelve IPv4.
 
+### Qué rol usa cada cosa (ENG-138)
+
+| Rol | Dónde | Para qué |
+|---|---|---|
+| `postgres` | Secret `DATABASE_URL` de GitHub Actions | Migraciones, seed y job de integridad. Es el dueño de las tablas. |
+| `mediconnect_backend` | `DATABASE_URL` en Render | El backend en runtime: solo filas, sin DDL, sin desactivar triggers y sin `UPDATE`/`DELETE` sobre las tablas append-only. |
+
+El rol se crea una vez con `prisma/sql/eng138-rol-backend.sql`. Los pasos para
+ponerlo en marcha y la vuelta atrás están en
+[`docs/security/rol-backend.md`](docs/security/rol-backend.md).
+
 ### Cargar el catálogo base (seed) en Supabase
 
 `prisma migrate deploy` crea las tablas pero **no** carga datos: el catálogo de
