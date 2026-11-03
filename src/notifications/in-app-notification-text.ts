@@ -78,11 +78,15 @@ export function renderInAppNotification(
     case 'MEDIPASS_ACCESO': {
       const quien = text(p.consultante);
       const matricula = text(p.matricula);
+      // ENG-176: si entró con la tarjeta impresa, se dice. Es la que el paciente
+      // tiene que regenerar si no reconoce el acceso, no el código.
+      const con =
+        p.origen === 'TARJETA' ? 'tu tarjeta de emergencia' : 'tu código';
       // Nombre y matrícula los escribe quien canjea, sin verificar: se muestran
       // como un dicho, no como un hecho.
       return {
         title: 'Abrieron tu MediPass',
-        body: `${quien ? `Alguien que dijo ser ${quien}` : 'Alguien'}${matricula ? ` (matrícula ${matricula})` : ''} abrió tu MediPass con tu código. Si no lo reconocés, cortale el acceso.`,
+        body: `${quien ? `Alguien que dijo ser ${quien}` : 'Alguien'}${matricula ? ` (matrícula ${matricula})` : ''} abrió tu MediPass con ${con}. Si no lo reconocés, cortale el acceso.`,
       };
     }
     case 'RESENA_MODERADA': {

@@ -7,11 +7,13 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Post,
   Put,
   Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
@@ -101,6 +103,44 @@ export class MediPassController {
   listMyAccesses(@Req() req: Request) {
     const { userId } = requireAuth(req);
     return this.medipass.listMyAccesses(userId);
+  }
+
+  /**
+   * Si hay una tarjeta de emergencia activa y desde cuándo (ENG-176). Nunca el
+   * token: después de generarla, el backend solo guarda su hash.
+   */
+  @Get('me/emergency-card')
+  getMyEmergencyCard(@Req() req: Request) {
+    const { userId } = requireAuth(req);
+    return this.medipass.getMyEmergencyCard(userId);
+  }
+
+  /**
+   * Genera la tarjeta de emergencia, o una nueva que reemplaza a la anterior
+   * (ENG-176). Devuelve el token **una sola vez**, para armar el QR que se
+   * imprime; la anterior deja de funcionar y se cortan los accesos abiertos con
+   * ella.
+   *
+   * Límite propio y bajo: es una operación que un paciente hace un par de veces
+   * en la vida, y cada llamada invalida la tarjeta impresa.
+   */
+  @Post('me/emergency-card')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @HttpCode(HttpStatus.CREATED)
+  createMyEmergencyCard(@Req() req: Request) {
+    const { userId } = requireAuth(req);
+    return this.medipass.createMyEmergencyCard(userId);
+  }
+
+  /**
+   * Desactiva la tarjeta (ENG-176). 204 e idempotente, como cortar un acceso:
+   * si no había ninguna, el resultado ya es el pedido.
+   */
+  @Delete('me/emergency-card')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async disableMyEmergencyCard(@Req() req: Request): Promise<void> {
+    const { userId } = requireAuth(req);
+    await this.medipass.disableMyEmergencyCard(userId);
   }
 
   /**

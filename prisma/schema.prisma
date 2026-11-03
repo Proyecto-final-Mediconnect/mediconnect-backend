@@ -181,16 +181,17 @@ model Patient {
   // Qué bloques ve un consultante externo (ENG-149). `null` = todo visible.
   medipass_scope    Json?   @db.JsonB
 
-  profile                 Profile               @relation(fields: [profile_id], references: [id], onDelete: Cascade)
-  appointments            Appointment[]
-  reviews                 Review[]
-  clinical_record_entries ClinicalRecordEntry[]
-  documents               PatientDocument[]
-  chain_head_snapshot     ChainHeadSnapshot?
-  conversations           Conversation[]
-  medipass_codes          MediPassCode[]
-  medipass_sessions       MediPassSession[]
-  medipass_access_logs    MediPassAccessLog[]
+  profile                  Profile                 @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+  appointments             Appointment[]
+  reviews                  Review[]
+  clinical_record_entries  ClinicalRecordEntry[]
+  documents                PatientDocument[]
+  chain_head_snapshot      ChainHeadSnapshot?
+  conversations            Conversation[]
+  medipass_codes           MediPassCode[]
+  medipass_sessions        MediPassSession[]
+  medipass_access_logs     MediPassAccessLog[]
+  medipass_emergency_cards MediPassEmergencyCard[]
 
   @@map("patients")
 }
@@ -697,7 +698,10 @@ model MediPassCode {
 model MediPassSession {
   id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   patient_id            String    @db.Uuid
-  medipass_code_id      String    @db.Uuid
+  /// Por dónde entró el consultante: el código rotativo **o** la tarjeta de
+  /// emergencia (ENG-176). Exactamente uno de los dos, por CHECK en la base.
+  medipass_code_id      String?   @db.Uuid
+  emergency_card_id     String?   @db.Uuid
   consultant_profile_id String?   @db.Uuid
   consultant_name       String?
   consultant_license    String?   @db.VarChar(30)
@@ -712,14 +716,39 @@ model MediPassSession {
   /// viven solo en la migración, Prisma no los modela: no los borres al regenerar.
   closed_at             DateTime? @db.Timestamptz(6)
 
-  patient     Patient             @relation(fields: [patient_id], references: [profile_id])
-  code        MediPassCode        @relation(fields: [medipass_code_id], references: [id])
-  consultant  Profile?            @relation("MediPassConsultant", fields: [consultant_profile_id], references: [id])
-  revoker     Profile?            @relation("MediPassRevoker", fields: [revoked_by], references: [id])
+  patient     Patient                @relation(fields: [patient_id], references: [profile_id])
+  code        MediPassCode?          @relation(fields: [medipass_code_id], references: [id], onDelete: Restrict)
+  card        MediPassEmergencyCard? @relation(fields: [emergency_card_id], references: [id], onDelete: Restrict)
+  consultant  Profile?               @relation("MediPassConsultant", fields: [consultant_profile_id], references: [id])
+  revoker     Profile?               @relation("MediPassRevoker", fields: [revoked_by], references: [id])
   access_logs MediPassAccessLog[]
 
   @@index([patient_id, expires_at])
   @@map("medipass_sessions")
+}
+
+/// Tarjeta de emergencia del MediPass (ENG-176): un QR **fijo** que el paciente
+/// imprime o lleva en la billetera, para que lo atiendan aunque esté
+/// inconsciente o sin el celular. Canjearla abre una sesión de 30 minutos igual
+/// que el código rotativo.
+///
+/// Del token se guarda solo el SHA-256: a diferencia del código rotativo no hace
+/// falta volver a mostrarlo, solo verificarlo, y una copia de la base no tiene
+/// que alcanzar para abrir fichas. Regenerarla o desactivarla marca
+/// `revoked_at` y corta los accesos abiertos con esa tarjeta. Una sola activa
+/// por paciente (índice único parcial, solo en la migración).
+model MediPassEmergencyCard {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id String    @db.Uuid
+  token_hash String    @unique @db.Char(64)
+  created_at DateTime  @default(now()) @db.Timestamptz(6)
+  revoked_at DateTime? @db.Timestamptz(6)
+
+  patient  Patient           @relation(fields: [patient_id], references: [profile_id], onDelete: Cascade)
+  sessions MediPassSession[]
+
+  @@index([patient_id, created_at(sort: Desc)])
+  @@map("medipass_emergency_cards")
 }
 
 /// Auditoría de accesos dentro de una sesión MediPass. Append-only por trigger

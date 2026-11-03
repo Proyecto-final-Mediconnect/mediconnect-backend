@@ -6,14 +6,26 @@ import {
   Matches,
   MaxLength,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
-import { CODE_ALPHABET, CODE_LENGTH } from '../medipass.config';
+import {
+  CARD_TOKEN_LENGTH,
+  CODE_ALPHABET,
+  CODE_LENGTH,
+} from '../medipass.config';
 
 /** El código tal como tiene que llegar: `CODE_LENGTH` caracteres del alfabeto. */
 // Armada con constantes del código, no con input de nadie (ENG-166).
 // eslint-disable-next-line security/detect-non-literal-regexp
 export const CODIGO_PATTERN = new RegExp(
   `^[${CODE_ALPHABET}]{${CODE_LENGTH}}$`,
+);
+
+/** Token de la tarjeta de emergencia (ENG-176): base64url de `CARD_TOKEN_LENGTH`. */
+// Armada con constantes del código, no con input de nadie (ENG-166).
+// eslint-disable-next-line security/detect-non-literal-regexp
+export const TARJETA_PATTERN = new RegExp(
+  `^[A-Za-z0-9_-]{${CARD_TOKEN_LENGTH}}$`,
 );
 
 /** Saca espacios y guiones: el código se dicta y se escribe "BCD2-3FGH". */
@@ -49,6 +61,12 @@ function recortar(value: unknown): unknown {
  * vez de corregir el tipeo.
  */
 export class OpenEmergencySessionDto {
+  /**
+   * El código rotativo que muestra la pantalla del paciente. Obligatorio salvo
+   * que venga `tarjeta`: se entra por uno de los dos, nunca por ambos (eso lo
+   * rechaza `MediPassService.openSession` con 400).
+   */
+  @ValidateIf((o: OpenEmergencySessionDto) => o.tarjeta === undefined)
   @Transform(({ value }) => normalizarCodigo(value))
   @IsString({ message: 'El código es obligatorio' })
   @Length(CODE_LENGTH, CODE_LENGTH, {
@@ -57,7 +75,22 @@ export class OpenEmergencySessionDto {
   @Matches(CODIGO_PATTERN, {
     message: 'El código tiene caracteres que no corresponden',
   })
-  codigo!: string;
+  codigo?: string;
+
+  /**
+   * El token de la tarjeta de emergencia (ENG-176), el QR fijo que el paciente
+   * lleva impreso. Llega en el fragmento de la URL (`#tarjeta=...`), que el
+   * navegador no manda a ningún servidor ni deja en ningún log, y la web lo pasa
+   * acá. No se normaliza: es base64url y distingue mayúsculas.
+   *
+   * Un token mal formado es un 400 por el mismo motivo que el código: es algo
+   * que quien consulta puede revisar. Uno bien formado que no existe o se
+   * desactivó es el mismo 404 genérico.
+   */
+  @ValidateIf((o: OpenEmergencySessionDto) => o.tarjeta !== undefined)
+  @IsString({ message: 'La tarjeta no es válida' })
+  @Matches(TARJETA_PATTERN, { message: 'La tarjeta no es válida' })
+  tarjeta?: string;
 
   /**
    * Quién está mirando. **Obligatorio**: el historial de accesos (HU-38,

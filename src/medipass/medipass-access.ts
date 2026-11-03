@@ -32,6 +32,8 @@ export interface MediPassAccess {
    * hasta que la sesión efectivamente cae.
    */
   minutosRestantes: number;
+  /** Por dónde entró: el código rotativo o la tarjeta de emergencia (ENG-176). */
+  origen: 'CODIGO' | 'TARJETA';
 }
 
 /**
@@ -47,6 +49,7 @@ export const ACCESS_SELECT = {
   consultant_license: true,
   started_at: true,
   expires_at: true,
+  emergency_card_id: true,
 } as const;
 
 /** Fila de `medipass_sessions` con lo que selecciona `ACCESS_SELECT`. */
@@ -56,6 +59,7 @@ export type AccessSource = {
   consultant_license: string | null;
   started_at: Date;
   expires_at: Date;
+  emergency_card_id?: string | null;
 };
 
 /**
@@ -84,5 +88,6 @@ export function toMediPassAccess(
     // `max(0, ...)` por si la fila se venció entre la consulta y el mapeo: un
     // número negativo en la pantalla sería un bug visible.
     minutosRestantes: Math.max(0, Math.ceil(restanteMs / 60_000)),
+    origen: row.emergency_card_id ? 'TARJETA' : 'CODIGO',
   };
 }
