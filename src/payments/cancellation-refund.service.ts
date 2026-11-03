@@ -40,8 +40,14 @@ interface RefundableAppointment {
     amount: Prisma.Decimal;
     status: string;
     mercadopago_payment_id: string | null;
+    /** La devolución entera que anotó el webhook (ENG-180), si la hay. */
+    refunds: { amount: Prisma.Decimal; status: RefundOutcome }[];
   } | null;
 }
+
+/** `reason` del pago aprobado sobre un turno ya cancelado o liberado. */
+const INACTIVE_APPOINTMENT_REASON: UnappliedPaymentReason =
+  'PAGO_SOBRE_TURNO_INACTIVO';
 
 const REFUNDABLE_SELECT = {
   id: true,
@@ -55,6 +61,12 @@ const REFUNDABLE_SELECT = {
       amount: true,
       status: true,
       mercadopago_payment_id: true,
+      // Viaja en la misma consulta del turno: evita un viaje más por cancelación.
+      refunds: {
+        where: { reason: { startsWith: `${INACTIVE_APPOINTMENT_REASON}:` } },
+        select: { amount: true, status: true },
+        take: 1,
+      },
     },
   },
 } as const;
@@ -285,6 +297,10 @@ export class CancellationRefundService {
     now: Date,
   ): Promise<CancellationRefund> {
     const appointment = await this.read(appointmentId);
+
+    const unapplied = this.unappliedRefundOf(appointment?.payment);
+    if (unapplied) return unapplied;
+
     const { percent, amount } = this.compute(appointment, now);
     const payment = appointment?.payment;
 
@@ -366,6 +382,36 @@ export class CancellationRefundService {
     }
 
     return { percent, amount: amount.toNumber(), status };
+  }
+
+  /**
+   * La devolución entera que el webhook ya anotó para este pago, si se aprobó
+   * cuando el turno ya estaba cancelado (ENG-180).
+   *
+   * Pasa cuando el pago entra justo mientras el paciente cancela una reserva
+   * sin pagar: el UPDATE de `cancel` gana, el webhook ve el turno cancelado y
+   * anota `PAGO_SOBRE_TURNO_INACTIVO` **en el mismo commit en que aprueba el
+   * pago**. Así que si acá el pago se ve `APROBADO`, esa fila ya está: pedir
+   * además la devolución de la política sería devolver dos veces. Se informa la
+   * del webhook, que es la del total.
+   *
+   * No hace falta un lock: el orden inverso no existe, porque sin el commit del
+   * webhook el pago no está aprobado y la cancelación no tiene nada que
+   * devolver. La fila viene con el turno (`REFUNDABLE_SELECT`), en una sola
+   * lectura; el índice único parcial `refunds_payment_reason_uq` (ENG-144)
+   * garantiza a lo sumo una por pago.
+   */
+  private unappliedRefundOf(
+    payment: RefundableAppointment['payment'] | undefined,
+  ): CancellationRefund | null {
+    const refund = payment?.refunds[0];
+    if (!refund) return null;
+
+    return {
+      percent: 100,
+      amount: refund.amount.toNumber(),
+      status: refund.status,
+    };
   }
 
   private async read(

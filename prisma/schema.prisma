@@ -91,6 +91,7 @@ enum notification_type {
   RESENA_MODERADA
   TURNO_CANCELADO
   TURNO_REPROGRAMADO
+  MEDIPASS_ACCESO
 }
 
 enum notification_channel {
@@ -177,6 +178,8 @@ model Patient {
   medications       Json?   @db.JsonB
   conditions        Json?   @db.JsonB
   emergency_contact Json?   @db.JsonB
+  // Qué bloques ve un consultante externo (ENG-149). `null` = todo visible.
+  medipass_scope    Json?   @db.JsonB
 
   profile                 Profile               @relation(fields: [profile_id], references: [id], onDelete: Cascade)
   appointments            Appointment[]
@@ -507,6 +510,7 @@ model Refund {
 
   payment Payment @relation(fields: [payment_id], references: [id])
 
+  @@index([payment_id])
   @@map("refunds")
 }
 

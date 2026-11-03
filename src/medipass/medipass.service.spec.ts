@@ -11,6 +11,7 @@ import {
   CODE_LENGTH,
   CODE_MAX_ATTEMPTS,
 } from './medipass.config';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { MediPassService } from './medipass.service';
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
@@ -24,7 +25,7 @@ const PATIENT_ROW = {
 };
 
 type PrismaMock = {
-  patient: { findUnique: jest.Mock };
+  patient: { findUnique: jest.Mock; update: jest.Mock };
   mediPassCode: {
     findFirst: jest.Mock;
     updateMany: jest.Mock;
@@ -46,10 +47,14 @@ type PrismaMock = {
 describe('MediPassService', () => {
   let prisma: PrismaMock;
   let service: MediPassService;
+  let inApp: { notifyMediPassAccess: jest.Mock };
 
   beforeEach(() => {
     prisma = {
-      patient: { findUnique: jest.fn().mockResolvedValue(PATIENT_ROW) },
+      patient: {
+        findUnique: jest.fn().mockResolvedValue(PATIENT_ROW),
+        update: jest.fn().mockResolvedValue({}),
+      },
       mediPassCode: {
         findFirst: jest.fn(),
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -71,7 +76,11 @@ describe('MediPassService', () => {
     prisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
       fn(prisma),
     );
-    service = new MediPassService(prisma as unknown as PrismaService);
+    inApp = { notifyMediPassAccess: jest.fn().mockResolvedValue(undefined) };
+    service = new MediPassService(
+      prisma as unknown as PrismaService,
+      inApp as unknown as InAppNotificationsService,
+    );
   });
 
   describe('getMyCode', () => {
@@ -198,6 +207,22 @@ describe('MediPassService', () => {
       expect(sesion.data.consultant_license).toBe('MP 12345');
     });
 
+    it('le avisa al paciente quién abrió su MediPass (ENG-177)', async () => {
+      prisma.mediPassCode.findFirst.mockResolvedValue(codeVigente());
+
+      const res = await service.openSession(dto);
+
+      expect(inApp.notifyMediPassAccess).toHaveBeenCalledWith(
+        PATIENT,
+        {
+          sesionId: res.sesionId,
+          consultante: 'Dra. Paula Ferrer',
+          matricula: 'MP 12345',
+        },
+        expect.any(Date),
+      );
+    });
+
     it('la sesión y su entrada en la bitácora van en la misma transacción', async () => {
       // Un acceso que no quedó registrado es exactamente el que el paciente no
       // puede auditar: no pueden entrar por separado.
@@ -297,6 +322,96 @@ describe('MediPassService', () => {
         20_000,
       );
       expect(prisma.$executeRaw).toHaveBeenCalledTimes(20);
+  describe('scope (ENG-149)', () => {
+    const ALERGICA = {
+      ...PATIENT_ROW,
+      blood_type: '0+',
+      allergies: [{ que: 'Penicilina', gravedad: 'Anafilaxia' }],
+      medications: [{ droga: 'Enalapril', dosis: '10 mg' }],
+    };
+
+    it('sin configurar devuelve todo visible', async () => {
+      await expect(service.getMyScope(PATIENT)).resolves.toEqual({
+        grupoSanguineo: true,
+        alergias: true,
+        medicacion: true,
+        condiciones: true,
+        contacto: true,
+      });
+    });
+
+    it('test_should_persist_scope_given_patient_updates_it', async () => {
+      const scope = {
+        grupoSanguineo: true,
+        alergias: true,
+        medicacion: false,
+        condiciones: true,
+        contacto: false,
+      };
+
+      await expect(service.updateMyScope(PATIENT, scope)).resolves.toEqual(
+        scope,
+      );
+      // Solo la fila del paciente del JWT.
+      expect(prisma.patient.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { profile_id: PATIENT },
+          data: expect.objectContaining({ medipass_scope: scope }),
+        }),
+      );
+    });
+
+    it('el consultante no ve un bloque apagado al canjear el código', async () => {
+      prisma.mediPassCode.findFirst.mockResolvedValue({
+        id: CODE_ID,
+        patient_id: PATIENT,
+        used_at: null,
+        patient: { ...ALERGICA, medipass_scope: { medicacion: false } },
+      });
+
+      const res = await service.openSession({
+        codigo: 'BCD23FGH',
+        nombre: 'Dra. Ferrer',
+      });
+
+      expect('medicacion' in res.vital).toBe(false);
+      expect(res.vital.alergias).toHaveLength(1);
+    });
+
+    it('un cambio de scope llega a la sesión ya abierta en el próximo refresco', async () => {
+      prisma.mediPassSession.findUnique.mockResolvedValue({
+        expires_at: new Date(Date.now() + 600_000),
+        revoked_at: null,
+        patient: { ...ALERGICA, medipass_scope: { alergias: false } },
+      });
+
+      const res = await service.getSessionStatus(SESSION);
+
+      expect('alergias' in res.vital).toBe(false);
+      expect(res.vital.medicacion).toHaveLength(1);
+    });
+
+    it('test_should_reject_scope_update_given_patient_without_profile', async () => {
+      // P2025: el `where` no matcheó, no hay fila de `patients`.
+      prisma.patient.update.mockRejectedValue({ code: 'P2025' });
+
+      await expect(
+        service.updateMyScope(PATIENT, {
+          grupoSanguineo: true,
+          alergias: true,
+          medicacion: true,
+          condiciones: true,
+          contacto: true,
+        }),
+      ).rejects.toThrow(/completá tu perfil/i);
+    });
+
+    it('test_should_reject_scope_read_given_patient_without_profile', async () => {
+      prisma.patient.findUnique.mockResolvedValue(null);
+
+      await expect(service.getMyScope(PATIENT)).rejects.toThrow(
+        /completá tu perfil/i,
+      );
     });
   });
 
