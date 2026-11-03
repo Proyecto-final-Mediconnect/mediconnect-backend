@@ -704,6 +704,12 @@ model MediPassSession {
   revoked_at            DateTime? @db.Timestamptz(6)
   revoked_by            String?   @db.Uuid
   started_at            DateTime  @default(now()) @db.Timestamptz(6)
+  /// Cuándo se cerró (ENG-104): `revoked_at` si se cortó, `expires_at` si venció.
+  /// Lo completa el job; las lecturas no dependen de él. Es informativo: puede
+  /// quedar en null hasta 5 min después del cierre real, así que no se usa para
+  /// autorizar (eso es `expires_at`/`revoked_at`). Sus índices son parciales y
+  /// viven solo en la migración, Prisma no los modela: no los borres al regenerar.
+  closed_at             DateTime? @db.Timestamptz(6)
 
   patient     Patient             @relation(fields: [patient_id], references: [profile_id])
   code        MediPassCode        @relation(fields: [medipass_code_id], references: [id])

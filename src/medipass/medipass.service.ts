@@ -77,6 +77,10 @@ export interface MediPassHistoryResponse {
 /** Accesos por página del historial. */
 const HISTORY_PAGE_SIZE = 10;
 
+/** Sesiones que cierra cada UPDATE del job, y tope de UPDATEs por corrida. */
+const CLOSE_BATCH = 1000;
+const CLOSE_MAX_BATCHES = 20;
+
 /** Forma de un UUID v4, para no pegarle a la base con cualquier cosa. */
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -245,6 +249,50 @@ export class MediPassService {
       throw err;
     }
     return scope;
+  }
+
+  /**
+   * Cierra los accesos que vencieron o se cortaron (ENG-104): completa
+   * `closed_at` con `revoked_at` o con `expires_at`, lo que haya pasado antes.
+   * Lo llama el job cada 5 minutos.
+   *
+   * Es idempotente (solo toca las que siguen con `closed_at` en null) y no es
+   * lo que impide ver una sesión vencida: eso ya lo hace cada lectura contra el
+   * reloj del servidor.
+   *
+   * **`closed_at` es informativo, no autoriza nada.** Puede quedar desfasado
+   * hasta 5 minutos (una sesión ya vencida o cortada y todavía en null hasta la
+   * próxima corrida), así que para decidir si un acceso sigue abierto hay que
+   * mirar `expires_at` y `revoked_at`.
+   *
+   * Trabaja de a `CLOSE_BATCH` filas, con un tope de vueltas por corrida: la
+   * primera corrida después del deploy tiene que cerrar todo el histórico y no
+   * puede pasarse del `--max-time 60` del workflow. Lo que no entre queda para
+   * la corrida siguiente y converge solo.
+   *
+   * Un SQL y no `updateMany` porque el valor sale de otra columna de la misma
+   * fila. Las dos condiciones van en un `union` y no en un `or` para que cada
+   * una use su índice parcial (ver la migración de ENG-104).
+   */
+  async closeExpiredSessions(now: Date = new Date()): Promise<number> {
+    let total = 0;
+    for (let i = 0; i < CLOSE_MAX_BATCHES; i++) {
+      const cerradas = await this.prisma.$executeRaw`
+        update medipass_sessions
+           set closed_at = least(coalesce(revoked_at, expires_at), expires_at)
+         where id in (
+           select id from (
+             select id from medipass_sessions
+              where closed_at is null and expires_at <= ${now}
+             union
+             select id from medipass_sessions
+              where closed_at is null and revoked_at is not null
+           ) abiertas
+           limit ${CLOSE_BATCH})`;
+      total += cerradas;
+      if (cerradas < CLOSE_BATCH) break;
+    }
+    return total;
   }
 
   /**

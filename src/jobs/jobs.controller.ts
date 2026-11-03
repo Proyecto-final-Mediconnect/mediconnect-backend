@@ -6,6 +6,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { UnpaidReleaseService } from '../appointments/unpaid-release.service';
+import { MediPassService } from '../medipass/medipass.service';
 import {
   AppointmentNotificationsService,
   type SendSummary,
@@ -27,6 +28,7 @@ export class JobsController {
   constructor(
     private readonly unpaidRelease: UnpaidReleaseService,
     private readonly notifications: AppointmentNotificationsService,
+    private readonly medipass: MediPassService,
   ) {}
 
   /** ENG-101: libera los turnos que no se pagaron en 15 minutos. */
@@ -42,5 +44,15 @@ export class JobsController {
   @HttpCode(HttpStatus.OK)
   sendAppointmentReminders(): Promise<SendSummary> {
     return this.notifications.sendDue();
+  }
+
+  /**
+   * Deja escrito el cierre de los accesos al MediPass que vencieron o se
+   * cortaron (ENG-104). Idempotente: correrlo dos veces no cambia nada.
+   */
+  @Post('close-expired-medipass-sessions')
+  @HttpCode(HttpStatus.OK)
+  async closeExpiredMediPassSessions(): Promise<{ closed: number }> {
+    return { closed: await this.medipass.closeExpiredSessions() };
   }
 }

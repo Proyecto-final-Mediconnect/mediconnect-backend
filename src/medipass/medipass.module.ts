@@ -18,5 +18,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
   imports: [NotificationsModule],
   controllers: [MediPassController, MediPassSessionsController],
   providers: [MediPassService],
+  // El job de cierre de accesos vencidos (ENG-104).
+  exports: [MediPassService],
 })
 export class MediPassModule {}

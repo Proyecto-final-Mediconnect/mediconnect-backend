@@ -8,6 +8,9 @@ name: Scheduled Jobs
 #   en 15 minutos.
 # - send-appointment-reminders (ENG-68): confirmaciones pendientes y
 #   recordatorios a 24 h y a 1 h por email.
+# - close-expired-medipass-sessions (ENG-104): deja escrito el cierre de los
+#   accesos al MediPass que vencieron (30 min) o se cortaron. Las lecturas ya
+#   los rechazan aunque este job no haya pasado.
 #
 # Secrets que necesita (Settings → Secrets and variables → Actions):
 #   - RENDER_BACKEND_URL  el mismo que usa keepalive.yml.
@@ -58,6 +61,19 @@ jobs:
           curl -fsS --max-time 60 --retry 3 --retry-all-errors
           -X POST -H "Authorization: Bearer $JOBS_SECRET"
           "$RENDER_BACKEND_URL/internal/jobs/send-appointment-reminders"
+        env:
+          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
+          JOBS_SECRET: ${{ secrets.JOBS_SECRET }}
+
+  close-expired-medipass-sessions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cerrar accesos vencidos al MediPass
+        run: >-
+          curl -fsS --max-time 60 --retry 3 --retry-all-errors
+          -X POST -H "Authorization: Bearer $JOBS_SECRET"
+          "$RENDER_BACKEND_URL/internal/jobs/close-expired-medipass-sessions"
         env:
           RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
           JOBS_SECRET: ${{ secrets.JOBS_SECRET }}
