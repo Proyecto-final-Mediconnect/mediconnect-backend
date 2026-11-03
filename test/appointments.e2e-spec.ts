@@ -113,6 +113,7 @@ describe('Turnos (e2e)', () => {
           },
         ]),
       },
+      refund: { findMany: jest.fn().mockResolvedValue([]) },
       scheduleRule: { findMany: jest.fn().mockResolvedValue([RULE_ROW]) },
       scheduleBlock: { findMany: jest.fn().mockResolvedValue([]) },
       appointment: {

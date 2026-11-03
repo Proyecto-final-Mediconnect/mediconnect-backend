@@ -225,6 +225,34 @@ describe('PaymentWebhookService', () => {
       });
     });
 
+    it('el pago se aprueba y la fila de reembolso se anota en la misma transacción (invariante ENG-180)', async () => {
+      // `tx` distinto de `prisma`: lo que no pase por él quedaría fuera del commit.
+      const tx = {
+        payment: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+        appointment: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+        refund: { create: jest.fn().mockResolvedValue({ id: 'ref-1' }) },
+      };
+      prisma.$transaction.mockImplementation((fn: (t: unknown) => unknown) =>
+        fn(tx),
+      );
+
+      await service.handle(signed(), SECRET, NOW);
+
+      expect(tx.payment.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'APROBADO' }),
+        }),
+      );
+      expect(tx.refund.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          payment_id: 'pay-1',
+          reason: `PAGO_SOBRE_TURNO_INACTIVO:${MP_PAYMENT_ID}`,
+        }),
+      });
+      expect(prisma.payment.updateMany).not.toHaveBeenCalled();
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+    });
+
     it('si el proceso murió antes de devolver, el reintento ya-procesado lo completa', async () => {
       prisma.payment.updateMany.mockResolvedValue({ count: 0 });
       prisma.payment.findUnique

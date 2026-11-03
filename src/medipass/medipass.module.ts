@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { MediPassSessionsController } from './medipass-sessions.controller';
 import { MediPassController } from './medipass.controller';
 import { MediPassService } from './medipass.service';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 /**
  * MediPass (EP-05).
@@ -13,7 +14,11 @@ import { MediPassService } from './medipass.service';
  * equivocado sin darse cuenta.
  */
 @Module({
+  // El aviso al paciente cuando alguien abre su MediPass (ENG-177).
+  imports: [NotificationsModule],
   controllers: [MediPassController, MediPassSessionsController],
   providers: [MediPassService],
+  // El job de cierre de accesos vencidos (ENG-104).
+  exports: [MediPassService],
 })
 export class MediPassModule {}

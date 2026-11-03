@@ -29,7 +29,7 @@ describe('Historia clínica (e2e)', () => {
   let publicKey: CryptoKey;
   let prisma: {
     appointment: { findFirst: jest.Mock };
-    auditLog: { create: jest.Mock };
+    auditLog: { create: jest.Mock; findMany: jest.Mock };
     consultation: { findFirst: jest.Mock };
     professional: { findMany: jest.Mock };
     clinicalRecordEntry: {
@@ -55,7 +55,10 @@ describe('Historia clínica (e2e)', () => {
       // ENG-60 audita cada lectura de una HC. Sin este mock, el `create` seria
       // undefined y el GET contestaria 500, que es justamente el fallo cerrado
       // que el service tiene por diseno.
-      auditLog: { create: jest.fn().mockResolvedValue({ id: 'audit-1' }) },
+      auditLog: {
+        create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
       consultation: {
         findFirst: jest.fn().mockResolvedValue({ id: 'consulta-1' }),
       },
@@ -150,6 +153,79 @@ describe('Historia clínica (e2e)', () => {
 
   const url = (id: string = PATIENT) => `/patients/${id}/clinical-record`;
   const body = { entryType: 'CONSULTA', reason: 'Control de rutina' };
+
+  describe('GET /patients/me/clinical-record/accesses (ENG-165)', () => {
+    it('sin token no devuelve nada', async () => {
+      await request(app.getHttpServer())
+        .get('/patients/me/clinical-record/accesses')
+        .expect(401);
+    });
+
+    it('devuelve los accesos a la HC del paciente del token, con la forma del contrato', async () => {
+      prisma.auditLog.findMany.mockResolvedValue([
+        {
+          id: 'log-1',
+          created_at: new Date('2026-10-30T12:00:00.000Z'),
+          actor: {
+            professional: {
+              first_name: 'Ana',
+              last_name: 'García',
+              license_number: 'MP 45120',
+              specialties: [{ specialty: { name: 'Cardiología' } }],
+            },
+          },
+        },
+      ]);
+      const token = await signToken(PATIENT);
+
+      await request(app.getHttpServer())
+        .get('/patients/me/clinical-record/accesses')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200)
+        .expect({
+          accesos: [
+            {
+              id: 'log-1',
+              profesional: {
+                nombre: 'Ana García',
+                especialidad: 'Cardiología',
+                matricula: 'MP 45120',
+              },
+              el: '2026-10-30T12:00:00.000Z',
+            },
+          ],
+          pagina: 1,
+          hayMas: false,
+        });
+      const { where } = prisma.auditLog.findMany.mock.calls[0][0] as {
+        where: { resource_id: string };
+      };
+      expect(where.resource_id).toBe(PATIENT);
+    });
+
+    it('una página inválida es 400 y no llega a la base', async () => {
+      const token = await signToken(PATIENT);
+
+      await request(app.getHttpServer())
+        .get('/patients/me/clinical-record/accesses?pagina=0')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+      expect(prisma.auditLog.findMany).not.toHaveBeenCalled();
+    });
+
+    it.each(['1001', 'abc'])(
+      'pagina=%s es 400 y no llega a la base',
+      async (pagina) => {
+        const token = await signToken(PATIENT);
+
+        await request(app.getHttpServer())
+          .get(`/patients/me/clinical-record/accesses?pagina=${pagina}`)
+          .set('Authorization', `Bearer ${token}`)
+          .expect(400);
+        expect(prisma.auditLog.findMany).not.toHaveBeenCalled();
+      },
+    );
+  });
 
   describe('POST', () => {
     it('sin token devuelve 401 y no escribe nada', async () => {

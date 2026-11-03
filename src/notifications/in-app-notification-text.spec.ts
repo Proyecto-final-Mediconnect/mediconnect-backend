@@ -4,6 +4,21 @@ import { renderInAppNotification } from './in-app-notification-text';
 describe('renderInAppNotification', () => {
   const SCHEDULED = '2026-10-23T13:30:00.000Z'; // viernes 10:30 en AR
 
+  it('acceso al MediPass: dice quién entró y qué hacer si no lo reconoce (ENG-177)', () => {
+    expect(
+      renderInAppNotification('MEDIPASS_ACCESO', {
+        consultante: 'Dra. Paula Ferrer',
+        matricula: 'MP 12345',
+      }),
+    ).toEqual({
+      title: 'Abrieron tu MediPass',
+      body: 'Alguien que dijo ser Dra. Paula Ferrer (matrícula MP 12345) abrió tu MediPass con tu código. Si no lo reconocés, cortale el acceso.',
+    });
+    expect(renderInAppNotification('MEDIPASS_ACCESO', {}).body).toMatch(
+      /^Alguien abrió/,
+    );
+  });
+
   it('turno pagado: nombra al paciente y la fecha en hora de Argentina', () => {
     expect(
       renderInAppNotification('PAGO_CONFIRMADO', {
