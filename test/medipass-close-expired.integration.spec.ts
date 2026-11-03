@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '../generated/prisma';
 import { MediPassService } from '../src/medipass/medipass.service';
+import type { InAppNotificationsService } from '../src/notifications/in-app-notifications.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -15,7 +16,11 @@ import type { PrismaService } from '../src/prisma/prisma.service';
  */
 describe('Cierre de accesos vencidos al MediPass (integration)', () => {
   const prisma = new PrismaClient();
-  const service = new MediPassService(prisma as unknown as PrismaService);
+  // El cierre no avisa a nadie: el servicio de avisos in-app no se usa acá.
+  const service = new MediPassService(
+    prisma as unknown as PrismaService,
+    {} as InAppNotificationsService,
+  );
   const PATIENT = randomUUID();
   let codeId: string;
 

@@ -322,6 +322,9 @@ describe('MediPassService', () => {
         20_000,
       );
       expect(prisma.$executeRaw).toHaveBeenCalledTimes(20);
+    });
+  });
+
   describe('scope (ENG-149)', () => {
     const ALERGICA = {
       ...PATIENT_ROW,
