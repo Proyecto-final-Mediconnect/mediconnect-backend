@@ -49,7 +49,7 @@
     "class-validator": "^0.15.1",
     "cookie-parser": "^1.4.7",
     "helmet": "^8.3.0",
-    "jose": "^6.2.3",
+    "jose": "^6.2.14",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },
