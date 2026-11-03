@@ -40,6 +40,8 @@ const ESCRITURAS: Record<string, ('INSERT' | 'UPDATE' | 'DELETE')[]> = {
   patients: ['UPDATE'],
   payment_webhook_events: ['INSERT', 'UPDATE'],
   payments: ['INSERT', 'UPDATE'],
+  // ENG-86: la baja saca al profesional del catálogo.
+  professionals: ['UPDATE'],
   profiles: ['UPDATE'],
   push_tokens: ['DELETE'],
   refunds: ['INSERT', 'UPDATE'],
