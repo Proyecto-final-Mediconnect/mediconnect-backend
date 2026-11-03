@@ -63,7 +63,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # El commit exacto que pasó CI, no la punta de main. Sin esto, un merge
           # que entra mientras este job corre haría que se apliquen migraciones
