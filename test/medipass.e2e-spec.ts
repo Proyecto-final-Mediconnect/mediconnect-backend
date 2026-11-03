@@ -37,6 +37,7 @@ describe('MediPass (e2e)', () => {
   let privateKey: CryptoKey;
 
   const patientFindUnique = jest.fn();
+  const patientUpdate = jest.fn();
   const codeFindFirst = jest.fn();
   const codeCreate = jest.fn();
   const codeUpdateMany = jest.fn();
@@ -53,6 +54,7 @@ describe('MediPass (e2e)', () => {
   beforeEach(async () => {
     [
       patientFindUnique,
+      patientUpdate,
       codeFindFirst,
       codeCreate,
       codeUpdateMany,
@@ -70,7 +72,7 @@ describe('MediPass (e2e)', () => {
 
     const prismaMock = {
       ...legalAcceptedPrismaMock(),
-      patient: { findUnique: patientFindUnique },
+      patient: { findUnique: patientFindUnique, update: patientUpdate },
       mediPassCode: {
         findFirst: codeFindFirst,
         create: codeCreate,
@@ -186,6 +188,61 @@ describe('MediPass (e2e)', () => {
           expect(res.body.grupoSanguineo).toBeNull();
           expect(res.body.contacto).toBeNull();
         });
+    });
+  });
+
+  describe('/medipass/me/scope (ENG-149)', () => {
+    const TODO = {
+      grupoSanguineo: true,
+      alergias: true,
+      medicacion: true,
+      condiciones: true,
+      contacto: true,
+    };
+
+    it('sin token no devuelve nada', async () => {
+      await request(app.getHttpServer()).get('/medipass/me/scope').expect(401);
+    });
+
+    it('sin configurar devuelve todo visible', async () => {
+      const token = await signToken();
+
+      await request(app.getHttpServer())
+        .get('/medipass/me/scope')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200)
+        .expect(TODO);
+    });
+
+    it('guarda el scope del propio paciente', async () => {
+      const token = await signToken();
+      patientUpdate.mockResolvedValue({});
+
+      await request(app.getHttpServer())
+        .put('/medipass/me/scope')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ ...TODO, medicacion: false })
+        .expect(200)
+        .expect({ ...TODO, medicacion: false });
+      expect(patientUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { profile_id: SUB } }),
+      );
+    });
+
+    it('un bloque que no es booleano o falta es 400 y no llega a la base', async () => {
+      const token = await signToken();
+
+      await request(app.getHttpServer())
+        .put('/medipass/me/scope')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ ...TODO, alergias: 'no' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .put('/medipass/me/scope')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ alergias: true })
+        .expect(400);
+      expect(patientUpdate).not.toHaveBeenCalled();
     });
   });
 

@@ -177,6 +177,8 @@ model Patient {
   medications       Json?   @db.JsonB
   conditions        Json?   @db.JsonB
   emergency_contact Json?   @db.JsonB
+  // Qué bloques ve un consultante externo (ENG-149). `null` = todo visible.
+  medipass_scope    Json?   @db.JsonB
 
   profile                 Profile               @relation(fields: [profile_id], references: [id], onDelete: Cascade)
   appointments            Appointment[]
