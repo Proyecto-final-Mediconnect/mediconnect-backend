@@ -4,6 +4,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import {
@@ -21,6 +22,13 @@ export const CHAT_ATTACHMENTS_BUCKET = 'chat-attachments';
 
 /** Cuánto vive la URL para abrir un archivo: lo justo para abrirlo. */
 export const ATTACHMENT_URL_TTL_SECONDS = 5 * 60;
+
+/**
+ * Tope de archivos que puede haber mandado una persona en el chat, sumando todas
+ * sus conversaciones. Mismo criterio de costos que los documentos del paciente
+ * (`MAX_TOTAL_BYTES_PER_PATIENT`): evita llenar Storage con subidas repetidas.
+ */
+export const MAX_CHAT_BYTES_PER_USER = 200 * 1024 * 1024;
 
 /** Lo que Multer adjunta del archivo subido. */
 export interface UploadedChatFile {
@@ -78,6 +86,8 @@ export class ChatAttachmentsService {
     // Antes de subir nada: un archivo de una conversación ajena no llega a Storage.
     await this.conversations.assertParticipant(userId, conversationId);
 
+    await this.assertWithinQuota(userId, file.size);
+
     const path = `${conversationId}/${randomUUID()}.${ext}`;
     const storage = this.supabase
       .getServiceClient()
@@ -121,6 +131,23 @@ export class ChatAttachmentsService {
   }
 
   /**
+   * Rechaza el envío si `userId` pasaría el tope de bytes en el chat. No es
+   * atómica contra envíos simultáneos: el rate limit los acota y el tope es de
+   * costos, no de seguridad.
+   */
+  private async assertWithinQuota(userId: string, incomingBytes: number) {
+    const { _sum } = await this.prisma.message.aggregate({
+      where: { sender_id: userId, attachment_url: { not: null } },
+      _sum: { attachment_size: true },
+    });
+    if ((_sum.attachment_size ?? 0) + incomingBytes > MAX_CHAT_BYTES_PER_USER) {
+      throw new UnprocessableEntityException(
+        `Los archivos que mandaste por chat no pueden pasar los ${MAX_CHAT_BYTES_PER_USER / 1024 / 1024} MB en total.`,
+      );
+    }
+  }
+
+  /**
    * Una URL firmada de cinco minutos para abrir el archivo de un mensaje.
    *
    * Un mensaje ajeno, sin archivo o inexistente dan el mismo 404: un 403
@@ -140,7 +167,7 @@ export class ChatAttachmentsService {
         conversation_id: conversationId,
         attachment_url: { not: null },
       },
-      select: { attachment_url: true },
+      select: { attachment_url: true, attachment_mime: true },
     });
     if (!message?.attachment_url) {
       throw new NotFoundException('No encontramos ese archivo.');
@@ -149,7 +176,15 @@ export class ChatAttachmentsService {
     const { data, error } = await this.supabase
       .getClientForToken(accessToken)
       .storage.from(CHAT_ATTACHMENTS_BUCKET)
-      .createSignedUrl(message.attachment_url, ATTACHMENT_URL_TTL_SECONDS);
+      .createSignedUrl(
+        message.attachment_url,
+        ATTACHMENT_URL_TTL_SECONDS,
+        // Un PDF de la contraparte no se renderiza en el navegador (puede traer
+        // JavaScript embebido): se baja y se abre con el visor del dispositivo.
+        message.attachment_mime === 'application/pdf'
+          ? { download: true }
+          : undefined,
+      );
     if (error || !data?.signedUrl) {
       this.logger.error(
         `No se pudo firmar ${message.attachment_url}: ${error?.message ?? 'sin URL'}`,

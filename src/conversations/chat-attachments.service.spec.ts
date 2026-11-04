@@ -3,6 +3,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { SupabaseService } from '../supabase/supabase.service';
@@ -10,6 +11,7 @@ import {
   ATTACHMENT_URL_TTL_SECONDS,
   CHAT_ATTACHMENTS_BUCKET,
   ChatAttachmentsService,
+  MAX_CHAT_BYTES_PER_USER,
 } from './chat-attachments.service';
 import type {
   ChatMessage,
@@ -40,7 +42,7 @@ describe('ChatAttachmentsService', () => {
     assertParticipant: jest.Mock;
     sendWithAttachment: jest.Mock;
   };
-  let prisma: { message: { findFirst: jest.Mock } };
+  let prisma: { message: { findFirst: jest.Mock; aggregate: jest.Mock } };
   let serviceBucket: { upload: jest.Mock; remove: jest.Mock };
   let userBucket: { createSignedUrl: jest.Mock };
   let fromService: jest.Mock;
@@ -51,7 +53,14 @@ describe('ChatAttachmentsService', () => {
       assertParticipant: jest.fn().mockResolvedValue(undefined),
       sendWithAttachment: jest.fn().mockResolvedValue(ENVIADO),
     };
-    prisma = { message: { findFirst: jest.fn() } };
+    prisma = {
+      message: {
+        findFirst: jest.fn(),
+        aggregate: jest
+          .fn()
+          .mockResolvedValue({ _sum: { attachment_size: null } }),
+      },
+    };
     serviceBucket = {
       upload: jest.fn().mockResolvedValue({ error: null }),
       remove: jest.fn().mockResolvedValue({ error: null }),
@@ -183,6 +192,27 @@ describe('ChatAttachmentsService', () => {
       expect(serviceBucket.upload).not.toHaveBeenCalled();
     });
 
+    it('si ya pasó el tope de bytes por usuario, da 422 sin subir nada', async () => {
+      prisma.message.aggregate.mockResolvedValue({
+        _sum: { attachment_size: MAX_CHAT_BYTES_PER_USER - 1 },
+      });
+
+      await expect(
+        service.send(
+          USER,
+          CONVERSATION,
+          archivo(PDF, 'application/pdf'),
+          undefined,
+        ),
+      ).rejects.toBeInstanceOf(UnprocessableEntityException);
+      expect(serviceBucket.upload).not.toHaveBeenCalled();
+      expect(prisma.message.aggregate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { sender_id: USER, attachment_url: { not: null } },
+        }),
+      );
+    });
+
     it('si Storage falla, da 500 sin crear el mensaje', async () => {
       serviceBucket.upload.mockResolvedValue({ error: { message: 'caído' } });
 
@@ -218,7 +248,8 @@ describe('ChatAttachmentsService', () => {
   describe('url', () => {
     it('firma el archivo por cinco minutos con el token de quien pide', async () => {
       prisma.message.findFirst.mockResolvedValue({
-        attachment_url: `${CONVERSATION}/archivo.pdf`,
+        attachment_url: `${CONVERSATION}/archivo.png`,
+        attachment_mime: 'image/png',
       });
 
       const res = await service.url(
@@ -230,8 +261,9 @@ describe('ChatAttachmentsService', () => {
 
       expect(tokenUsado).toBe('token-del-usuario');
       expect(userBucket.createSignedUrl).toHaveBeenCalledWith(
-        `${CONVERSATION}/archivo.pdf`,
+        `${CONVERSATION}/archivo.png`,
         ATTACHMENT_URL_TTL_SECONDS,
+        undefined,
       );
       expect(res.url).toBe('https://storage/firmada');
       expect(prisma.message.findFirst).toHaveBeenCalledWith(
@@ -242,6 +274,21 @@ describe('ChatAttachmentsService', () => {
             attachment_url: { not: null },
           },
         }),
+      );
+    });
+
+    it('un PDF se firma para descargar, no para mostrar en el navegador', async () => {
+      prisma.message.findFirst.mockResolvedValue({
+        attachment_url: `${CONVERSATION}/archivo.pdf`,
+        attachment_mime: 'application/pdf',
+      });
+
+      await service.url(USER, 'token', CONVERSATION, MESSAGE);
+
+      expect(userBucket.createSignedUrl).toHaveBeenCalledWith(
+        `${CONVERSATION}/archivo.pdf`,
+        ATTACHMENT_URL_TTL_SECONDS,
+        { download: true },
       );
     });
 
