@@ -15,6 +15,14 @@ ALTER TABLE "messages" ADD COLUMN IF NOT EXISTS "attachment_mime" TEXT;
 --;;
 ALTER TABLE "messages" ADD COLUMN IF NOT EXISTS "attachment_size" INTEGER;
 --;;
+-- Saneo previo: el CHECK exige texto en los mensajes sin archivo. Los que ya
+-- existen con `content` NULL o en blanco harían fallar el VALIDATE; se les pone
+-- un texto neutro en vez de borrarlos, así no se pierde ninguna fila.
+UPDATE "messages"
+SET "content" = '(mensaje sin texto)'
+WHERE "attachment_url" IS NULL
+  AND coalesce(length(btrim("content")), 0) = 0;
+--;;
 -- Las tres columnas del adjunto van juntas: o están las tres o ninguna. Un
 -- mensaje sin texto tiene que tener archivo, y uno sin archivo, texto.
 ALTER TABLE "messages" DROP CONSTRAINT IF EXISTS "messages_attachment_check";
