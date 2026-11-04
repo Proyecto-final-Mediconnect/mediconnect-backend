@@ -27,6 +27,7 @@ import {
   ChatAttachmentsService,
   type UploadedChatFile,
 } from './chat-attachments.service';
+import { ChatParticipantGuard } from './chat-participant.guard';
 import { ConversationsService } from './conversations.service';
 import { MessagesQueryDto } from './dto/messages-query.dto';
 import { OpenConversationDto } from './dto/open-conversation.dto';
@@ -118,6 +119,8 @@ export class ConversationsController {
   @Post(':id/attachments')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
+  // Participante antes de Multer: el guard corre antes que el interceptor.
+  @UseGuards(ChatParticipantGuard)
   // Un byte más que el tope: lo que pase de 10 MB lo corta Multer, y el mensaje
   // claro lo da el service para el caso justo en el borde.
   @UseInterceptors(
