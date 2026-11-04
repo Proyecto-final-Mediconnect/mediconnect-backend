@@ -101,3 +101,16 @@ export const CANJE_GLOBAL_TRACKER = 'medipass-canje-global';
  * 400 de validación se muestra como "Código inválido o vencido".
  */
 export const CODIGO_INVALIDO = 'Código inválido o vencido.';
+
+/**
+ * Bytes de azar del token de la tarjeta de emergencia (ENG-176).
+ *
+ * 32 bytes son 256 bits: a diferencia del código rotativo, la tarjeta no vence
+ * sola, así que su defensa contra adivinarla no puede ser la ventana corta y
+ * tiene que ser el tamaño del espacio. En base64url quedan 43 caracteres, que
+ * entran sin problema en un QR impreso del tamaño de una tarjeta.
+ */
+export const CARD_TOKEN_BYTES = 32;
+
+/** Largo del token en base64url (sin relleno) para `CARD_TOKEN_BYTES`. */
+export const CARD_TOKEN_LENGTH = Math.ceil((CARD_TOKEN_BYTES * 4) / 3);

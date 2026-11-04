@@ -218,6 +218,7 @@ describe('MediPassService', () => {
           sesionId: res.sesionId,
           consultante: 'Dra. Paula Ferrer',
           matricula: 'MP 12345',
+          origen: 'CODIGO',
         },
         expect.any(Date),
       );
@@ -524,6 +525,7 @@ describe('MediPassService', () => {
           {
             sesionId: SESSION,
             consultante: { nombre: 'Dra. Paula Ferrer', matricula: 'MP-12345' },
+            origen: 'CODIGO',
             inicio: inicio.toISOString(),
             vence: '2026-10-18T14:30:00.000Z',
             revocadoEl: null,

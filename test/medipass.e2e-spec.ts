@@ -13,6 +13,9 @@ const ISSUER = 'https://project-ref.supabase.co/auth/v1';
 const SUB = '11111111-1111-4111-8111-111111111111';
 const CODE_ID = '33333333-3333-4333-8333-333333333333';
 const SESSION_ID = '44444444-4444-4444-8444-444444444444';
+const CARD_ID = '66666666-6666-4666-8666-666666666666';
+/** Un token de tarjeta con la forma real: 43 caracteres base64url. */
+const TARJETA = 'Ab3_-Ab3_-Ab3_-Ab3_-Ab3_-Ab3_-Ab3_-Ab3_-Ab3';
 
 const PATIENT_ROW = {
   first_name: 'Marina',
@@ -46,6 +49,11 @@ describe('MediPass (e2e)', () => {
   const sessionFindUnique = jest.fn();
   const sessionFindMany = jest.fn();
   const accessLogCreate = jest.fn();
+  const cardFindFirst = jest.fn();
+  const cardUpdateMany = jest.fn();
+  const cardCreate = jest.fn();
+  const sessionUpdateMany = jest.fn();
+  const auditLogCreate = jest.fn();
 
   beforeAll(async () => {
     ({ publicKey, privateKey } = await generateKeyPair('ES256'));
@@ -63,7 +71,20 @@ describe('MediPass (e2e)', () => {
       sessionFindUnique,
       sessionFindMany,
       accessLogCreate,
+      cardFindFirst,
+      cardUpdateMany,
+      cardCreate,
+      sessionUpdateMany,
+      auditLogCreate,
     ].forEach((fn) => fn.mockReset());
+
+    cardFindFirst.mockResolvedValue(null);
+    cardUpdateMany.mockResolvedValue({ count: 1 });
+    cardCreate.mockImplementation(({ data }: { data: { created_at: Date } }) =>
+      Promise.resolve({ id: CARD_ID, created_at: data.created_at }),
+    );
+    sessionUpdateMany.mockResolvedValue({ count: 0 });
+    auditLogCreate.mockResolvedValue({});
 
     patientFindUnique.mockResolvedValue(PATIENT_ROW);
     codeUpdateMany.mockResolvedValue({ count: 0 });
@@ -83,8 +104,16 @@ describe('MediPass (e2e)', () => {
         create: sessionCreate,
         findUnique: sessionFindUnique,
         findMany: sessionFindMany,
+        updateMany: sessionUpdateMany,
       },
       mediPassAccessLog: { create: accessLogCreate },
+      // La tarjeta de emergencia (ENG-176).
+      mediPassEmergencyCard: {
+        findFirst: cardFindFirst,
+        updateMany: cardUpdateMany,
+        create: cardCreate,
+      },
+      auditLog: { create: auditLogCreate },
       // El aviso al paciente al abrirse un acceso (ENG-177).
       notification: { create: jest.fn().mockResolvedValue({ id: 'n-1' }) },
       $transaction: (fn: (tx: unknown) => unknown) => fn(prismaMock),
@@ -397,6 +426,105 @@ describe('MediPass (e2e)', () => {
         .post('/medipass/sessions')
         .send({ ...valido, patientId: SUB, expiraEl: '2030-01-01T00:00:00Z' })
         .expect(400);
+    });
+  });
+
+  describe('/medipass/me/emergency-card (ENG-176)', () => {
+    it('sin token no se puede ver, generar ni desactivar', async () => {
+      const server = app.getHttpServer();
+      await request(server).get('/medipass/me/emergency-card').expect(401);
+      await request(server).post('/medipass/me/emergency-card').expect(401);
+      await request(server).delete('/medipass/me/emergency-card').expect(401);
+      expect(cardCreate).not.toHaveBeenCalled();
+    });
+
+    it('GET dice si hay una activa, sin el token', async () => {
+      cardFindFirst.mockResolvedValue({
+        created_at: new Date('2026-11-04T12:00:00.000Z'),
+      });
+
+      await request(app.getHttpServer())
+        .get('/medipass/me/emergency-card')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(200)
+        .expect((res) => {
+          expect(res.body).toEqual({
+            activa: true,
+            creadaEl: '2026-11-04T12:00:00.000Z',
+          });
+        });
+    });
+
+    it('POST la genera y devuelve el token una sola vez', async () => {
+      await request(app.getHttpServer())
+        .post('/medipass/me/emergency-card')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(201)
+        .expect((res) => {
+          expect(res.body.tarjeta).toMatch(/^[A-Za-z0-9_-]{43}$/);
+          expect(typeof res.body.creadaEl).toBe('string');
+        });
+
+      // Siempre del usuario del token, nunca de un id que venga en el pedido.
+      expect(cardCreate.mock.calls[0][0].data.patient_id).toBe(SUB);
+    });
+
+    it('DELETE la desactiva y es idempotente', async () => {
+      await request(app.getHttpServer())
+        .delete('/medipass/me/emergency-card')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(204);
+    });
+  });
+
+  describe('POST /medipass/sessions con la tarjeta (ENG-176)', () => {
+    const conTarjeta = { tarjeta: TARJETA, nombre: 'Dr. Pablo Rivas' };
+
+    it('es público y abre el acceso con la tarjeta', async () => {
+      cardFindFirst.mockResolvedValue({
+        id: CARD_ID,
+        patient_id: SUB,
+        patient: PATIENT_ROW,
+      });
+
+      await request(app.getHttpServer())
+        .post('/medipass/sessions')
+        .send(conTarjeta)
+        .expect(201)
+        .expect((res) => {
+          expect(res.body.vital.nombre).toBe('Marina Ocampo');
+        });
+
+      expect(codeFindFirst).not.toHaveBeenCalled();
+      expect(sessionCreate.mock.calls[0][0].data.emergency_card_id).toBe(
+        CARD_ID,
+      );
+    });
+
+    it('una tarjeta desactivada o inexistente es el mismo 404 que un código', async () => {
+      await request(app.getHttpServer())
+        .post('/medipass/sessions')
+        .send(conTarjeta)
+        .expect(404)
+        .expect((res) => {
+          expect(res.body.message).toBe('Código inválido o vencido.');
+        });
+    });
+
+    it('un token mal formado es 400 y no llega a la base', async () => {
+      await request(app.getHttpServer())
+        .post('/medipass/sessions')
+        .send({ ...conTarjeta, tarjeta: 'corto' })
+        .expect(400);
+      expect(cardFindFirst).not.toHaveBeenCalled();
+    });
+
+    it('código y tarjeta juntos es 400', async () => {
+      await request(app.getHttpServer())
+        .post('/medipass/sessions')
+        .send({ ...conTarjeta, codigo: 'BCD23FGH' })
+        .expect(400);
+      expect(sessionCreate).not.toHaveBeenCalled();
     });
   });
 

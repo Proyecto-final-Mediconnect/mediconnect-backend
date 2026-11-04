@@ -174,7 +174,13 @@ export class InAppNotificationsService {
    */
   async notifyMediPassAccess(
     patientId: string,
-    access: { sesionId: string; consultante: string; matricula: string | null },
+    access: {
+      sesionId: string;
+      consultante: string;
+      matricula: string | null;
+      /** Por dónde entró: el código rotativo o la tarjeta de emergencia (ENG-176). */
+      origen?: 'CODIGO' | 'TARJETA';
+    },
     now: Date = new Date(),
   ): Promise<void> {
     try {

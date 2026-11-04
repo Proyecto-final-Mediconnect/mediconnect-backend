@@ -1,5 +1,6 @@
-import { randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import {
+  BadRequestException,
   ConflictException,
   GoneException,
   Injectable,
@@ -18,6 +19,7 @@ import { OpenEmergencySessionDto } from './dto/open-emergency-session.dto';
 import { UpdateMediPassScopeDto } from './dto/update-medipass-scope.dto';
 import { applyScope, MediPassScope, resolveScope } from './medipass-scope';
 import {
+  CARD_TOKEN_BYTES,
   CODE_ALPHABET,
   CODE_LENGTH,
   CODE_MAX_ATTEMPTS,
@@ -51,6 +53,25 @@ export interface EmergencySessionResponse {
 }
 
 /** `GET /medipass/sessions/:id`: la sesión sigue viva. */
+/** Estado de la tarjeta de emergencia, sin el token (ENG-176). */
+export interface EmergencyCardStatusResponse {
+  activa: boolean;
+  creadaEl: string | null;
+}
+
+/**
+ * La tarjeta recién generada. **Es la única vez que el token sale del
+ * backend**: se guarda solo su hash, así que para reimprimirla hay que generar
+ * otra (y la anterior deja de funcionar).
+ */
+export interface EmergencyCardCreatedResponse {
+  tarjeta: string;
+  creadaEl: string;
+}
+
+/** Por dónde entró un consultante: el código rotativo o la tarjeta (ENG-176). */
+export type MediPassOrigin = 'CODIGO' | 'TARJETA';
+
 export interface EmergencySessionStatusResponse {
   expiraEl: string;
   vital: VitalBlock;
@@ -60,6 +81,7 @@ export interface EmergencySessionStatusResponse {
 export interface MediPassAccessView {
   sesionId: string;
   consultante: { nombre: string | null; matricula: string | null };
+  origen: MediPassOrigin;
   inicio: string;
   vence: string;
   revocadoEl: string | null;
@@ -296,7 +318,10 @@ export class MediPassService {
   }
 
   /**
-   * Abre un acceso de emergencia canjeando un código (HU-34, ENG-73).
+   * Abre un acceso de emergencia canjeando un código (HU-34, ENG-73) o la
+   * tarjeta de emergencia del paciente (ENG-176). Las dos credenciales abren lo
+   * mismo: una sesión de 30 minutos, con su entrada en la bitácora y el aviso
+   * al paciente. Lo único que cambia es qué se guarda como origen.
    *
    * ## El código no es de un solo uso
    *
@@ -319,6 +344,105 @@ export class MediPassService {
     dto: OpenEmergencySessionDto,
   ): Promise<EmergencySessionResponse> {
     const ahora = new Date();
+    const credencial = await this.resolveCredential(dto, ahora);
+
+    const expiraEl = new Date(ahora.getTime() + SESSION_TTL_MS);
+    const sessionId = randomUUID();
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.mediPassSession.create({
+        data: {
+          id: sessionId,
+          patient_id: credencial.patientId,
+          medipass_code_id: credencial.codeId,
+          emergency_card_id: credencial.cardId,
+          consultant_name: dto.nombre,
+          consultant_license: dto.matricula ?? null,
+          expires_at: expiraEl,
+        },
+      });
+
+      if (credencial.codeId && credencial.codeUsedAt === null) {
+        await tx.mediPassCode.update({
+          where: { id: credencial.codeId },
+          data: { used_at: ahora },
+        });
+      }
+
+      await tx.mediPassAccessLog.create({
+        data: {
+          session_id: sessionId,
+          patient_id: credencial.patientId,
+          resource_accessed: 'medipass.vital',
+        },
+      });
+    });
+
+    // Después del commit: el acceso ya existe y quedó en la bitácora. El aviso
+    // no puede frenar la ficha del médico, así que no espera ni tira (ENG-177).
+    void this.inApp.notifyMediPassAccess(
+      credencial.patientId,
+      {
+        sesionId: sessionId,
+        consultante: dto.nombre,
+        matricula: dto.matricula ?? null,
+        origen: credencial.cardId ? 'TARJETA' : 'CODIGO',
+      },
+      ahora,
+    );
+
+    return {
+      sesionId: sessionId,
+      expiraEl: expiraEl.toISOString(),
+      vital: applyScope(
+        toVitalBlock(credencial.patient, ahora),
+        resolveScope(credencial.patient.medipass_scope),
+      ),
+    };
+  }
+
+  /**
+   * Qué abre el canje: el código rotativo vigente o la tarjeta activa
+   * (ENG-176). Cualquier rechazo es el mismo 404 de `CODIGO_INVALIDO`, venga
+   * por donde venga: distinguir "esa tarjeta se desactivó" de "nunca existió"
+   * le diría a quien prueba tokens cuáles fueron reales.
+   */
+  private async resolveCredential(
+    dto: OpenEmergencySessionDto,
+    ahora: Date,
+  ): Promise<{
+    patientId: string;
+    codeId: string | null;
+    codeUsedAt: Date | null;
+    cardId: string | null;
+    patient: PatientVitalSource & { medipass_scope: unknown };
+  }> {
+    // El DTO valida cada campo por separado; que vengan los dos (o ninguno) es
+    // un pedido mal armado, no un código inválido.
+    if ((dto.codigo === undefined) === (dto.tarjeta === undefined)) {
+      throw new BadRequestException(
+        'Mandá el código del MediPass o la tarjeta de emergencia, uno de los dos.',
+      );
+    }
+
+    if (dto.tarjeta !== undefined) {
+      const card = await this.prisma.mediPassEmergencyCard.findFirst({
+        where: { token_hash: hashCardToken(dto.tarjeta), revoked_at: null },
+        select: {
+          id: true,
+          patient_id: true,
+          patient: { select: { ...VITAL_SELECT, medipass_scope: true } },
+        },
+      });
+      if (!card) throw new NotFoundException(CODIGO_INVALIDO);
+      return {
+        patientId: card.patient_id,
+        codeId: null,
+        codeUsedAt: null,
+        cardId: card.id,
+        patient: card.patient,
+      };
+    }
 
     const code = await this.prisma.mediPassCode.findFirst({
       where: { code: dto.codigo, expires_at: { gt: ahora } },
@@ -330,61 +454,161 @@ export class MediPassService {
         patient: { select: { ...VITAL_SELECT, medipass_scope: true } },
       },
     });
-
     // Mismo 404 para "no existe" y "venció" (ver CODIGO_INVALIDO).
     if (!code) throw new NotFoundException(CODIGO_INVALIDO);
+    return {
+      patientId: code.patient_id,
+      codeId: code.id,
+      codeUsedAt: code.used_at,
+      cardId: null,
+      patient: code.patient,
+    };
+  }
 
-    const expiraEl = new Date(ahora.getTime() + SESSION_TTL_MS);
-    const sessionId = randomUUID();
+  /**
+   * Si el paciente tiene una tarjeta de emergencia activa, y desde cuándo
+   * (ENG-176). Nunca devuelve el token: solo existe su hash.
+   */
+  async getMyEmergencyCard(
+    patientId: string,
+  ): Promise<EmergencyCardStatusResponse> {
+    await this.assertPatientExists(patientId);
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.mediPassSession.create({
-        data: {
-          id: sessionId,
-          patient_id: code.patient_id,
-          medipass_code_id: code.id,
-          consultant_name: dto.nombre,
-          consultant_license: dto.matricula ?? null,
-          expires_at: expiraEl,
-        },
-      });
-
-      if (!code.used_at) {
-        await tx.mediPassCode.update({
-          where: { id: code.id },
-          data: { used_at: ahora },
-        });
-      }
-
-      await tx.mediPassAccessLog.create({
-        data: {
-          session_id: sessionId,
-          patient_id: code.patient_id,
-          resource_accessed: 'medipass.vital',
-        },
-      });
+    const card = await this.prisma.mediPassEmergencyCard.findFirst({
+      where: { patient_id: patientId, revoked_at: null },
+      select: { created_at: true },
     });
 
-    // Después del commit: el acceso ya existe y quedó en la bitácora. El aviso
-    // no puede frenar la ficha del médico, así que no espera ni tira (ENG-177).
-    void this.inApp.notifyMediPassAccess(
-      code.patient_id,
-      {
-        sesionId: sessionId,
-        consultante: dto.nombre,
-        matricula: dto.matricula ?? null,
-      },
-      ahora,
-    );
-
     return {
-      sesionId: sessionId,
-      expiraEl: expiraEl.toISOString(),
-      vital: applyScope(
-        toVitalBlock(code.patient, ahora),
-        resolveScope(code.patient.medipass_scope),
-      ),
+      activa: card !== null,
+      creadaEl: card?.created_at.toISOString() ?? null,
     };
+  }
+
+  /**
+   * Genera la tarjeta de emergencia, o una nueva si ya había una (ENG-176).
+   *
+   * ## Regenerar invalida la anterior, y corta lo que abrió
+   *
+   * Se regenera cuando la tarjeta se perdió o alguien la fotografió, así que la
+   * anterior tiene que dejar de abrir fichas **en el mismo instante**, y los
+   * accesos que se hayan abierto con ella también se cortan: si alguien la usó
+   * antes de que el paciente se diera cuenta, seguiría adentro hasta que venza.
+   * Los accesos abiertos con el código rotativo no se tocan.
+   *
+   * Todo en una transacción: no puede quedar un momento con dos tarjetas
+   * válidas, ni uno sin ninguna si algo falla a mitad de camino. Si dos pedidos
+   * llegan a la vez, el índice único parcial de la migración deja pasar uno
+   * solo y el otro recibe 409.
+   */
+  async createMyEmergencyCard(
+    patientId: string,
+  ): Promise<EmergencyCardCreatedResponse> {
+    await this.assertPatientExists(patientId);
+
+    const tarjeta = randomBytes(CARD_TOKEN_BYTES).toString('base64url');
+    const ahora = new Date();
+
+    try {
+      const creada = await this.prisma.$transaction(async (tx) => {
+        await this.revokeActiveCard(tx, patientId, ahora);
+        return tx.mediPassEmergencyCard.create({
+          data: {
+            patient_id: patientId,
+            token_hash: hashCardToken(tarjeta),
+            created_at: ahora,
+          },
+          select: { id: true, created_at: true },
+        });
+      });
+
+      await this.auditCard(patientId, creada.id, 'MEDIPASS_CARD_CREATED');
+      return { tarjeta, creadaEl: creada.created_at.toISOString() };
+    } catch (err) {
+      if ((err as { code?: string }).code === 'P2002') {
+        throw new ConflictException(
+          'Ya se estaba generando una tarjeta. Recargá la página y probá de nuevo.',
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Desactiva la tarjeta de emergencia (ENG-176). Idempotente, como cortar un
+   * acceso: si no había ninguna activa, el resultado ya es el pedido.
+   */
+  async disableMyEmergencyCard(patientId: string): Promise<void> {
+    await this.assertPatientExists(patientId);
+    const ahora = new Date();
+    const cardId = await this.prisma.$transaction((tx) =>
+      this.revokeActiveCard(tx, patientId, ahora),
+    );
+    if (cardId) {
+      await this.auditCard(patientId, cardId, 'MEDIPASS_CARD_DISABLED');
+    }
+  }
+
+  /**
+   * Marca la tarjeta activa como revocada y corta los accesos abiertos con
+   * ella. Devuelve el id de la tarjeta, o `null` si no había ninguna.
+   *
+   * `updateMany` con `revoked_at: null` en el `where`, y no `update` por id:
+   * si otro pedido la revocó entre la lectura y esto, `count` vuelve en 0 y no
+   * se informa una revocación que hizo otro.
+   */
+  private async revokeActiveCard(
+    tx: Pick<PrismaService, 'mediPassEmergencyCard' | 'mediPassSession'>,
+    patientId: string,
+    ahora: Date,
+  ): Promise<string | null> {
+    const activa = await tx.mediPassEmergencyCard.findFirst({
+      where: { patient_id: patientId, revoked_at: null },
+      select: { id: true },
+    });
+    if (!activa) return null;
+
+    const { count } = await tx.mediPassEmergencyCard.updateMany({
+      where: { id: activa.id, revoked_at: null },
+      data: { revoked_at: ahora },
+    });
+    if (count === 0) return null;
+
+    await tx.mediPassSession.updateMany({
+      where: {
+        emergency_card_id: activa.id,
+        revoked_at: null,
+        expires_at: { gt: ahora },
+      },
+      data: { revoked_at: ahora, revoked_by: patientId },
+    });
+    return activa.id;
+  }
+
+  /**
+   * Deja constancia en `audit_logs` (ENG-87). Fuera de la transacción y sin
+   * tirar: la tarjeta ya quedó generada o desactivada, y un fallo del log no
+   * puede hacerle creer al paciente que no pasó.
+   */
+  private async auditCard(
+    patientId: string,
+    cardId: string,
+    action: 'MEDIPASS_CARD_CREATED' | 'MEDIPASS_CARD_DISABLED',
+  ): Promise<void> {
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actor_id: patientId,
+          action,
+          resource_type: 'medipass_emergency_cards',
+          resource_id: cardId,
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `No se pudo auditar ${action} de ${patientId}: ${String(err)}`,
+      );
+    }
   }
 
   /**
@@ -470,6 +694,7 @@ export class MediPassService {
         id: true,
         consultant_name: true,
         consultant_license: true,
+        emergency_card_id: true,
         started_at: true,
         expires_at: true,
         revoked_at: true,
@@ -492,6 +717,7 @@ export class MediPassService {
           nombre: s.consultant_name,
           matricula: s.consultant_license,
         },
+        origen: s.emergency_card_id ? 'TARJETA' : 'CODIGO',
         inicio: s.started_at.toISOString(),
         vence: s.expires_at.toISOString(),
         revocadoEl: s.revoked_at?.toISOString() ?? null,
@@ -718,4 +944,13 @@ function esCodigoRepetido(error: unknown): boolean {
   // Sin `meta.target` no se puede saber qué unique fue. Se trata como la de
   // `code`, que hoy es la única de la tabla.
   return true;
+}
+
+/**
+ * SHA-256 en hex del token de la tarjeta (ENG-176). Es lo único que se guarda:
+ * con 256 bits de azar no hay diccionario contra el cual probar, así que un
+ * hash rápido alcanza y no hace falta uno lento como el de una contraseña.
+ */
+export function hashCardToken(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
 }

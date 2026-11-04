@@ -19,6 +19,17 @@ describe('renderInAppNotification', () => {
     );
   });
 
+  it('MediPass abierto con la tarjeta de emergencia: lo dice (ENG-176)', () => {
+    expect(
+      renderInAppNotification('MEDIPASS_ACCESO', {
+        consultante: 'Dr. Pablo Rivas',
+        origen: 'TARJETA',
+      }).body,
+    ).toBe(
+      'Alguien que dijo ser Dr. Pablo Rivas abrió tu MediPass con tu tarjeta de emergencia. Si no lo reconocés, cortale el acceso.',
+    );
+  });
+
   it('turno pagado: nombra al paciente y la fecha en hora de Argentina', () => {
     expect(
       renderInAppNotification('PAGO_CONFIRMADO', {

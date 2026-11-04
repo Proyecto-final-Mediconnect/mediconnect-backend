@@ -34,6 +34,7 @@ describe('toMediPassAccess', () => {
       desde: '2026-10-21T14:50:00.000Z',
       expiraEl: '2026-10-21T15:20:00.000Z',
       minutosRestantes: 20,
+      origen: 'CODIGO',
     });
   });
 
