@@ -35,7 +35,9 @@
  * se pueda revisar de un vistazo qué se bloquea.
  *
  * Quedan afuera a propósito las que también son palabras comunes en una
- * reseña, como "retrasado" ("el turno se había retrasado").
+ * reseña, como "retrasado" ("el turno se había retrasado"), o que son nombres
+ * o apellidos ("concha", "orto"), o ambiguas ("trola", "chanta"). Las que son
+ * ofensivas solo en una frase ("la concha de tu madre") van en FRASES.
  */
 const PALABRAS = new Set([
   'boludo',
@@ -59,23 +61,18 @@ const PALABRAS = new Set([
   'putas',
   'putazo',
   'trolo',
-  'trola',
   'mierda',
   'mierdas',
   'mierdoso',
   'garca',
   'garcas',
-  'chanta',
-  'chantas',
   'sorete',
   'soretes',
   'conchudo',
   'conchuda',
-  'concha',
   'culiado',
   'culiao',
   'culiada',
-  'orto',
   'pija',
   'poronga',
   'carajo',
@@ -118,6 +115,9 @@ const FRASES = [
   'chupame la pija',
   'me cago en',
   'negro de mierda',
+  'la concha de tu hermana',
+  'concha de tu madre',
+  'en el orto',
 ];
 
 /** Los reemplazos de letras más comunes para esquivar un filtro. */
@@ -132,6 +132,35 @@ const LEET: Record<string, string> = {
   $: 's',
 };
 
+/** Letras de otros alfabetos que se ven como una latina ("pelоtudo" con o cirílica). */
+const HOMOGLIFOS: Record<string, string> = {
+  а: 'a',
+  е: 'e',
+  о: 'o',
+  р: 'p',
+  с: 'c',
+  у: 'y',
+  х: 'x',
+  і: 'i',
+  ј: 'j',
+  к: 'k',
+  м: 'm',
+  н: 'h',
+  т: 't',
+  в: 'b',
+  ѕ: 's',
+  α: 'a',
+  ε: 'e',
+  ο: 'o',
+  ρ: 'p',
+  ι: 'i',
+  κ: 'k',
+  ν: 'v',
+  τ: 't',
+  υ: 'u',
+  χ: 'x',
+};
+
 /**
  * Lleva el texto a una forma comparable: minúsculas, sin acentos, sin
  * reemplazos de letras y sin letras estiradas. Las palabras quedan separadas
@@ -140,20 +169,29 @@ const LEET: Record<string, string> = {
 export function normalize(text: string): string {
   return (
     text
+      // Ancho completo y formas compatibles ("ｆｏｒｒｏ" → "forro").
+      .normalize('NFKC')
+      // Caracteres invisibles (ancho cero, soft hyphen, marcas bidi): \p{Cf}.
+      .replace(/\p{Cf}/gu, '')
       .toLowerCase()
+      .replace(/[а-яѐ-џα-ω]/g, (c) => HOMOGLIFOS[c] ?? c)
       .normalize('NFD')
       .replace(/[̀-ͯ]/g, '')
       .replace(/[013457@$]/g, (c) => LEET[c] ?? c)
       // "p.e.l.o.t.u.d.o" o "h-d-p": letras sueltas separadas por puntos,
       // guiones, guiones bajos o asteriscos se juntan en una palabra.
-      .replace(/\b(?:[a-zñ][.\-_*]){2,}[a-zñ]\b/g, (m) =>
+      .replace(/(?<![a-zñ])(?:[a-zñ][.\-_*]){2,}[a-zñ](?![a-zñ])/g, (m) =>
         m.replace(/[.\-_*]/g, ''),
       )
       // Todo lo que no es letra separa palabras.
       .replace(/[^a-zñ]+/g, ' ')
-      // "boluuudooo" → "boludo". Ninguna palabra de la lista tiene una letra
-      // repetida más de dos veces, y "rr"/"ll" se respetan.
-      .replace(/([a-zñ])\1{2,}/g, '$1')
+      // "boluuudooo" → "boluudoo" (y "forrro" → "forro"): tres o más iguales
+      // bajan a dos; findInappropriate prueba también sin dobles.
+      .replace(/([a-zñ])\1{2,}/g, '$1$1')
+      // "p e l o t u d o": cuatro o más letras sueltas seguidas se juntan.
+      .replace(/(?<![a-zñ])[a-zñ](?: [a-zñ]){3,}(?![a-zñ])/g, (m) =>
+        m.replace(/ /g, ''),
+      )
       .trim()
   );
 }
@@ -186,4 +224,26 @@ export function findInappropriate(text: string): string[] {
 /** Si el texto tiene lenguaje que no se publica. */
 export function isInappropriate(text: string): boolean {
   return findInappropriate(text).length > 0;
+}
+
+/**
+ * Si el texto deja un dato de contacto: link, dominio, mail, usuario o teléfono.
+ * Las respuestas públicas del profesional no pueden llevarlos (publicidad o
+ * contacto por fuera de la plataforma). Corre sobre el texto sin invisibles.
+ */
+export function containsContactInfo(text: string): boolean {
+  const t = text.normalize('NFKC').replace(/\p{Cf}/gu, '');
+  if (/https?:\/\/|www\s*\.|\bwa\.me\b|\bt\.me\b/i.test(t)) return true;
+  if (/[\w.+-]+\s*@\s*[\w-]+/.test(t)) return true;
+  if (
+    /(?<![\w.])[a-z0-9-]+\s*\.\s*(?:com|net|org|io|ar|app|me|info|biz|co)\b/i.test(
+      t,
+    )
+  )
+    return true;
+  // Ocho o más dígitos seguidos, aunque estén separados por espacios, puntos,
+  // guiones o paréntesis ("11 5555-1234", "+54 9 11 5555 1234").
+  // Las fechas completas (12.11.2026, 12/11/2026) no cuentan como teléfono.
+  const sinFechas = t.replace(/\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g, ' ');
+  return /\d{8,}/.test(sinFechas.replace(/[\s.\-()]/g, ''));
 }

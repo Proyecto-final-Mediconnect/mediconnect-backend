@@ -1,5 +1,6 @@
 import {
   findInappropriate,
+  containsContactInfo,
   isInappropriate,
   normalize,
 } from './language-filter';
@@ -10,7 +11,7 @@ describe('language-filter', () => {
     expect(normalize('PELOTUDÓ')).toBe('pelotudo');
     expect(normalize('b0lud0')).toBe('boludo');
     expect(normalize('f0rr@')).toBe('forra');
-    expect(normalize('boluuudooo!!')).toBe('boludo');
+    expect(normalize('boluuudooo!!')).toBe('boluudoo');
     expect(normalize('p.e.l.o.t.u.d.o')).toBe('pelotudo');
     expect(normalize('h-d-p')).toBe('hdp');
   });
@@ -26,11 +27,19 @@ describe('language-filter', () => {
     'el hijo de puta no vino',
     'andate a la mierda',
     'p.e.l.o.t.u.d.o',
+    'qué forrro',
+    'sos un p e l o t u d o',
+    'pelo\u200Btudo',
+    'ｐｅｌｏｔｕｄｏ',
+    'pelоtudo',
+    'la concha de tu madre',
   ])('detecta "%s"', (texto) => {
     expect(isInappropriate(texto)).toBe(true);
   });
 
   it.each([
+    'Atiende en Concha y Toro, la doctora Concha Ortiz es genial.',
+    'Llegó al orto del camino, me dijo que soy un chanta pero fue amable.',
     'Me atendió muy bien, súper claro con las indicaciones.',
     'Llegó tarde y fue maleducado. No lo recomiendo.',
     'El turno se había retrasado 20 minutos.',
@@ -49,5 +58,23 @@ describe('language-filter', () => {
       'boludo',
       'forro',
     ]);
+  });
+
+  describe('containsContactInfo', () => {
+    it.each([
+      'https://x.com',
+      'www.clinica.com',
+      'clinica.com.ar',
+      'a@b.com',
+      '11 5555-1234',
+      '+54 9 11 5555 1234',
+      'w\u200Bww.clinica.com',
+    ])('detecta "%s"', (t) => expect(containsContactInfo(t)).toBe(true));
+
+    it.each([
+      'Gracias por la devolución.',
+      'Lo esperamos el 12.11.2026 a las 10.30. Un saludo, Dr. Pérez.',
+      'Tomar 2 comprimidos cada 8 horas.',
+    ])('no detecta "%s"', (t) => expect(containsContactInfo(t)).toBe(false));
   });
 });
