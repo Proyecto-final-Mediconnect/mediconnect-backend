@@ -1271,14 +1271,54 @@ async function main(): Promise<void> {
     skipDuplicates: true,
   });
 
-  await prisma.mediPassAccessLog.createMany({
-    data: [
-      { id: idDemo('medipass:acceso-alergias'), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'alergias', accessed_at: enMinutos(enDias(ahora, -3), 1) },
-      { id: idDemo('medipass:acceso-medicacion'), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'medicacion_activa', accessed_at: enMinutos(enDias(ahora, -3), 2) },
-      { id: idDemo('medipass:acceso-diagnosticos'), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'diagnosticos', accessed_at: enMinutos(enDias(ahora, -3), 4) },
-    ],
-    skipDuplicates: true,
-  });
+  // --- Fechas pasadas en las bitácoras (ENG-145) ----------------------------
+  // `audit_logs` y `medipass_access_logs` tienen un trigger BEFORE INSERT que
+  // pisa la fecha con `now()`: en una bitácora con valor probatorio la hora la
+  // pone el servidor, no quien inserta.
+  //
+  // La demo necesita lo contrario. La pantalla de historial de accesos (ENG-76)
+  // y la auditoría de la HC se muestran en la defensa, y cinco filas con la hora
+  // exacta de la siembra no cuentan ninguna historia: hace falta un acceso de
+  // hace tres días y una revocación de hace nueve.
+  //
+  // Así que acá, y solo acá, se desactivan los triggers alrededor de la
+  // siembra. Es una excepción del owner en un script de demo, no un agujero del
+  // camino de la aplicación.
+  //
+  // El `finally` no es decorativo: si un `createMany` falla con los triggers
+  // apagados, quedan apagados para siempre y la garantía desaparece en silencio
+  // —nada vuelve a fallar, simplemente deja de protegerse—. Es el mismo error
+  // que tenía `catalog-metrics.ts` antes de ENG-185.
+  async function conFechasPropias<T>(fn: () => Promise<T>): Promise<T> {
+    const tablas = ['audit_logs', 'medipass_access_logs'] as const;
+    const trigger = (t: string) => `${t}_stamp_server_time`;
+
+    for (const t of tablas) {
+      await prisma.$executeRawUnsafe(
+        `alter table public.${t} disable trigger ${trigger(t)}`,
+      );
+    }
+    try {
+      return await fn();
+    } finally {
+      for (const t of tablas) {
+        await prisma.$executeRawUnsafe(
+          `alter table public.${t} enable always trigger ${trigger(t)}`,
+        );
+      }
+    }
+  }
+
+  await conFechasPropias(() =>
+    prisma.mediPassAccessLog.createMany({
+      data: [
+        { id: idDemo('medipass:acceso-alergias'), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'alergias', accessed_at: enMinutos(enDias(ahora, -3), 1) },
+        { id: idDemo('medipass:acceso-medicacion'), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'medicacion_activa', accessed_at: enMinutos(enDias(ahora, -3), 2) },
+        { id: idDemo('medipass:acceso-diagnosticos'), session_id: sesionCerrada, patient_id: julian, resource_accessed: 'diagnosticos', accessed_at: enMinutos(enDias(ahora, -3), 4) },
+      ],
+      skipDuplicates: true,
+    }),
+  );
 
   // Una sesión revocada por el paciente: el corte de acceso es una funcionalidad
   // del ticket y sin una fila así no se puede mostrar.
@@ -1312,15 +1352,17 @@ async function main(): Promise<void> {
   // escribe ningún servicio: se siembran con el nombre previsto, en el mismo
   // estilo, y cuando existan hay que usar estas mismas cadenas (ENG-76 filtra por
   // ellas).
-  await prisma.auditLog.createMany({
-    data: [
-      { id: idDemo('audit:martin-lee-julian'), actor_id: martin, action: 'CLINICAL_RECORD_READ', resource_type: 'clinical_record_entries', resource_id: julian, metadata: { role: 'PROFESIONAL', via: 'medipass', sessionId: sesionCerrada }, created_at: enDias(ahora, -3) },
-      { id: idDemo('audit:ana-crea-entrada'), actor_id: ana, action: 'CLINICAL_ENTRY_CREATED', resource_type: 'clinical_record_entries', resource_id: cadenaJulian.ids[0], metadata: { entryType: 'CONSULTA' }, created_at: enMinutos(T.pasado1.scheduled_at, 28) },
-      { id: idDemo('audit:martin-corrige-entrada'), actor_id: martin, action: 'CLINICAL_ENTRY_CORRECTED', resource_type: 'clinical_record_entries', resource_id: cadenaJulian.ids[4], metadata: { corrects: cadenaJulian.ids[3] }, created_at: enMinutos(T.pasado2.scheduled_at, 90) },
-      { id: idDemo('audit:marina-revoca-sesion'), actor_id: marina, action: 'MEDIPASS_SESSION_REVOKED', resource_type: 'medipass_sessions', metadata: { motivo: 'El paciente cortó el acceso desde la app.' }, created_at: enDias(ahora, -9) },
-    ],
-    skipDuplicates: true,
-  });
+  await conFechasPropias(() =>
+    prisma.auditLog.createMany({
+      data: [
+        { id: idDemo('audit:martin-lee-julian'), actor_id: martin, action: 'CLINICAL_RECORD_READ', resource_type: 'clinical_record_entries', resource_id: julian, metadata: { role: 'PROFESIONAL', via: 'medipass', sessionId: sesionCerrada }, created_at: enDias(ahora, -3) },
+        { id: idDemo('audit:ana-crea-entrada'), actor_id: ana, action: 'CLINICAL_ENTRY_CREATED', resource_type: 'clinical_record_entries', resource_id: cadenaJulian.ids[0], metadata: { entryType: 'CONSULTA' }, created_at: enMinutos(T.pasado1.scheduled_at, 28) },
+        { id: idDemo('audit:martin-corrige-entrada'), actor_id: martin, action: 'CLINICAL_ENTRY_CORRECTED', resource_type: 'clinical_record_entries', resource_id: cadenaJulian.ids[4], metadata: { corrects: cadenaJulian.ids[3] }, created_at: enMinutos(T.pasado2.scheduled_at, 90) },
+        { id: idDemo('audit:marina-revoca-sesion'), actor_id: marina, action: 'MEDIPASS_SESSION_REVOKED', resource_type: 'medipass_sessions', metadata: { motivo: 'El paciente cortó el acceso desde la app.' }, created_at: enDias(ahora, -9) },
+      ],
+      skipDuplicates: true,
+    }),
+  );
 
   // --- Resumen -------------------------------------------------------------
   console.log('');
