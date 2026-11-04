@@ -86,22 +86,50 @@ describe('Hora del servidor en las bitácoras (integration)', () => {
     });
   });
 
+  /**
+   * Prende o apaga el trigger append-only de ENG-87, **si existe**.
+   *
+   * No se puede asumir que esté. El CI de integración prepara la base con
+   * `prisma db push`, que deriva el esquema del `schema.prisma` y **no ejecuta
+   * las migraciones**: ahí los triggers de ENG-87 no existen y un
+   * `alter table ... disable trigger` pelado falla con `42704`. Contra una base
+   * donde sí se corrió `migrate deploy` existen, y hay que apagarlos para poder
+   * limpiar.
+   *
+   * PostgreSQL no tiene `DISABLE TRIGGER IF EXISTS`, así que el chequeo va a
+   * mano contra `pg_trigger`.
+   */
+  async function appendOnlyTrigger(
+    tabla: string,
+    accion: 'disable' | 'enable always',
+  ): Promise<void> {
+    await prisma.$executeRawUnsafe(`
+      do $$
+      begin
+        if exists (
+          select 1 from pg_trigger t
+            join pg_class c on c.oid = t.tgrelid
+           where c.relname = '${tabla}'
+             and t.tgname = '${tabla}_no_mutation'
+        ) then
+          alter table public.${tabla} ${accion} trigger ${tabla}_no_mutation;
+        end if;
+      end $$;
+    `);
+  }
+
   afterAll(async () => {
     // Las dos bitácoras son append-only: para limpiar hay que apagar el trigger
-    // de ENG-87, igual que hacen los otros specs que las tocan.
+    // de ENG-87 donde esté puesto.
     for (const t of ['audit_logs', 'medipass_access_logs']) {
-      await prisma.$executeRawUnsafe(
-        `alter table public.${t} disable trigger ${t}_no_mutation`,
-      );
+      await appendOnlyTrigger(t, 'disable');
     }
     await prisma.mediPassAccessLog.deleteMany({
       where: { patient_id: PROFILE },
     });
     await prisma.auditLog.deleteMany({ where: { actor_id: PROFILE } });
     for (const t of ['audit_logs', 'medipass_access_logs']) {
-      await prisma.$executeRawUnsafe(
-        `alter table public.${t} enable always trigger ${t}_no_mutation`,
-      );
+      await appendOnlyTrigger(t, 'enable always');
     }
     await prisma.mediPassSession.deleteMany({ where: { patient_id: PROFILE } });
     await prisma.mediPassCode.deleteMany({ where: { patient_id: PROFILE } });
