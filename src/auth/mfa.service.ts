@@ -63,8 +63,9 @@ const CODIGO_INVALIDO =
  * sin el segundo paso (`aal1`) de quien lo activó.
  *
  * Es opcional y para los tres roles. No hay códigos de respaldo: si alguien
- * pierde el teléfono, un administrador borra el factor desde Supabase y pone
- * `mfa_enabled` en `false` (está en el runbook de seguridad).
+ * pierde el teléfono, un administrador borra el factor desde el panel de
+ * Supabase (Authentication → Users → MFA) y pone `profiles.mfa_enabled` en
+ * `false`.
  */
 @Injectable()
 export class MfaService {
