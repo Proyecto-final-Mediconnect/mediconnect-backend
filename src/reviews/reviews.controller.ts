@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -8,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
   Req,
   UseGuards,
@@ -18,6 +20,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { ModerateReviewDto } from './dto/moderate-review.dto';
+import { ReviewResponseDto } from './dto/review-response.dto';
 import {
   ModerationQueryDto,
   ReviewPageQueryDto,
@@ -49,6 +52,39 @@ export class ReviewsController {
   listMine(@Req() req: Request) {
     const { userId } = requireAuth(req);
     return this.reviews.listMine(userId);
+  }
+
+  /** Las reseñas publicadas que recibió el profesional, con sus respuestas (ENG-106). */
+  @Get('reviews/received')
+  listReceived(@Req() req: Request, @Query() query: ReviewPageQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.reviews.listReceived(userId, query.page);
+  }
+
+  /**
+   * Responde en público una reseña propia, o cambia la respuesta (ENG-106).
+   * `PUT` porque hay una sola por reseña: repetirlo deja el mismo resultado.
+   */
+  @Put('reviews/:reviewId/response')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  respond(
+    @Req() req: Request,
+    @Param('reviewId', new ParseUUIDPipe({ version: '4' })) reviewId: string,
+    @Body() dto: ReviewResponseDto,
+  ) {
+    const { userId } = requireAuth(req);
+    return this.reviews.respond(userId, reviewId, dto.content);
+  }
+
+  /** Borra la respuesta propia a una reseña (ENG-106). */
+  @Delete('reviews/:reviewId/response')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteResponse(
+    @Req() req: Request,
+    @Param('reviewId', new ParseUUIDPipe({ version: '4' })) reviewId: string,
+  ): Promise<void> {
+    const { userId } = requireAuth(req);
+    await this.reviews.deleteResponse(userId, reviewId);
   }
 
   /** La cola de moderación (ENG-81). Solo para el rol MODERADOR. */
