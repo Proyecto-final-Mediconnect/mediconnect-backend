@@ -6,6 +6,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomBytes } from 'node:crypto';
 import {
   CONSULTATION_ROOM_PREFIX,
   consultationRoomProperties,
@@ -252,7 +253,7 @@ export class DailyService {
 
     const exp = Math.floor(Date.now() / 1000) + TEST_ROOM_TTL_SECONDS;
     const room = await this.request<DailyRoomResponse>('POST', '/rooms', {
-      name: `${TEST_ROOM_PREFIX}-${crypto.randomUUID().slice(0, 12)}`,
+      name: `${TEST_ROOM_PREFIX}-${randomBytes(8).toString('hex')}`,
       privacy: 'private',
       properties: testRoomProperties(exp),
     });

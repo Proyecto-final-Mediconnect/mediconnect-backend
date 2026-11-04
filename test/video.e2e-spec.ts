@@ -106,10 +106,10 @@ describe('Spike de Daily.co (e2e)', () => {
     await app.close();
   });
 
-  function signToken(): Promise<string> {
+  function signToken(sub = SUB): Promise<string> {
     return new SignJWT({ email: 'pro@test.com', role: 'authenticated' })
       .setProtectedHeader({ alg: 'ES256' })
-      .setSubject(SUB)
+      .setSubject(sub)
       .setIssuer(ISSUER)
       .setAudience('authenticated')
       .setIssuedAt()
@@ -241,6 +241,25 @@ describe('Spike de Daily.co (e2e)', () => {
         .set('Authorization', `Bearer ${token}`)
         .expect(429);
       expect(daily.createTestRoom).toHaveBeenCalledTimes(3);
+    });
+
+    it('el cupo es por usuario: otro usuario en la misma IP no hereda el límite', async () => {
+      const otro = '22222222-2222-4222-8222-222222222222';
+      const ip = '190.12.34.56';
+      for (let i = 0; i < 3; i++) {
+        await request(app.getHttpServer())
+          .post('/video/test-room')
+          .set('CF-Connecting-IP', ip)
+          .set('Authorization', `Bearer ${await signToken()}`)
+          .expect(201);
+      }
+
+      await request(app.getHttpServer())
+        .post('/video/test-room')
+        .set('CF-Connecting-IP', ip)
+        .set('Authorization', `Bearer ${await signToken(otro)}`)
+        .expect(201);
+      expect(daily.createTestRoom).toHaveBeenCalledTimes(4);
     });
   });
 });

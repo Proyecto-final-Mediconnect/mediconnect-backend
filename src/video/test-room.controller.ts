@@ -8,6 +8,10 @@ import {
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import {
+  UserThrottled,
+  UserThrottlerGuard,
+} from '../common/throttler/user-throttler.guard';
 import { DailyService, type TestRoom } from './daily.service';
 
 /**
@@ -26,10 +30,14 @@ export class TestRoomController {
    * Crea la sala y devuelve su URL con el token.
    *
    * `POST` porque crea una sala en Daily, y `no-store` porque la URL lleva la
-   * credencial adentro. 3 por minuto: cada sala es una llamada a un proveedor
-   * que factura, y probar la cámara tres veces seguidas ya es mucho.
+   * credencial adentro. 3 por minuto por usuario: cada sala es una llamada a un
+   * proveedor que factura, y probar la cámara tres veces seguidas ya es mucho.
+   * Por usuario y no por IP: en un consultorio o una red compartida, una IP
+   * agotaría el cupo de todos.
    */
   @Post()
+  @UseGuards(UserThrottlerGuard)
+  @UserThrottled()
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   @HttpCode(HttpStatus.CREATED)
   @Header('Cache-Control', 'no-store')

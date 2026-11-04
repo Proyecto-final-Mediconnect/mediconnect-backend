@@ -210,7 +210,7 @@ describe('DailyService', () => {
       };
       expect(body.privacy).toBe('private');
       expect(body.name).toMatch(
-        new RegExp(`^${TEST_ROOM_PREFIX}-[0-9a-f-]{12}$`),
+        new RegExp(`^${TEST_ROOM_PREFIX}-[0-9a-f]{16}$`),
       );
       expect(body.properties).toMatchObject({
         max_participants: 1,
