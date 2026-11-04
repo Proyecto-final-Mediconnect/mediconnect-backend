@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -12,15 +13,24 @@ import {
   Post,
   Query,
   Req,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { MAX_FILE_BYTES } from '../common/files/file-signature';
 import { requireAuth } from '../common/http/require-auth';
+import {
+  ChatAttachmentsService,
+  type UploadedChatFile,
+} from './chat-attachments.service';
 import { ConversationsService } from './conversations.service';
 import { MessagesQueryDto } from './dto/messages-query.dto';
 import { OpenConversationDto } from './dto/open-conversation.dto';
+import { SendAttachmentDto } from './dto/send-attachment.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { toRealtimeToken, type RealtimeToken } from './realtime-token';
 
@@ -28,7 +38,10 @@ import { toRealtimeToken, type RealtimeToken } from './realtime-token';
 @Controller('conversations')
 @UseGuards(JwtAuthGuard)
 export class ConversationsController {
-  constructor(private readonly conversations: ConversationsService) {}
+  constructor(
+    private readonly conversations: ConversationsService,
+    private readonly attachments: ChatAttachmentsService,
+  ) {}
 
   /** Mis conversaciones y con quién puedo abrir una nueva. */
   @Get('me')
@@ -94,6 +107,56 @@ export class ConversationsController {
   ) {
     const { userId } = requireAuth(req);
     return this.conversations.send(userId, id, dto.contenido);
+  }
+
+  /**
+   * Manda un archivo (ENG-102): PDF, JPG o PNG de hasta 10 MB en el campo
+   * `file`, y un texto opcional en `contenido`.
+   *
+   * 10 por minuto: cada uno es un archivo en Storage, que se paga por GB.
+   */
+  @Post(':id/attachments')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @HttpCode(HttpStatus.CREATED)
+  // Un byte más que el tope: lo que pase de 10 MB lo corta Multer, y el mensaje
+  // claro lo da el service para el caso justo en el borde.
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: {
+        fileSize: MAX_FILE_BYTES + 1,
+        files: 1,
+        fields: 2,
+        parts: 3,
+        fieldSize: 8 * 1024,
+      },
+    }),
+  )
+  sendAttachment(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @UploadedFile() file: UploadedChatFile | undefined,
+    @Body() dto: SendAttachmentDto,
+  ) {
+    const { userId } = requireAuth(req);
+    if (!file) {
+      throw new BadRequestException('Adjuntá el archivo en el campo "file".');
+    }
+    return this.attachments.send(userId, id, file, dto.contenido);
+  }
+
+  /**
+   * Una URL firmada de cinco minutos para abrir el archivo de un mensaje.
+   * `no-store`: la URL es la credencial.
+   */
+  @Get(':id/messages/:messageId/attachment')
+  @Header('Cache-Control', 'no-store')
+  attachmentUrl(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('messageId', new ParseUUIDPipe()) messageId: string,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.attachments.url(userId, accessToken, id, messageId);
   }
 
   /** Marca como leído lo que mandó la otra persona. */

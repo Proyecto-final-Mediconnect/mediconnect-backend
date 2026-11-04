@@ -30,13 +30,23 @@ export interface ChatCounterpart {
   rol: ChatRole;
 }
 
+/** El archivo de un mensaje (ENG-102). El archivo se pide aparte, con una URL firmada. */
+export interface ChatAttachment {
+  /** `application/pdf`, `image/jpeg` o `image/png`. */
+  tipo: string;
+  /** En bytes. */
+  tamano: number;
+}
+
 export interface ChatMessage {
   id: string;
   conversacionId: string;
   autorId: string;
+  /** Vacío si el mensaje es solo un archivo. */
   contenido: string;
   enviadoEl: string;
   leidoEl: string | null;
+  adjunto: ChatAttachment | null;
 }
 
 export interface ConversationSummary {
@@ -65,6 +75,8 @@ const MESSAGE_SELECT = {
   conversation_id: true,
   sender_id: true,
   content: true,
+  attachment_mime: true,
+  attachment_size: true,
   created_at: true,
   read_at: true,
 } as const;
@@ -80,6 +92,8 @@ interface MessageRow {
   conversation_id: string;
   sender_id: string;
   content: string | null;
+  attachment_mime: string | null;
+  attachment_size: number | null;
   created_at: Date;
   read_at: Date | null;
 }
@@ -297,12 +311,69 @@ export class ConversationsService {
     now: Date = new Date(),
   ): Promise<ChatMessage> {
     const conversation = await this.participantsOf(userId, conversationId);
+    return this.deliver(userId, conversationId, conversation, { content }, now);
+  }
 
+  /**
+   * Manda un mensaje con un archivo que ya está en Storage (ENG-102). Lo llama
+   * `ChatAttachmentsService` después de validar y subir el archivo, que es quien
+   * sabe de buckets: acá solo se guarda el mensaje, igual que uno de texto.
+   */
+  async sendWithAttachment(
+    userId: string,
+    conversationId: string,
+    attachment: {
+      path: string;
+      mime: string;
+      size: number;
+      content: string | null;
+    },
+    now: Date = new Date(),
+  ): Promise<ChatMessage> {
+    const conversation = await this.participantsOf(userId, conversationId);
+    return this.deliver(
+      userId,
+      conversationId,
+      conversation,
+      {
+        content: attachment.content,
+        attachment_url: attachment.path,
+        attachment_mime: attachment.mime,
+        attachment_size: attachment.size,
+      },
+      now,
+    );
+  }
+
+  /**
+   * Que `userId` sea participante de la conversación, o 404. Para los adjuntos,
+   * que se validan antes de subir nada a Storage.
+   */
+  async assertParticipant(
+    userId: string,
+    conversationId: string,
+  ): Promise<void> {
+    await this.participantsOf(userId, conversationId);
+  }
+
+  /** Guarda el mensaje, devuelve el chat a las bandejas y avisa a la otra persona. */
+  private async deliver(
+    userId: string,
+    conversationId: string,
+    conversation: Participants,
+    data: {
+      content: string | null;
+      attachment_url?: string;
+      attachment_mime?: string;
+      attachment_size?: number;
+    },
+    now: Date,
+  ): Promise<ChatMessage> {
     const row = await this.prisma.message.create({
       data: {
         conversation_id: conversationId,
         sender_id: userId,
-        content,
+        ...data,
         created_at: now,
       },
       select: MESSAGE_SELECT,
@@ -488,6 +559,10 @@ function toChatMessage(row: MessageRow): ChatMessage {
     contenido: row.content ?? '',
     enviadoEl: row.created_at.toISOString(),
     leidoEl: row.read_at?.toISOString() ?? null,
+    adjunto:
+      row.attachment_mime && row.attachment_size !== null
+        ? { tipo: row.attachment_mime, tamano: row.attachment_size }
+        : null,
   };
 }
 

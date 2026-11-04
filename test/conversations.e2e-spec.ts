@@ -32,6 +32,12 @@ describe('Conversations (e2e)', () => {
   const messageCreate = jest.fn();
   const notificationCount = jest.fn();
   const notificationCreate = jest.fn();
+  const messageFindFirst = jest.fn();
+  /** Storage del chat (ENG-102): lo que sube el backend y lo que firma con el token del usuario. */
+  const storageUpload = jest.fn();
+  const storageRemove = jest.fn();
+  const storageSign = jest.fn();
+  let tokenFirmante: string | undefined;
 
   beforeAll(async () => {
     ({ publicKey, privateKey } = await generateKeyPair('ES256'));
@@ -44,7 +50,18 @@ describe('Conversations (e2e)', () => {
       messageCreate,
       notificationCount,
       notificationCreate,
+      messageFindFirst,
+      storageUpload,
+      storageRemove,
+      storageSign,
     ].forEach((fn) => fn.mockReset());
+    storageUpload.mockResolvedValue({ error: null });
+    storageRemove.mockResolvedValue({ error: null });
+    storageSign.mockResolvedValue({
+      data: { signedUrl: 'https://storage.test/firmada' },
+      error: null,
+    });
+    tokenFirmante = undefined;
 
     profileFindUnique.mockResolvedValue({ role: 'PACIENTE' });
     notificationCount.mockResolvedValue(0);
@@ -57,7 +74,7 @@ describe('Conversations (e2e)', () => {
         findFirst: conversationFindFirst,
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
-      message: { create: messageCreate },
+      message: { create: messageCreate, findFirst: messageFindFirst },
       patient: {
         findUnique: jest
           .fn()
@@ -72,6 +89,17 @@ describe('Conversations (e2e)', () => {
       .overrideProvider(SupabaseService)
       .useValue({
         getClient: () => ({ auth: {} }),
+        getServiceClient: () => ({
+          storage: {
+            from: () => ({ upload: storageUpload, remove: storageRemove }),
+          },
+        }),
+        getClientForToken: (token: string) => {
+          tokenFirmante = token;
+          return {
+            storage: { from: () => ({ createSignedUrl: storageSign }) },
+          };
+        },
         getJWKS: () => publicKey,
         getIssuer: () => ISSUER,
       })
@@ -226,6 +254,7 @@ describe('Conversations (e2e)', () => {
         contenido: 'Hola, doctora',
         enviadoEl: expect.any(String),
         leidoEl: null,
+        adjunto: null,
       });
       expect(notificationCreate).toHaveBeenCalledWith({
         data: expect.objectContaining({
@@ -283,6 +312,152 @@ describe('Conversations (e2e)', () => {
         .set('Authorization', `Bearer ${token}`)
         .expect(400);
       expect(conversationFindFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Archivos en el chat (ENG-102)', () => {
+    const PDF = Buffer.from('%PDF-1.7 estudio');
+    const MESSAGE_ID = '44444444-4444-4444-8444-444444444444';
+
+    function participante() {
+      conversationFindFirst.mockResolvedValue({
+        patient_id: SUB,
+        professional_id: PRO_ID,
+      });
+    }
+
+    it('sin sesión no se manda ni se abre ningún archivo', async () => {
+      const server = app.getHttpServer();
+      await request(server)
+        .post(`/conversations/${CONVERSATION_ID}/attachments`)
+        .attach('file', PDF, {
+          filename: 'estudio.pdf',
+          contentType: 'application/pdf',
+        })
+        .expect(401);
+      await request(server)
+        .get(
+          `/conversations/${CONVERSATION_ID}/messages/${MESSAGE_ID}/attachment`,
+        )
+        .expect(401);
+      expect(storageUpload).not.toHaveBeenCalled();
+    });
+
+    it('manda un PDF con texto: lo sube a la carpeta de la conversación y guarda el mensaje', async () => {
+      participante();
+      messageCreate.mockImplementation(
+        ({ data }: { data: Record<string, unknown> }) =>
+          Promise.resolve({
+            id: MESSAGE_ID,
+            conversation_id: CONVERSATION_ID,
+            sender_id: SUB,
+            content: data.content,
+            attachment_mime: data.attachment_mime,
+            attachment_size: data.attachment_size,
+            created_at: new Date('2026-11-04T12:00:00.000Z'),
+            read_at: null,
+          }),
+      );
+
+      const res = await request(app.getHttpServer())
+        .post(`/conversations/${CONVERSATION_ID}/attachments`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .field('contenido', 'El estudio que me pidió')
+        .attach('file', PDF, {
+          filename: 'resultado-VIH.pdf',
+          contentType: 'application/pdf',
+        })
+        .expect(201);
+
+      expect(res.body).toMatchObject({
+        id: MESSAGE_ID,
+        contenido: 'El estudio que me pidió',
+        adjunto: { tipo: 'application/pdf', tamano: PDF.length },
+      });
+      const [path] = storageUpload.mock.calls[0] as [string];
+      // El nombre original no llega a Storage: puede decir más de lo que hace falta.
+      expect(path).toMatch(
+        new RegExp(`^${CONVERSATION_ID}/[0-9a-f-]{36}[.]pdf$`),
+      );
+      expect(path).not.toContain('VIH');
+      const { data } = messageCreate.mock.calls[0][0] as {
+        data: Record<string, unknown>;
+      };
+      expect(data).toMatchObject({
+        attachment_url: path,
+        attachment_mime: 'application/pdf',
+        attachment_size: PDF.length,
+      });
+    });
+
+    it('sin archivo da 400', async () => {
+      participante();
+
+      await request(app.getHttpServer())
+        .post(`/conversations/${CONVERSATION_ID}/attachments`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .field('contenido', 'hola')
+        .expect(400);
+    });
+
+    it('un ejecutable con extensión .pdf da 400 y no llega a Storage', async () => {
+      participante();
+
+      await request(app.getHttpServer())
+        .post(`/conversations/${CONVERSATION_ID}/attachments`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .attach('file', Buffer.from([0x4d, 0x5a, 0x90, 0x00]), {
+          filename: 'receta.pdf',
+          contentType: 'application/pdf',
+        })
+        .expect(400);
+      expect(storageUpload).not.toHaveBeenCalled();
+    });
+
+    it('en una conversación ajena da 404 y no sube nada', async () => {
+      conversationFindFirst.mockResolvedValue(null);
+
+      await request(app.getHttpServer())
+        .post(`/conversations/${CONVERSATION_ID}/attachments`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .attach('file', PDF, {
+          filename: 'a.pdf',
+          contentType: 'application/pdf',
+        })
+        .expect(404);
+      expect(storageUpload).not.toHaveBeenCalled();
+    });
+
+    it('abre el archivo con una URL firmada con el token de quien pide, sin cachear', async () => {
+      participante();
+      messageFindFirst.mockResolvedValue({
+        attachment_url: `${CONVERSATION_ID}/archivo.pdf`,
+      });
+      const token = await signToken();
+
+      const res = await request(app.getHttpServer())
+        .get(
+          `/conversations/${CONVERSATION_ID}/messages/${MESSAGE_ID}/attachment`,
+        )
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body.url).toBe('https://storage.test/firmada');
+      expect(tokenFirmante).toBe(token);
+    });
+
+    it('un mensaje sin archivo da 404', async () => {
+      participante();
+      messageFindFirst.mockResolvedValue(null);
+
+      await request(app.getHttpServer())
+        .get(
+          `/conversations/${CONVERSATION_ID}/messages/${MESSAGE_ID}/attachment`,
+        )
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(404);
+      expect(storageSign).not.toHaveBeenCalled();
     });
   });
 });

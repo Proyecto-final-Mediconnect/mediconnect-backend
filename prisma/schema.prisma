@@ -626,7 +626,10 @@ model Message {
   conversation_id String    @db.Uuid
   sender_id       String    @db.Uuid
   content         String?
+  /// Ruta del archivo en el bucket privado `chat-attachments` (ENG-102), no una URL: se firma al pedirlo.
   attachment_url  String?
+  attachment_mime String?
+  attachment_size Int?
   read_at         DateTime? @db.Timestamptz(6)
   created_at      DateTime  @default(now()) @db.Timestamptz(6)
 

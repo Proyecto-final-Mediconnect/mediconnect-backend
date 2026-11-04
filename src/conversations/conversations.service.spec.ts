@@ -37,6 +37,8 @@ function messageRow(id: string, sender: string, at: string, read?: string) {
     conversation_id: CONVERSATION_ID,
     sender_id: sender,
     content: `mensaje ${id}`,
+    attachment_mime: null,
+    attachment_size: null,
     created_at: new Date(at),
     read_at: read ? new Date(read) : null,
   };
@@ -182,6 +184,7 @@ describe('ConversationsService', () => {
           contenido: 'mensaje m-1',
           enviadoEl: '2026-10-02T10:00:00.000Z',
           leidoEl: null,
+          adjunto: null,
         },
         noLeidos: 3,
         creadaEl: '2026-10-01T10:00:00.000Z',
