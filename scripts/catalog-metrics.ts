@@ -23,6 +23,19 @@ const TOTAL_PROFESSIONALS = Number(process.env.METRICS_ROWS ?? 20_000);
 const ITERATIONS = Number(process.env.METRICS_ITERATIONS ?? 30);
 const EMAIL_DOMAIN = 'metrics.test';
 
+/**
+ * Uno de cada `PENDING_EVERY` queda sin validar.
+ *
+ * Es constante y no un número suelto porque el porcentaje que informa el script
+ * se calcula desde acá: hasta ENG-185 el mensaje decía "80 % validados" mientras
+ * el código hacía 1 de cada 7 (85,7 %), y las dos líneas habían entrado juntas.
+ * Cambiar este número ahora cambia el mensaje solo.
+ */
+const PENDING_EVERY = 7;
+
+/** Porcentaje de sembrados que queda `VALIDADO`, derivado de `PENDING_EVERY`. */
+const VALIDATED_PCT = (100 * (PENDING_EVERY - 1)) / PENDING_EVERY;
+
 const prisma = new PrismaClient();
 const service = new CatalogService(
   prisma as unknown as PrismaService,
@@ -78,11 +91,12 @@ async function seed(): Promise<Record<string, string>> {
 
   for (let i = 0; i < TOTAL_PROFESSIONALS; i++) {
     const id = crypto.randomUUID();
-    // 1 de cada 7 queda sin validar: el catálogo debe descartarlos, y así el
-    // filtro por status no es trivialmente "toda la tabla". 7 es coprimo con
-    // los 5 valores de especialidad, para que "pendiente" no se concentre en
-    // una especialidad y la deje vacía.
-    const status = i % 7 === 0 ? 'PENDIENTE_VALIDACION_MATRICULA' : 'VALIDADO';
+    // 1 de cada `PENDING_EVERY` queda sin validar: el catálogo debe
+    // descartarlos, y así el filtro por status no es trivialmente "toda la
+    // tabla". 7 es coprimo con los 5 valores de especialidad, para que
+    // "pendiente" no se concentre en una especialidad y la deje vacía.
+    const status =
+      i % PENDING_EVERY === 0 ? 'PENDIENTE_VALIDACION_MATRICULA' : 'VALIDADO';
 
     profiles.push({
       id,
@@ -181,21 +195,29 @@ async function main(): Promise<void> {
   const url = process.env.DATABASE_URL ?? '';
   if (/supabase|pooler/.test(url)) {
     throw new Error(
-      'Estas métricas siembran cientos de filas: apuntá DATABASE_URL a la BD de tests (localhost:5433), no a Supabase.',
+      `Estas métricas siembran ${TOTAL_PROFESSIONALS} profesionales y los borran al terminar: ` +
+        'apuntá DATABASE_URL a la BD de tests (localhost:5433), no a Supabase.',
     );
   }
 
   console.log(`\nENG-49 — métricas del catálogo público`);
   console.log(
-    `Sembrando ${TOTAL_PROFESSIONALS} profesionales (80% validados)…`,
+    `Sembrando ${TOTAL_PROFESSIONALS} profesionales ` +
+      `(${VALIDATED_PCT.toFixed(1)} % validados)…`,
   );
   await cleanup();
   const specialtyIds = await seed();
 
+  // Filtrado por el dominio de prueba, igual que `cleanup()`. Sin el filtro
+  // cuenta todos los validados de la base —el seed de demo, lo que hayan dejado
+  // otros specs— y el número no cierra con el "Sembrando" de la línea de arriba.
   const validated = await prisma.professional.count({
-    where: { status: 'VALIDADO' },
+    where: {
+      status: 'VALIDADO',
+      profile: { email: { endsWith: EMAIL_DOMAIN } },
+    },
   });
-  console.log(`Listos: ${validated} validados visibles en el catálogo.\n`);
+  console.log(`Listos: ${validated} validados sembrados en el catálogo.\n`);
 
   console.log(`Latencia del service (${ITERATIONS} corridas por escenario)\n`);
   await measure('página 1 (sin filtros)', { page: 1, limit: 20 });
@@ -258,9 +280,35 @@ async function main(): Promise<void> {
     [specialtyIds['Cardiología']],
   );
 
-  console.log('\nLimpiando datos de prueba…');
-  await cleanup();
-  console.log('Listo.\n');
+  console.log('\nListo.\n');
+}
+
+/**
+ * Borra los datos sembrados, pase lo que pase.
+ *
+ * Va en el `finally` y no al final de `main()`: si una medición o un `EXPLAIN`
+ * fallan —o alguien corta con Ctrl-C— los 20.000 profesionales se quedan en la
+ * base. Y esa base **es la misma que usan los tests de integración**
+ * (`localhost:5433`, ver `scripts/test-integration.sh`), así que una corrida
+ * fallida acá deja la suite rota para el que venga después, con un síntoma que
+ * no apunta al catálogo.
+ *
+ * Si la limpieza falla, se reporta aparte y **no reemplaza** al error original:
+ * el que importa para saber qué pasó es el primero, y perderlo detrás de un
+ * fallo de limpieza es justo lo que haría difícil el diagnóstico.
+ */
+async function limpiar(): Promise<void> {
+  try {
+    console.log('\nLimpiando datos de prueba…');
+    await cleanup();
+  } catch (e: unknown) {
+    console.error(
+      `⚠️  No se pudieron borrar los datos de prueba. Quedaron filas @${EMAIL_DOMAIN} ` +
+        'en la base y pueden romper los tests de integración. Borralas a mano:',
+      e,
+    );
+    process.exitCode = 1;
+  }
 }
 
 main()
@@ -268,6 +316,7 @@ main()
     console.error('❌ Métricas fallaron:', e);
     process.exitCode = 1;
   })
-  .finally(() => {
-    void prisma.$disconnect();
+  .finally(async () => {
+    await limpiar();
+    await prisma.$disconnect();
   });
