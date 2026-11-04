@@ -57,9 +57,6 @@ jobs:
       # Base propia y vacía: el punto es que las migraciones corran desde cero,
       # como en un deploy a una base nueva.
       DATABASE_URL: 'postgresql://mediconnect:mediconnect@localhost:5432/mediconnect_migrations?schema=public'
-      # `prisma migrate diff` necesita una base descartable para materializar el
-      # esquema que describen las migraciones y compararlo.
-      SHADOW_DATABASE_URL: 'postgresql://mediconnect:mediconnect@localhost:5432/mediconnect_shadow'
       # El seed construye el cliente de Supabase al arrancar. No hace red.
       SUPABASE_URL: https://placeholder.supabase.co
       SUPABASE_ANON_KEY: placeholder-anon-key
@@ -82,12 +79,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Crear la shadow database
-        run: |
-          PGPASSWORD=mediconnect psql -h localhost -U mediconnect \
-            -d mediconnect_migrations \
-            -c 'create database mediconnect_shadow'
-
       # Las migraciones asumen la base de Supabase, no un Postgres pelado: usan
       # `auth.uid()` 52 veces, cuelgan un trigger de `auth.users` y otorgan
       # privilegios a los roles `anon` y `authenticated`. Un `postgres:15`
@@ -103,7 +94,7 @@ jobs:
       # estaba escrito en ningún lado.
       - name: Preparar los objetos que aporta Supabase
         run: |
-          for db in mediconnect_migrations mediconnect_shadow; do
+          for db in mediconnect_migrations; do
             PGPASSWORD=mediconnect psql -h localhost -U mediconnect \
               -v ON_ERROR_STOP=1 -d "$db" <<'SQL'
           do $$ begin create role anon nologin noinherit;
@@ -159,15 +150,15 @@ jobs:
       # `db push` el esquema sale del schema, así que un cambio sin migración
       # pasa verde y después falta en producción.
       #
+      # Se compara la base **que acaban de producir las migraciones** contra el
+      # `schema.prisma`, sin shadow database. Con `--shadow-database-url`,
+      # Prisma resetea esa base y se lleva puestas las extensiones que el
+      # bootstrap creó, y el diff falla por `gin_trgm_ops` en vez de por drift.
+      #
       # `--exit-code` devuelve 2 cuando hay diferencias.
       - name: Verificar que el schema y las migraciones coincidan
         run: |
-          pnpm exec prisma migrate diff \
-            --from-migrations ./prisma/migrations \
-            --to-schema-datamodel ./prisma/schema.prisma \
-            --shadow-database-url "$SHADOW_DATABASE_URL" \
-            --exit-code \
-          && echo "Sin drift: las migraciones describen el mismo esquema que schema.prisma."
+          pnpm exec prisma migrate diff             --from-schema-datasource ./prisma/schema.prisma             --to-schema-datamodel ./prisma/schema.prisma             --exit-code           && echo "Sin drift: las migraciones producen el mismo esquema que schema.prisma."
 
       # El deploy corre `db:setup` = `migrate deploy && db:seed`, así que el seed
       # es parte del camino que hay que probar. Además es el que primero choca
