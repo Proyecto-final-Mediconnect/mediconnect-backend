@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   ServiceUnavailableException,
@@ -9,6 +11,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import { invalidateMfaCache } from './guards/mfa-status-cache';
+import { hashToken } from './mfa-throttle';
 
 /** Lo que muestra la pantalla para escanear con la app autenticadora. */
 export interface MfaEnrollment {
@@ -44,6 +48,10 @@ const TIMEOUT_MS = 10_000;
 /** Con este nombre aparece la cuenta en la app autenticadora. */
 const ISSUER = 'MediConnect';
 
+/** Códigos fallidos seguidos con un mismo token del primer paso antes de bloquearlo. */
+const MAX_FALLOS = 5;
+const BLOQUEO_MS = 15 * 60 * 1000;
+
 const CODIGO_INVALIDO =
   'El código no es válido o ya venció. Probá con el que muestra ahora la app.';
 
@@ -71,6 +79,12 @@ const CODIGO_INVALIDO =
 export class MfaService {
   private readonly logger = new Logger(MfaService.name);
 
+  /** Códigos fallidos por token del primer paso (hash). Por proceso. */
+  private readonly fallos = new Map<
+    string,
+    { count: number; lockedUntil: number }
+  >();
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly config: ConfigService,
@@ -86,10 +100,16 @@ export class MfaService {
    * Empieza a activarla: crea un factor TOTP sin verificar y devuelve el QR.
    * Queda activa recién cuando se confirma con un código (`confirmEnrollment`).
    *
+   * No pide re-autenticación: se deja registro en la auditoría
+   * (`MFA_ENROLL_STARTED`) y solo se activa con un código válido.
+   *
    * Un intento anterior que quedó a medias se borra antes: Supabase no deja dos
    * factores sin verificar, y el QR viejo ya no le sirve a nadie.
    */
-  async startEnrollment(accessToken: string): Promise<MfaEnrollment> {
+  async startEnrollment(
+    userId: string,
+    accessToken: string,
+  ): Promise<MfaEnrollment> {
     const factors = await this.factors(accessToken);
     if (
       factors.some((f) => f.factor_type === 'totp' && f.status === 'verified')
@@ -111,6 +131,10 @@ export class MfaService {
       // Único por intento: Supabase rechaza dos factores con el mismo nombre.
       friendly_name: `${ISSUER} ${new Date().toISOString()}`,
     });
+    // Sin pedir la contraseña de nuevo (menor impacto): queda registrado y la
+    // activación igual exige un código del factor nuevo. Un aviso por mail
+    // queda para cuando haya plantilla.
+    await this.audit(userId, 'MFA_ENROLL_STARTED');
     return { factorId: res.id, qr: res.totp.qr_code, secret: res.totp.secret };
   }
 
@@ -125,11 +149,12 @@ export class MfaService {
     factorId: string,
     code: string,
   ): Promise<MfaSession> {
-    const session = await this.challengeAndVerify(accessToken, factorId, code);
+    const session = await this.verifyCode(userId, accessToken, factorId, code);
     await this.prisma.profile.update({
       where: { id: userId },
       data: { mfa_enabled: true },
     });
+    invalidateMfaCache(userId);
     await this.audit(userId, 'MFA_ENABLED');
     return session;
   }
@@ -139,13 +164,47 @@ export class MfaService {
    * código de la app, devuelve la sesión completa.
    */
   async verifyLogin(accessToken: string, code: string): Promise<MfaSession> {
-    const factor = await this.verifiedFactor(accessToken);
+    const key = hashToken(accessToken);
+    const lock = this.fallos.get(key);
+    if (lock && lock.lockedUntil > Date.now()) {
+      throw new HttpException(
+        'Demasiados códigos incorrectos. Ingresá de nuevo con tu email y contraseña en unos minutos.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    const me = await this.me(accessToken);
+    const factor = this.pickVerified(me.factors);
     if (!factor) {
       throw new BadRequestException(
         'Tu cuenta no tiene activa la verificación en dos pasos.',
       );
     }
-    return this.challengeAndVerify(accessToken, factor.id, code);
+    try {
+      const session = await this.challengeAndVerify(
+        accessToken,
+        factor.id,
+        code,
+      );
+      this.fallos.delete(key);
+      await this.auditSinFallar(me.id, 'MFA_LOGIN_OK');
+      return session;
+    } catch (err) {
+      if (err instanceof BadRequestException) {
+        const count = (lock?.count ?? 0) + 1;
+        const locked = count >= MAX_FALLOS;
+        if (this.fallos.size > 10_000) this.fallos.clear();
+        this.fallos.set(key, {
+          count: locked ? 0 : count,
+          lockedUntil: locked ? Date.now() + BLOQUEO_MS : 0,
+        });
+        await this.auditSinFallar(
+          me.id,
+          locked ? 'MFA_LOGIN_LOCKED' : 'MFA_LOGIN_FAILED',
+        );
+      }
+      throw err;
+    }
   }
 
   /**
@@ -165,18 +224,44 @@ export class MfaService {
     }
     // Supabase exige una sesión `aal2` para borrar un factor verificado: se usa
     // la que devuelve el código recién verificado.
-    const session = await this.challengeAndVerify(accessToken, factor.id, code);
-    await this.request('DELETE', `/factors/${factor.id}`, session.accessToken);
+    const session = await this.verifyCode(userId, accessToken, factor.id, code);
+    // Primero la base: si fallara al revés (factor borrado y el perfil sin
+    // actualizar), la cuenta quedaría bloqueada sin forma de entrar. Si falla
+    // el borrado, se vuelve a activar.
     await this.prisma.profile.update({
       where: { id: userId },
       data: { mfa_enabled: false },
     });
+    invalidateMfaCache(userId);
+    try {
+      await this.request(
+        'DELETE',
+        `/factors/${factor.id}`,
+        session.accessToken,
+      );
+    } catch (err) {
+      try {
+        await this.prisma.profile.update({
+          where: { id: userId },
+          data: { mfa_enabled: true },
+        });
+      } catch (rollbackErr) {
+        this.logger.error(
+          `No se pudo restaurar mfa_enabled de ${userId}: ${String(rollbackErr)}`,
+        );
+      }
+      invalidateMfaCache(userId);
+      throw err;
+    }
     await this.audit(userId, 'MFA_DISABLED');
   }
 
   /** El factor TOTP verificado de la persona, o `null`. */
   async verifiedFactor(accessToken: string): Promise<GoTrueFactor | null> {
-    const factors = await this.factors(accessToken);
+    return this.pickVerified((await this.me(accessToken)).factors);
+  }
+
+  private pickVerified(factors: GoTrueFactor[]): GoTrueFactor | null {
     return (
       factors.find(
         (f) => f.factor_type === 'totp' && f.status === 'verified',
@@ -184,13 +269,44 @@ export class MfaService {
     );
   }
 
+  private async me(
+    accessToken: string,
+  ): Promise<{ id: string; factors: GoTrueFactor[] }> {
+    const user = await this.request<{
+      id: string;
+      factors?: GoTrueFactor[] | null;
+    }>('GET', '/user', accessToken);
+    return { id: user.id, factors: user.factors ?? [] };
+  }
+
   private async factors(accessToken: string): Promise<GoTrueFactor[]> {
-    const user = await this.request<{ factors?: GoTrueFactor[] | null }>(
-      'GET',
-      '/user',
-      accessToken,
-    );
-    return user.factors ?? [];
+    return (await this.me(accessToken)).factors;
+  }
+
+  /** `challengeAndVerify` dejando en la auditoría los códigos incorrectos. */
+  private async verifyCode(
+    userId: string,
+    accessToken: string,
+    factorId: string,
+    code: string,
+  ): Promise<MfaSession> {
+    try {
+      return await this.challengeAndVerify(accessToken, factorId, code);
+    } catch (err) {
+      if (err instanceof BadRequestException) {
+        await this.auditSinFallar(userId, 'MFA_CODE_FAILED');
+      }
+      throw err;
+    }
+  }
+
+  /** Auditar un intento (ok o fallido) nunca tapa el resultado ni el error original. */
+  private async auditSinFallar(userId: string, action: string): Promise<void> {
+    try {
+      await this.audit(userId, action);
+    } catch (err) {
+      this.logger.error(`No se pudo auditar ${action}: ${String(err)}`);
+    }
   }
 
   private async challengeAndVerify(
@@ -267,7 +383,15 @@ export class MfaService {
 
     if (res.ok) {
       const text = await res.text();
-      return (text ? JSON.parse(text) : {}) as T;
+      try {
+        return (text ? JSON.parse(text) : {}) as T;
+      } catch {
+        // GoTrue devolvió 200 con algo que no es JSON (un proxy, una página de error).
+        this.logger.error(`Supabase Auth ${method} ${path} no devolvió JSON`);
+        throw new ServiceUnavailableException(
+          'No pudimos completar la verificación en dos pasos. Probá de nuevo en unos minutos.',
+        );
+      }
     }
     if (res.status === 401 || res.status === 403) {
       throw new UnauthorizedException('Tu sesión venció. Ingresá de nuevo.');

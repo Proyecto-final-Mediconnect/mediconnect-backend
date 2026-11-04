@@ -42,8 +42,8 @@ export class MfaController {
   @Header('Cache-Control', 'no-store')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   enroll(@Req() req: Request) {
-    const { accessToken } = requireAuth(req);
-    return this.mfa.startEnrollment(accessToken);
+    const { userId, accessToken } = requireAuth(req);
+    return this.mfa.startEnrollment(userId, accessToken);
   }
 
   /**

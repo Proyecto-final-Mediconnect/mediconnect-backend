@@ -11,6 +11,7 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { MobileMfaVerifyDto } from './dto/mfa.dto';
 import { MfaService } from './mfa.service';
+import { mfaPendingTracker } from './mfa-throttle';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { SkipLegal } from '../legal/skip-legal.decorator';
 
@@ -86,7 +87,10 @@ export class AuthMobileController {
   @Post('mfa/verify')
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  // Por token pendiente y no por IP; el bloqueo por intentos fallidos está en el servicio.
+  @Throttle({
+    default: { limit: 5, ttl: 60_000, getTracker: mfaPendingTracker },
+  })
   async verifyMfa(
     @Body() dto: MobileMfaVerifyDto,
   ): Promise<MobileSessionResponse> {

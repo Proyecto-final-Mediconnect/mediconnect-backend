@@ -581,7 +581,9 @@ describe('Auth registro (e2e)', () => {
       });
       const cookies = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
       expect(
-        cookies.some((c) => /^sb-mfa-pending=acc-aal1;.*HttpOnly/i.test(c)),
+        cookies.some((c) =>
+          /^sb-mfa-pending=acc-aal1;.*Path=\/auth\/mfa;.*HttpOnly/i.test(c),
+        ),
       ).toBe(true);
       // Las de sesión se limpian, no se setean.
       expect(cookies.some((c) => /^sb-access-token=acc/.test(c))).toBe(false);
@@ -620,6 +622,17 @@ describe('Auth registro (e2e)', () => {
       );
       expect(cookies.some((c) => /^sb-mfa-pending=;/.test(c))).toBe(true);
       expect(res.body.accessToken).toBeUndefined();
+    });
+
+    it('el logout borra también la cookie del primer paso', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/auth/logout')
+        .expect(200);
+
+      const cookies = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
+      expect(
+        cookies.some((c) => /^sb-mfa-pending=;.*Path=\/auth\/mfa/.test(c)),
+      ).toBe(true);
     });
 
     it('sin el primer paso, o pasados los cinco minutos, da 401', async () => {

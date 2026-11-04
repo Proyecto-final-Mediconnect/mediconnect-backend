@@ -20,6 +20,7 @@ import { SkipLegal } from '../legal/skip-legal.decorator';
 import { MfaCodeDto } from './dto/mfa.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { MfaService } from './mfa.service';
+import { mfaPendingTracker } from './mfa-throttle';
 
 const ACCESS_TOKEN_COOKIE = 'sb-access-token';
 const REFRESH_TOKEN_COOKIE = 'sb-refresh-token';
@@ -30,6 +31,8 @@ const REFRESH_TOKEN_COOKIE = 'sb-refresh-token';
  */
 const MFA_PENDING_COOKIE = 'sb-mfa-pending';
 const MFA_PENDING_MAX_AGE_MS = 5 * 60 * 1000;
+/** La cookie del primer paso solo viaja a las rutas que la usan. */
+const MFA_PENDING_PATH = '/auth/mfa';
 
 /**
  * Opciones de cookie compartidas por login/refresh/logout (deben coincidir
@@ -81,6 +84,14 @@ export class AuthController {
     const base = sessionCookieOptions();
     res.clearCookie(ACCESS_TOKEN_COOKIE, base);
     res.clearCookie(REFRESH_TOKEN_COOKIE, base);
+  }
+
+  /** Mismas opciones (y `path`) con que se setea, o el browser no la borra. */
+  private clearMfaPendingCookie(res: Response) {
+    res.clearCookie(MFA_PENDING_COOKIE, {
+      ...sessionCookieOptions(),
+      path: MFA_PENDING_PATH,
+    });
   }
 
   /**
@@ -138,6 +149,7 @@ export class AuthController {
       this.clearSessionCookies(res);
       res.cookie(MFA_PENDING_COOKIE, session.accessToken, {
         ...sessionCookieOptions(),
+        path: MFA_PENDING_PATH,
         maxAge: MFA_PENDING_MAX_AGE_MS,
       });
       return { user: session.user, mfaRequired: true };
@@ -154,12 +166,15 @@ export class AuthController {
    * El segundo paso del ingreso (ENG-88): el código de la app autenticadora.
    * Cambia el token del primer paso por la sesión completa.
    *
-   * Mismo rate limit que el login: un código de 6 dígitos se adivina por fuerza
-   * bruta si se lo deja probar sin límite.
+   * Un código de 6 dígitos se adivina por fuerza bruta si se lo deja probar sin
+   * límite: 5 por minuto por token pendiente (no por IP) y, además, bloqueo tras
+   * varios códigos fallidos (ver `MfaService.verifyLogin`).
    */
   @Post('mfa/verify')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle({
+    default: { limit: 5, ttl: 60_000, getTracker: mfaPendingTracker },
+  })
   async verifyMfa(
     @Body() dto: MfaCodeDto,
     @Req() req: Request,
@@ -172,7 +187,7 @@ export class AuthController {
       );
     }
     const session = await this.mfa.verifyLogin(pending, dto.code);
-    res.clearCookie(MFA_PENDING_COOKIE, sessionCookieOptions());
+    this.clearMfaPendingCookie(res);
     this.setSessionCookies(res, session);
     return { user: session.user };
   }
@@ -238,6 +253,7 @@ export class AuthController {
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   logout(@Res({ passthrough: true }) res: Response) {
+    this.clearMfaPendingCookie(res);
     // Idempotente y sin Guard: borrar las cookies no requiere que el token
     // siga siendo válido (puede haber expirado y el cliente igual quiere
     // limpiar su estado de sesión).
