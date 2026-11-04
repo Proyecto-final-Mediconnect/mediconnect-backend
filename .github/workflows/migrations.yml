@@ -113,6 +113,15 @@ jobs:
           do $$ begin create role service_role nologin noinherit bypassrls;
             exception when duplicate_object then null; end $$;
 
+          -- Extensiones. Ninguna migración las crea: el `schema.prisma` las
+          -- declara en `previewFeatures`/`extensions` y Supabase las trae de
+          -- fábrica, así que el código asume que están. `pg_trgm` es la que
+          -- hace falta para el índice GIN del catálogo (ENG-49) y es la que
+          -- cortó la corrida anterior con `gin_trgm_ops does not exist`.
+          create extension if not exists pgcrypto;
+          create extension if not exists citext;
+          create extension if not exists pg_trgm;
+
           create schema if not exists auth;
 
           -- Lo mínimo de `auth.users` que tocan las migraciones: el trigger
