@@ -88,6 +88,55 @@ jobs:
             -d mediconnect_migrations \
             -c 'create database mediconnect_shadow'
 
+      # Las migraciones asumen la base de Supabase, no un Postgres pelado: usan
+      # `auth.uid()` 52 veces, cuelgan un trigger de `auth.users` y otorgan
+      # privilegios a los roles `anon` y `authenticated`. Un `postgres:15`
+      # limpio no tiene nada de eso, y la segunda migración se cae con
+      # `ERROR: schema "auth" does not exist`.
+      #
+      # Esto recrea el mínimo que las migraciones necesitan: la misma receta
+      # que ya repiten los specs de integración, acá en un solo lugar.
+      #
+      # Que haga falta es, en sí, información útil: **la cadena de migraciones
+      # no se puede aplicar sobre un PostgreSQL vacío**. Para levantar el
+      # proyecto en una base nueva hay que crear estos objetos primero, y eso no
+      # estaba escrito en ningún lado.
+      - name: Preparar los objetos que aporta Supabase
+        run: |
+          for db in mediconnect_migrations mediconnect_shadow; do
+            PGPASSWORD=mediconnect psql -h localhost -U mediconnect \
+              -v ON_ERROR_STOP=1 -d "$db" <<'SQL'
+          do $$ begin create role anon nologin noinherit;
+            exception when duplicate_object then null; end $$;
+          do $$ begin create role authenticated nologin noinherit;
+            exception when duplicate_object then null; end $$;
+          do $$ begin create role service_role nologin noinherit bypassrls;
+            exception when duplicate_object then null; end $$;
+
+          create schema if not exists auth;
+
+          -- Lo mínimo de `auth.users` que tocan las migraciones: el trigger
+          -- `on_auth_user_created` lee `id`, `email` y `raw_user_meta_data`.
+          create table if not exists auth.users (
+            id                 uuid primary key default gen_random_uuid(),
+            email              text,
+            raw_user_meta_data jsonb
+          );
+
+          -- `auth.uid()` de Supabase: el claim `sub` del JWT que entra por
+          -- PostgREST. Igual que en los specs de integración.
+          create or replace function auth.uid() returns uuid as $$
+            select nullif(
+              current_setting('request.jwt.claims', true)::json ->> 'sub',
+              ''
+            )::uuid
+          $$ language sql stable;
+
+          grant usage on schema public to anon, authenticated;
+          grant usage on schema auth to authenticated;
+          SQL
+          done
+
       # El corazón del workflow: las migraciones, en orden, contra una base
       # vacía. Lo que esto cubre y `db push` no: que cada archivo SQL sea válido,
       # que el orden alcance (hay tres timestamps duplicados y Prisma desempata
