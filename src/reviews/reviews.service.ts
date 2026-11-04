@@ -9,7 +9,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateReviewDto } from './dto/create-review.dto';
 import type { ModerateReviewDto } from './dto/moderate-review.dto';
-import { isInappropriate } from './language-filter';
+import { containsContactInfo, isInappropriate } from './language-filter';
 
 /** Cuántas reseñas por página, en el perfil y en la cola de moderación. */
 export const REVIEWS_PAGE_SIZE = 10;
@@ -280,27 +280,42 @@ export class ReviewsService {
       );
     }
 
-    const row = await this.prisma.reviewResponse.upsert({
-      where: { review_id: reviewId },
-      create: {
-        review_id: reviewId,
-        professional_id: professionalId,
-        content,
-        created_at: now,
-      },
-      // La fecha que se muestra es la de la última versión.
-      update: { content, created_at: now },
-      select: { review_id: true, content: true, created_at: true },
-    });
+    if (containsContactInfo(content)) {
+      throw new UnprocessableEntityException(
+        'Tu respuesta no puede incluir links, mails ni teléfonos.',
+      );
+    }
 
-    await this.prisma.auditLog.create({
-      data: {
-        actor_id: professionalId,
-        action: 'REVIEW_RESPONSE_SAVED',
-        resource_type: 'review_responses',
-        resource_id: reviewId,
-        metadata: { length: content.length },
-      },
+    const row = await this.prisma.$transaction(async (tx) => {
+      const previa = await tx.reviewResponse.findUnique({
+        where: { review_id: reviewId },
+        select: { content: true },
+      });
+      const saved = await tx.reviewResponse.upsert({
+        where: { review_id: reviewId },
+        create: {
+          review_id: reviewId,
+          professional_id: professionalId,
+          content,
+          created_at: now,
+        },
+        // Se conserva la fecha de la primera versión (no hay updated_at).
+        update: { content },
+        select: { review_id: true, content: true, created_at: true },
+      });
+      await tx.auditLog.create({
+        data: {
+          actor_id: professionalId,
+          action: 'REVIEW_RESPONSE_SAVED',
+          resource_type: 'review_responses',
+          resource_id: reviewId,
+          metadata: {
+            length: content.length,
+            previousContent: previa?.content ?? null,
+          },
+        },
+      });
+      return saved;
     });
 
     return {
@@ -316,19 +331,26 @@ export class ReviewsService {
     reviewId: string,
   ): Promise<void> {
     await this.assertProfessional(professionalId);
-    const { count } = await this.prisma.reviewResponse.deleteMany({
-      where: { review_id: reviewId, professional_id: professionalId },
-    });
-    if (count === 0) {
-      throw new NotFoundException('Esa reseña no tiene una respuesta tuya.');
-    }
-    await this.prisma.auditLog.create({
-      data: {
-        actor_id: professionalId,
-        action: 'REVIEW_RESPONSE_DELETED',
-        resource_type: 'review_responses',
-        resource_id: reviewId,
-      },
+    await this.prisma.$transaction(async (tx) => {
+      const previa = await tx.reviewResponse.findFirst({
+        where: { review_id: reviewId, professional_id: professionalId },
+        select: { content: true },
+      });
+      const { count } = await tx.reviewResponse.deleteMany({
+        where: { review_id: reviewId, professional_id: professionalId },
+      });
+      if (count === 0) {
+        throw new NotFoundException('Esa reseña no tiene una respuesta tuya.');
+      }
+      await tx.auditLog.create({
+        data: {
+          actor_id: professionalId,
+          action: 'REVIEW_RESPONSE_DELETED',
+          resource_type: 'review_responses',
+          resource_id: reviewId,
+          metadata: { previousContent: previa?.content ?? null },
+        },
+      });
     });
   }
 

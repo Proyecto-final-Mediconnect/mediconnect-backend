@@ -54,7 +54,13 @@ describe('ReviewsService', () => {
       findUniqueOrThrow: jest.Mock;
     };
     profile: { findUnique: jest.Mock };
-    reviewResponse: { upsert: jest.Mock; deleteMany: jest.Mock };
+    reviewResponse: {
+      upsert: jest.Mock;
+      deleteMany: jest.Mock;
+      findUnique: jest.Mock;
+      findFirst: jest.Mock;
+    };
+    $transaction: jest.Mock;
     auditLog: { create: jest.Mock };
     notification: { create: jest.Mock };
   };
@@ -87,10 +93,16 @@ describe('ReviewsService', () => {
           created_at: CREATED,
         }),
         deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUnique: jest.fn().mockResolvedValue({ content: 'Versión vieja.' }),
+        findFirst: jest.fn().mockResolvedValue({ content: 'Versión vieja.' }),
       },
+      $transaction: jest.fn(),
       auditLog: { create: jest.fn().mockResolvedValue({}) },
       notification: { create: jest.fn().mockResolvedValue({}) },
     };
+    prisma.$transaction.mockImplementation((cb: (tx: unknown) => unknown) =>
+      cb(prisma),
+    );
     service = new ReviewsService(prisma as unknown as PrismaService);
   });
 
@@ -378,7 +390,7 @@ describe('ReviewsService', () => {
             content: 'Gracias por la devolución.',
             created_at: now,
           },
-          update: { content: 'Gracias por la devolución.', created_at: now },
+          update: { content: 'Gracias por la devolución.' },
         }),
       );
       expect(prisma.auditLog.create).toHaveBeenCalledWith({
@@ -386,6 +398,10 @@ describe('ReviewsService', () => {
           actor_id: PRO,
           action: 'REVIEW_RESPONSE_SAVED',
           resource_id: RESENA,
+          metadata: {
+            length: 26,
+            previousContent: 'Versión vieja.',
+          },
         }),
       });
       expect(res).toEqual({
@@ -423,6 +439,31 @@ describe('ReviewsService', () => {
         service.respond(PRO, RESENA, 'Sos un forro, nunca fuiste'),
       ).rejects.toBeInstanceOf(UnprocessableEntityException);
       expect(prisma.reviewResponse.upsert).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      'Escribime a https://mi-clinica.com',
+      'Mirá www.clinica.com.ar',
+      'Mi mail es dr@clinica.com',
+      'Llamame al 11 5555-1234',
+      'WhatsApp +54 9 11 5555 1234',
+    ])('una respuesta con datos de contacto (%s) no se guarda', async (txt) => {
+      await expect(service.respond(PRO, RESENA, txt)).rejects.toBeInstanceOf(
+        UnprocessableEntityException,
+      );
+      expect(prisma.reviewResponse.upsert).not.toHaveBeenCalled();
+    });
+
+    it('el filtro no se evade con caracteres invisibles', async () => {
+      await expect(
+        service.respond(PRO, RESENA, 'Sos un fo\u200Brro'),
+      ).rejects.toBeInstanceOf(UnprocessableEntityException);
+    });
+
+    it('si falla la auditoría, la respuesta no queda guardada aparte', async () => {
+      prisma.auditLog.create.mockRejectedValue(new Error('db'));
+      await expect(service.respond(PRO, RESENA, 'Hola')).rejects.toThrow('db');
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     });
 
     it('solo responde un profesional', async () => {
