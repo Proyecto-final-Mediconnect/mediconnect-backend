@@ -1,0 +1,123 @@
+name: Migraciones
+
+# ENG-187 · La cadena de migraciones se valida ACÁ, no en el deploy.
+#
+# `prisma migrate deploy` corría en un solo lugar del proyecto:
+# `deploy-production.yml`. El CI de integración prepara la base con
+# `prisma db push` (`scripts/test-integration.sh`), que deriva el esquema del
+# `schema.prisma` y **se saltea los archivos de migración por completo**.
+#
+# Para una migración que solo crea tablas da igual: el esquema resultante es el
+# mismo. Para una con lógica —un dedup, un backfill, un `raise`— no, y hay por
+# lo menos seis así (ENG-170, ENG-65, ENG-70 ×2, ENG-164, ENG-145).
+#
+# Sin este workflow, la primera vez que las migraciones corren en orden contra
+# una base es el deploy de producción. Si una falla, el deploy se corta con la
+# base a medio migrar y destrabarlo pide un `prisma migrate resolve` a mano (ver
+# el README). Es el punto 2 de la review de backend#83..#90 del 02/11, que pedía
+# verificarlas "en CI o contra una base real".
+#
+# Los triggers acompañan a los de `ci.yml` e `integration-tests.yml` por el mismo
+# motivo documentado allá: sin el filtro de `branches` en `pull_request`, un PR
+# apilado sobre otra rama de feature también queda cubierto; y `edited` está
+# porque reapuntar la base de un PR no dispara los tipos por defecto.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches:
+      - 'release/**'
+      - 'main'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migraciones:
+    name: Cadena de migraciones
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: mediconnect
+          POSTGRES_PASSWORD: mediconnect
+          POSTGRES_DB: mediconnect_migrations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mediconnect -d mediconnect_migrations"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Base propia y vacía: el punto es que las migraciones corran desde cero,
+      # como en un deploy a una base nueva.
+      DATABASE_URL: 'postgresql://mediconnect:mediconnect@localhost:5432/mediconnect_migrations?schema=public'
+      # `prisma migrate diff` necesita una base descartable para materializar el
+      # esquema que describen las migraciones y compararlo.
+      SHADOW_DATABASE_URL: 'postgresql://mediconnect:mediconnect@localhost:5432/mediconnect_shadow'
+      # El seed construye el cliente de Supabase al arrancar. No hace red.
+      SUPABASE_URL: https://placeholder.supabase.co
+      SUPABASE_ANON_KEY: placeholder-anon-key
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Crear la shadow database
+        run: |
+          PGPASSWORD=mediconnect psql -h localhost -U mediconnect \
+            -d mediconnect_migrations \
+            -c 'create database mediconnect_shadow'
+
+      # El corazón del workflow: las migraciones, en orden, contra una base
+      # vacía. Lo que esto cubre y `db push` no: que cada archivo SQL sea válido,
+      # que el orden alcance (hay tres timestamps duplicados y Prisma desempata
+      # por el resto del nombre), y que la lógica de las que hacen algo más que
+      # DDL se ejecute de verdad.
+      - name: Aplicar las migraciones desde cero
+        run: pnpm exec prisma migrate deploy
+
+      # Detecta que alguien haya tocado el `schema.prisma` sin crear la
+      # migración correspondiente. Es el caso que el CI de hoy NO ve: con
+      # `db push` el esquema sale del schema, así que un cambio sin migración
+      # pasa verde y después falta en producción.
+      #
+      # `--exit-code` devuelve 2 cuando hay diferencias.
+      - name: Verificar que el schema y las migraciones coincidan
+        run: |
+          pnpm exec prisma migrate diff \
+            --from-migrations ./prisma/migrations \
+            --to-schema-datamodel ./prisma/schema.prisma \
+            --shadow-database-url "$SHADOW_DATABASE_URL" \
+            --exit-code \
+          && echo "Sin drift: las migraciones describen el mismo esquema que schema.prisma."
+
+      # El deploy corre `db:setup` = `migrate deploy && db:seed`, así que el seed
+      # es parte del camino que hay que probar. Además es el que primero choca
+      # con una migración que aplicó pero dejó los datos en un estado raro.
+      - name: Correr el seed sobre las migraciones
+        run: pnpm run db:seed
+
+      # Dos veces: el seed tiene que ser idempotente. Es lo que pasa en cada
+      # deploy a partir del segundo.
+      - name: Correr el seed otra vez (idempotencia)
+        run: pnpm run db:seed
