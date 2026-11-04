@@ -17,10 +17,22 @@ import { RegisterPatientDto } from './dto/register-patient.dto';
 import { RegisterProfessionalDto } from './dto/register-professional.dto';
 import { legalAcceptanceContext } from '../legal/acceptance-context';
 import { SkipLegal } from '../legal/skip-legal.decorator';
+import { MfaCodeDto } from './dto/mfa.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { MfaService } from './mfa.service';
+import { mfaPendingTracker } from './mfa-throttle';
 
 const ACCESS_TOKEN_COOKIE = 'sb-access-token';
 const REFRESH_TOKEN_COOKIE = 'sb-refresh-token';
+/**
+ * El token del primer paso del ingreso cuando falta el código de la
+ * verificación en dos pasos (ENG-88). Vive cinco minutos: lo justo para abrir
+ * la app autenticadora y copiar el código.
+ */
+const MFA_PENDING_COOKIE = 'sb-mfa-pending';
+const MFA_PENDING_MAX_AGE_MS = 5 * 60 * 1000;
+/** La cookie del primer paso solo viaja a las rutas que la usan. */
+const MFA_PENDING_PATH = '/auth/mfa';
 
 /**
  * Opciones de cookie compartidas por login/refresh/logout (deben coincidir
@@ -56,9 +68,37 @@ function sessionCookieOptions() {
 @SkipLegal()
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly mfa: MfaService,
+  ) {}
 
   private setSessionCookies(
+    res: Response,
+    session: { accessToken: string; refreshToken: string },
+  ) {
+    AuthController.setSessionCookies(res, session);
+  }
+
+  private clearSessionCookies(res: Response) {
+    const base = sessionCookieOptions();
+    res.clearCookie(ACCESS_TOKEN_COOKIE, base);
+    res.clearCookie(REFRESH_TOKEN_COOKIE, base);
+  }
+
+  /** Mismas opciones (y `path`) con que se setea, o el browser no la borra. */
+  private clearMfaPendingCookie(res: Response) {
+    res.clearCookie(MFA_PENDING_COOKIE, {
+      ...sessionCookieOptions(),
+      path: MFA_PENDING_PATH,
+    });
+  }
+
+  /**
+   * Static para que `MfaController` también la use: al activar la verificación
+   * en dos pasos, la sesión pasa a `aal2` y las cookies se renuevan.
+   */
+  static setSessionCookies(
     res: Response,
     session: { accessToken: string; refreshToken: string },
   ) {
@@ -71,12 +111,6 @@ export class AuthController {
       ...base,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 días
     });
-  }
-
-  private clearSessionCookies(res: Response) {
-    const base = sessionCookieOptions();
-    res.clearCookie(ACCESS_TOKEN_COOKIE, base);
-    res.clearCookie(REFRESH_TOKEN_COOKIE, base);
   }
 
   @Post('register')
@@ -108,10 +142,53 @@ export class AuthController {
   ) {
     const session = await this.authService.login(dto);
 
+    // ENG-88: con la verificación en dos pasos activa, la contraseña sola no
+    // abre la sesión. El token del primer paso queda en una cookie aparte, de
+    // cinco minutos, y la web pide el código.
+    if (session.mfaRequired) {
+      this.clearSessionCookies(res);
+      res.cookie(MFA_PENDING_COOKIE, session.accessToken, {
+        ...sessionCookieOptions(),
+        path: MFA_PENDING_PATH,
+        maxAge: MFA_PENDING_MAX_AGE_MS,
+      });
+      return { user: session.user, mfaRequired: true };
+    }
+
     // La sesión se guarda en cookies httpOnly (no accesibles por JS → mitiga
     // robo de token vía XSS). El cliente no recibe los tokens en el body.
     this.setSessionCookies(res, session);
 
+    return { user: session.user };
+  }
+
+  /**
+   * El segundo paso del ingreso (ENG-88): el código de la app autenticadora.
+   * Cambia el token del primer paso por la sesión completa.
+   *
+   * Un código de 6 dígitos se adivina por fuerza bruta si se lo deja probar sin
+   * límite: 5 por minuto por token pendiente (no por IP) y, además, bloqueo tras
+   * varios códigos fallidos (ver `MfaService.verifyLogin`).
+   */
+  @Post('mfa/verify')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({
+    default: { limit: 5, ttl: 60_000, getTracker: mfaPendingTracker },
+  })
+  async verifyMfa(
+    @Body() dto: MfaCodeDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const pending = req.cookies?.[MFA_PENDING_COOKIE] as string | undefined;
+    if (!pending) {
+      throw new UnauthorizedException(
+        'Pasaron más de cinco minutos. Ingresá tu email y contraseña de nuevo.',
+      );
+    }
+    const session = await this.mfa.verifyLogin(pending, dto.code);
+    this.clearMfaPendingCookie(res);
+    this.setSessionCookies(res, session);
     return { user: session.user };
   }
 
@@ -176,6 +253,7 @@ export class AuthController {
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   logout(@Res({ passthrough: true }) res: Response) {
+    this.clearMfaPendingCookie(res);
     // Idempotente y sin Guard: borrar las cookies no requiere que el token
     // siga siendo válido (puede haber expirado y el cliente igual quiere
     // limpiar su estado de sesión).

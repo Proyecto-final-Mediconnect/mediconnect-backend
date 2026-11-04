@@ -350,6 +350,46 @@ describe('AuthService', () => {
       accessToken: 'acc',
       refreshToken: 'ref',
       user: { id: 'uid', email: loginDto.email },
+      mfaRequired: false,
+    });
+  });
+
+  it('con un factor TOTP verificado, el login avisa que falta el segundo paso (ENG-88)', async () => {
+    signInWithPassword.mockResolvedValue({
+      data: {
+        session: { access_token: 'acc', refresh_token: 'ref' },
+        user: {
+          id: 'uid',
+          email: loginDto.email,
+          factors: [
+            { id: 'f-0', factor_type: 'totp', status: 'unverified' },
+            { id: 'f-1', factor_type: 'totp', status: 'verified' },
+          ],
+        },
+      },
+      error: null,
+    });
+
+    await expect(service.login(loginDto)).resolves.toMatchObject({
+      mfaRequired: true,
+    });
+  });
+
+  it('un factor que quedó sin verificar no pide el segundo paso', async () => {
+    signInWithPassword.mockResolvedValue({
+      data: {
+        session: { access_token: 'acc', refresh_token: 'ref' },
+        user: {
+          id: 'uid',
+          email: loginDto.email,
+          factors: [{ id: 'f-0', factor_type: 'totp', status: 'unverified' }],
+        },
+      },
+      error: null,
+    });
+
+    await expect(service.login(loginDto)).resolves.toMatchObject({
+      mfaRequired: false,
     });
   });
 

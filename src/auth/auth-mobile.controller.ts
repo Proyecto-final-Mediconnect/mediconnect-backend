@@ -9,6 +9,9 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
+import { MobileMfaVerifyDto } from './dto/mfa.dto';
+import { MfaService } from './mfa.service';
+import { mfaPendingTracker } from './mfa-throttle';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { SkipLegal } from '../legal/skip-legal.decorator';
 
@@ -17,6 +20,16 @@ export interface MobileSessionResponse {
   user: { id: string; email?: string };
   accessToken: string;
   refreshToken: string;
+}
+
+/**
+ * El primer paso de un ingreso con verificación en dos pasos (ENG-88): sin
+ * sesión todavía, solo el token para mandar junto con el código.
+ */
+export interface MobileMfaRequiredResponse {
+  user: { id: string; email?: string };
+  mfaRequired: true;
+  mfaToken: string;
 }
 
 /**
@@ -50,15 +63,41 @@ export interface MobileSessionResponse {
 @SkipLegal()
 @Controller('auth/mobile')
 export class AuthMobileController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly mfa: MfaService,
+  ) {}
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
-  async login(@Body() dto: LoginDto): Promise<MobileSessionResponse> {
-    const { user, accessToken, refreshToken } =
+  async login(
+    @Body() dto: LoginDto,
+  ): Promise<MobileSessionResponse | MobileMfaRequiredResponse> {
+    const { user, accessToken, refreshToken, mfaRequired } =
       await this.authService.login(dto);
+    // ENG-88: el refresh token del primer paso no sale: con él se podría
+    // renovar una sesión sin haber pasado nunca el segundo.
+    if (mfaRequired) return { user, mfaRequired: true, mfaToken: accessToken };
+    return { user, accessToken, refreshToken };
+  }
+
+  /** El segundo paso del ingreso (ENG-88): el token del primero y el código. */
+  @Post('mfa/verify')
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  // Por token pendiente y no por IP; el bloqueo por intentos fallidos está en el servicio.
+  @Throttle({
+    default: { limit: 5, ttl: 60_000, getTracker: mfaPendingTracker },
+  })
+  async verifyMfa(
+    @Body() dto: MobileMfaVerifyDto,
+  ): Promise<MobileSessionResponse> {
+    const { user, accessToken, refreshToken } = await this.mfa.verifyLogin(
+      dto.mfaToken,
+      dto.code,
+    );
     return { user, accessToken, refreshToken };
   }
 

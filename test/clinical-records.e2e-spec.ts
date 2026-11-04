@@ -141,7 +141,11 @@ describe('Historia clínica (e2e)', () => {
   });
 
   function signToken(sub: string = PROFESSIONAL): Promise<string> {
-    return new SignJWT({ email: 'pro@test.com', role: 'authenticated' })
+    return new SignJWT({
+      email: 'pro@test.com',
+      role: 'authenticated',
+      aal: 'aal2',
+    })
       .setProtectedHeader({ alg: 'ES256' })
       .setSubject(sub)
       .setIssuer(ISSUER)

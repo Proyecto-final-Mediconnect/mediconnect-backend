@@ -6,7 +6,5 @@
   "transform": {
     "^.+\\.(t|j)s$": "ts-jest"
   },
-  "transformIgnorePatterns": [
-    "/node_modules/\\.pnpm/(?!jose@)"
-  ]
+  "transformIgnorePatterns": ["/node_modules/\\.pnpm/(?!jose@)"]
 }

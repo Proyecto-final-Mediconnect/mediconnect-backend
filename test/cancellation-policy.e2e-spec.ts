@@ -85,7 +85,11 @@ describe('Política de cancelación (e2e)', () => {
   });
 
   function signToken(): Promise<string> {
-    return new SignJWT({ email: 'pro@test.com', role: 'authenticated' })
+    return new SignJWT({
+      email: 'pro@test.com',
+      role: 'authenticated',
+      aal: 'aal2',
+    })
       .setProtectedHeader({ alg: 'ES256' })
       .setSubject(SUB)
       .setIssuer(ISSUER)

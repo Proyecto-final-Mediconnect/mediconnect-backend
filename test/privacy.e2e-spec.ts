@@ -112,7 +112,11 @@ describe('Derechos ARCO (e2e)', () => {
   });
 
   function token(): Promise<string> {
-    return new SignJWT({ email: 'marina@test.com', role: 'authenticated' })
+    return new SignJWT({
+      email: 'marina@test.com',
+      role: 'authenticated',
+      aal: 'aal2',
+    })
       .setProtectedHeader({ alg: 'ES256' })
       .setSubject(SUB)
       .setIssuer(ISSUER)
