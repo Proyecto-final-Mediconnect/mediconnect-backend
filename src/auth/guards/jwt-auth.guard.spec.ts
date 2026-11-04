@@ -1,3 +1,4 @@
+import { clearMfaCache } from './mfa-status-cache';
 import {
   ExecutionContext,
   ForbiddenException,
@@ -88,6 +89,7 @@ describe('JwtAuthGuard', () => {
     } as unknown as SupabaseService;
     legalCanActivate.mockReset().mockResolvedValue(true);
     profileFindUnique.mockReset().mockResolvedValue({ mfa_enabled: false });
+    clearMfaCache();
     guard = new JwtAuthGuard(supabase, legalAccepted, prisma);
   });
 
@@ -197,6 +199,7 @@ describe('JwtAuthGuard', () => {
       },
       getIssuer: () => ISSUER,
     } as unknown as SupabaseService;
+    clearMfaCache();
     guard = new JwtAuthGuard(supabase, legalAccepted, prisma);
 
     const token = await sign();
@@ -214,6 +217,7 @@ describe('JwtAuthGuard', () => {
       },
       getIssuer: () => ISSUER,
     } as unknown as SupabaseService;
+    clearMfaCache();
     guard = new JwtAuthGuard(supabase, legalAccepted, prisma);
 
     const token = await sign();
@@ -277,6 +281,36 @@ describe('JwtAuthGuard', () => {
         where: { id: expect.any(String) },
         select: { mfa_enabled: true },
       });
+    });
+
+    it('con la verificación activa, un token sin claim aal también da 401 (no falla abierto)', async () => {
+      profileFindUnique.mockResolvedValue({ mfa_enabled: true });
+      const token = await sign();
+
+      await expect(
+        guard.canActivate(makeContext(requestWith(token))),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('cachea el estado un rato: no consulta la base en cada request', async () => {
+      const token = await sign({ aal: 'aal1' });
+
+      await guard.canActivate(makeContext(requestWith(token)));
+      await guard.canActivate(makeContext(requestWith(token)));
+
+      expect(profileFindUnique).toHaveBeenCalledTimes(1);
+    });
+
+    it('el caché vence a los 30 segundos', async () => {
+      const token = await sign({ aal: 'aal1' });
+      const now = Date.now();
+      const spy = jest.spyOn(Date, 'now').mockReturnValue(now);
+      await guard.canActivate(makeContext(requestWith(token)));
+      spy.mockReturnValue(now + 31_000);
+      await guard.canActivate(makeContext(requestWith(token)));
+      spy.mockRestore();
+
+      expect(profileFindUnique).toHaveBeenCalledTimes(2);
     });
 
     it('una sesión con el segundo paso (aal2) pasa sin consultar la base', async () => {

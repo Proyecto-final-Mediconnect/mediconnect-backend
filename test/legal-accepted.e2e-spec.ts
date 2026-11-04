@@ -91,7 +91,11 @@ describe('Aceptación legal exigida en el backend (e2e, ENG-140)', () => {
   });
 
   function signToken(): Promise<string> {
-    return new SignJWT({ email: 'paciente@test.com', role: 'authenticated' })
+    return new SignJWT({
+      email: 'paciente@test.com',
+      role: 'authenticated',
+      aal: 'aal2',
+    })
       .setProtectedHeader({ alg: 'ES256' })
       .setSubject(SUB)
       .setIssuer(ISSUER)
@@ -238,7 +242,11 @@ describe('Aceptación legal registrada pero NO exigida (e2e, ENG-140)', () => {
   });
 
   function signToken(): Promise<string> {
-    return new SignJWT({ email: 'paciente@test.com', role: 'authenticated' })
+    return new SignJWT({
+      email: 'paciente@test.com',
+      role: 'authenticated',
+      aal: 'aal2',
+    })
       .setProtectedHeader({ alg: 'ES256' })
       .setSubject(SUB)
       .setIssuer(ISSUER)

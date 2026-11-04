@@ -137,7 +137,11 @@ describe('Videoconsulta desde un turno (e2e)', () => {
   });
 
   function signToken(sub: string = PATIENT): Promise<string> {
-    return new SignJWT({ email: 'paciente@test.com', role: 'authenticated' })
+    return new SignJWT({
+      email: 'paciente@test.com',
+      role: 'authenticated',
+      aal: 'aal2',
+    })
       .setProtectedHeader({ alg: 'ES256' })
       .setSubject(sub)
       .setIssuer(ISSUER)

@@ -84,6 +84,7 @@ describe('GET /me (e2e)', () => {
     return new SignJWT({
       email: 'paciente@test.com',
       role: 'authenticated',
+      aal: 'aal2',
       ...extraClaims,
     })
       .setProtectedHeader({ alg: 'ES256' })

@@ -11,6 +11,7 @@ import { JOSEError, JWKSTimeout } from 'jose/errors';
 import { LegalAcceptedGuard } from '../../legal/legal-accepted.guard';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SupabaseService } from '../../supabase/supabase.service';
+import { getCachedMfa, setCachedMfa } from './mfa-status-cache';
 
 /** Nombre de la cookie httpOnly seteada en `AuthController.login`. */
 const ACCESS_TOKEN_COOKIE = 'sb-access-token';
@@ -78,13 +79,19 @@ export class JwtAuthGuard implements CanActivate {
     // ENG-88: quien activó la verificación en dos pasos necesita una sesión
     // con el segundo paso hecho (`aal2`). Sin esto, la contraseña sola alcanzaría
     // pidiéndole el token a Supabase directo, salteando el login del backend.
-    // Solo se consulta la base para las sesiones `aal1`: las `aal2` ya pasaron.
-    if (payload.aal === 'aal1') {
-      const profile = await this.prisma.profile.findUnique({
-        where: { id: payload.sub },
-        select: { mfa_enabled: true },
-      });
-      if (profile?.mfa_enabled) {
+    // Solo se consulta (con un caché de 30 s) cuando el token no es `aal2`; si
+    // ni siquiera trae el claim `aal`, también se trata como sin segundo paso.
+    if (payload.aal !== 'aal2') {
+      let enabled = getCachedMfa(payload.sub);
+      if (enabled === undefined) {
+        const profile = await this.prisma.profile.findUnique({
+          where: { id: payload.sub },
+          select: { mfa_enabled: true },
+        });
+        enabled = profile?.mfa_enabled ?? false;
+        setCachedMfa(payload.sub, enabled);
+      }
+      if (enabled) {
         throw new UnauthorizedException(
           'Falta el código de la verificación en dos pasos. Ingresá de nuevo.',
         );
