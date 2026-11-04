@@ -24,10 +24,24 @@ name: Migraciones
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
+    paths:
+      - 'prisma/**'
+      - 'prisma.config.ts'
+      - 'package.json'
+      - '.github/workflows/migrations.yml'
   push:
     branches:
       - 'release/**'
       - 'main'
+    paths:
+      - 'prisma/**'
+      - 'prisma.config.ts'
+      - 'package.json'
+      - '.github/workflows/migrations.yml'
+
+# Solo lectura del repo: ningún job de este workflow escribe nada.
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -85,6 +99,13 @@ jobs:
       # limpio no tiene nada de eso, y la segunda migración se cae con
       # `ERROR: schema "auth" does not exist`.
       #
+      # OJO: es una SIMULACIÓN casera de Supabase, no la real. Aproxima roles
+      # (anon/authenticated/service_role), extensiones (pgcrypto/citext/pg_trgm),
+      # `auth.users` mínima y `auth.uid()`. Puede divergir de Supabase (otras
+      # columnas de auth.users, schemas como storage/extensions, versión de
+      # Postgres). Si una migración empieza a usar algo más, agregarlo acá; la
+      # alternativa más fiel es la imagen `supabase/postgres` como service.
+      #
       # Esto recrea el mínimo que las migraciones necesitan: la misma receta
       # que ya repiten los specs de integración, acá en un solo lugar.
       #
@@ -94,9 +115,8 @@ jobs:
       # estaba escrito en ningún lado.
       - name: Preparar los objetos que aporta Supabase
         run: |
-          for db in mediconnect_migrations; do
-            PGPASSWORD=mediconnect psql -h localhost -U mediconnect \
-              -v ON_ERROR_STOP=1 -d "$db" <<'SQL'
+          PGPASSWORD=mediconnect psql -h localhost -U mediconnect \
+            -v ON_ERROR_STOP=1 -d mediconnect_migrations <<'SQL'
           do $$ begin create role anon nologin noinherit;
             exception when duplicate_object then null; end $$;
           do $$ begin create role authenticated nologin noinherit;
@@ -135,7 +155,6 @@ jobs:
           grant usage on schema public to anon, authenticated;
           grant usage on schema auth to authenticated;
           SQL
-          done
 
       # El corazón del workflow: las migraciones, en orden, contra una base
       # vacía. Lo que esto cubre y `db push` no: que cada archivo SQL sea válido,
@@ -158,7 +177,11 @@ jobs:
       # `--exit-code` devuelve 2 cuando hay diferencias.
       - name: Verificar que el schema y las migraciones coincidan
         run: |
-          pnpm exec prisma migrate diff             --from-schema-datasource ./prisma/schema.prisma             --to-schema-datamodel ./prisma/schema.prisma             --exit-code           && echo "Sin drift: las migraciones producen el mismo esquema que schema.prisma."
+          pnpm exec prisma migrate diff \
+            --from-schema-datasource ./prisma/schema.prisma \
+            --to-schema-datamodel ./prisma/schema.prisma \
+            --exit-code
+          echo "Sin drift: las migraciones producen el mismo esquema que schema.prisma."
 
       # El deploy corre `db:setup` = `migrate deploy && db:seed`, así que el seed
       # es parte del camino que hay que probar. Además es el que primero choca
