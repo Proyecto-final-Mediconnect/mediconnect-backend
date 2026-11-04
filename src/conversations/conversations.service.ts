@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import type { appointment_status } from '../../generated/prisma';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
+import { PushService } from '../notifications/push.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 /** Cuántos mensajes trae cada página del historial. */
@@ -122,6 +123,7 @@ export class ConversationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: InAppNotificationsService,
+    private readonly push: PushService,
   ) {}
 
   /** Las conversaciones del usuario, la más activa primero, y con quién puede abrir una nueva. */
@@ -325,12 +327,27 @@ export class ConversationsService {
       conversation.patient_id === userId
         ? conversation.professional_id
         : conversation.patient_id;
+    const from = await this.displayName(userId, conversation);
     await this.notifications.notifyNewMessage(
       recipientId,
       conversationId,
-      await this.displayName(userId, conversation),
+      from,
       now,
     );
+    // El push sale del backend y no del cliente suscrito a Realtime: el stream
+    // puede perder un evento (spike ENG-52) y ese mensaje no avisaría. Sin el
+    // texto del mensaje: aparece en la pantalla bloqueada y puede ser clínico.
+    // Nunca tira.
+    await this.push.sendToUser(recipientId, {
+      title: 'Nuevo mensaje',
+      body: `${from} te escribió.`,
+      data: {
+        tipo: 'NUEVO_MENSAJE',
+        conversationId,
+        contraparteId: userId,
+        nombre: from,
+      },
+    });
 
     return toChatMessage(row);
   }

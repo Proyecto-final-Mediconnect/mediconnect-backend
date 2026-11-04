@@ -147,6 +147,18 @@ class EnvironmentVariables {
   @IsUrl({ require_tld: false, require_protocol: true })
   RESEND_API_URL?: string;
 
+  // Push a la app mobile por Expo (ENG-71). Opcional: solo hace falta si el
+  // proyecto de Expo tiene "Enhanced Security for Push" activado.
+  @IsOptional()
+  @IsString()
+  EXPO_ACCESS_TOKEN?: string;
+
+  // Solo para apuntar a un mock de Expo Push en pruebas manuales. Sin esto se
+  // usa https://exp.host.
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  EXPO_PUSH_URL?: string;
+
   // Solo para apuntar a un mock de la API en pruebas manuales, igual que
   // DAILY_API_URL. Sin esto se usa el endpoint real de mercadopago.config.
   @IsOptional()
