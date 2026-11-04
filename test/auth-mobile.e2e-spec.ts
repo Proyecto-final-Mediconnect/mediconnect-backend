@@ -149,6 +149,71 @@ describe('Auth mobile (e2e)', () => {
     });
   });
 
+  describe('verificación en dos pasos (ENG-88)', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    it('con la verificación activa, el login devuelve el token del primer paso y ningún refresh token', async () => {
+      signInWithPassword.mockResolvedValue({
+        data: {
+          session: { access_token: 'acc-aal1', refresh_token: 'ref-aal1' },
+          user: {
+            id: 'uid',
+            email: creds.email,
+            factors: [{ id: 'f-1', factor_type: 'totp', status: 'verified' }],
+          },
+        },
+        error: null,
+      });
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/mobile/login')
+        .send(creds)
+        .expect(200);
+
+      expect(res.body).toEqual({
+        user: { id: 'uid', email: creds.email },
+        mfaRequired: true,
+        mfaToken: 'acc-aal1',
+      });
+    });
+
+    it('el código devuelve la sesión completa', async () => {
+      const goTrue = (body: unknown) =>
+        ({
+          ok: true,
+          status: 200,
+          text: () => Promise.resolve(JSON.stringify(body)),
+        }) as Response;
+      jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValueOnce(
+          goTrue({
+            factors: [{ id: 'f-1', factor_type: 'totp', status: 'verified' }],
+          }),
+        )
+        .mockResolvedValueOnce(goTrue({ id: 'challenge-1' }))
+        .mockResolvedValueOnce(
+          goTrue({
+            access_token: 'acc-aal2',
+            refresh_token: 'ref-aal2',
+            user: { id: 'uid', email: creds.email },
+          }),
+        );
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/mobile/mfa/verify')
+        .send({ mfaToken: 'acc-aal1', code: '123456' })
+        .expect(200);
+
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body).toEqual({
+        user: { id: 'uid', email: creds.email },
+        accessToken: 'acc-aal2',
+        refreshToken: 'ref-aal2',
+      });
+    });
+  });
+
   describe('POST /auth/mobile/refresh', () => {
     it('200 canjea el refresh token del body y devuelve el par nuevo', () => {
       refreshSession.mockResolvedValue(sesion('new-acc', 'new-ref'));

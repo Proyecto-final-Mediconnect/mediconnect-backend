@@ -543,4 +543,101 @@ describe('Auth registro (e2e)', () => {
       expect(res.body.message).toMatch(/no es válido o ya venció/);
     });
   });
+
+  describe('verificación en dos pasos (ENG-88)', () => {
+    const conFactor = {
+      data: {
+        session: { access_token: 'acc-aal1', refresh_token: 'ref-aal1' },
+        user: {
+          id: 'uid',
+          email: creds.email,
+          factors: [{ id: 'f-1', factor_type: 'totp', status: 'verified' }],
+        },
+      },
+      error: null,
+    };
+
+    function goTrue(body: unknown, status = 200): Response {
+      return {
+        ok: status < 400,
+        status,
+        text: () => Promise.resolve(JSON.stringify(body)),
+      } as Response;
+    }
+
+    afterEach(() => jest.restoreAllMocks());
+
+    it('con la verificación activa, la contraseña sola no abre la sesión: pide el código', async () => {
+      signInWithPassword.mockResolvedValue(conFactor);
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send(creds)
+        .expect(200);
+
+      expect(res.body).toEqual({
+        user: { id: 'uid', email: creds.email },
+        mfaRequired: true,
+      });
+      const cookies = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
+      expect(
+        cookies.some((c) => /^sb-mfa-pending=acc-aal1;.*HttpOnly/i.test(c)),
+      ).toBe(true);
+      // Las de sesión se limpian, no se setean.
+      expect(cookies.some((c) => /^sb-access-token=acc/.test(c))).toBe(false);
+      expect(cookies.some((c) => /^sb-refresh-token=ref/.test(c))).toBe(false);
+    });
+
+    it('el código cambia el primer paso por la sesión completa', async () => {
+      jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValueOnce(
+          goTrue({
+            factors: [{ id: 'f-1', factor_type: 'totp', status: 'verified' }],
+          }),
+        )
+        .mockResolvedValueOnce(goTrue({ id: 'challenge-1' }))
+        .mockResolvedValueOnce(
+          goTrue({
+            access_token: 'acc-aal2',
+            refresh_token: 'ref-aal2',
+            user: { id: 'uid', email: creds.email },
+          }),
+        );
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/mfa/verify')
+        .set('Cookie', 'sb-mfa-pending=acc-aal1')
+        .send({ code: '123456' })
+        .expect(200);
+
+      const cookies = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
+      expect(
+        cookies.some((c) => /^sb-access-token=acc-aal2;.*HttpOnly/i.test(c)),
+      ).toBe(true);
+      expect(cookies.some((c) => /^sb-refresh-token=ref-aal2;/.test(c))).toBe(
+        true,
+      );
+      expect(cookies.some((c) => /^sb-mfa-pending=;/.test(c))).toBe(true);
+      expect(res.body.accessToken).toBeUndefined();
+    });
+
+    it('sin el primer paso, o pasados los cinco minutos, da 401', async () => {
+      await request(app.getHttpServer())
+        .post('/auth/mfa/verify')
+        .send({ code: '123456' })
+        .expect(401);
+    });
+
+    it('un código que no son seis números da 400 sin llamar a Supabase', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch');
+
+      await request(app.getHttpServer())
+        .post('/auth/mfa/verify')
+        .set('Cookie', 'sb-mfa-pending=acc-aal1')
+        .send({ code: '12ab' })
+        .expect(400);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+  });
 });

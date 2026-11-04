@@ -238,6 +238,12 @@ export class AuthService {
       accessToken: data.session.access_token,
       refreshToken: data.session.refresh_token,
       user: { id: data.user.id, email: data.user.email },
+      // ENG-88: con la verificación en dos pasos activa, esta sesión es solo el
+      // primer paso (`aal1`). Los controllers no la entregan como sesión: piden
+      // el código y la cambian por una `aal2`.
+      mfaRequired: (data.user.factors ?? []).some(
+        (f) => f.factor_type === 'totp' && f.status === 'verified',
+      ),
     };
   }
 

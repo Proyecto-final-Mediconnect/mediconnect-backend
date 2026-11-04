@@ -9,6 +9,7 @@ import type { Request } from 'express';
 import { jwtVerify, type JWTPayload } from 'jose';
 import { JOSEError, JWKSTimeout } from 'jose/errors';
 import { LegalAcceptedGuard } from '../../legal/legal-accepted.guard';
+import { PrismaService } from '../../prisma/prisma.service';
 import { SupabaseService } from '../../supabase/supabase.service';
 
 /** Nombre de la cookie httpOnly seteada en `AuthController.login`. */
@@ -40,6 +41,7 @@ export class JwtAuthGuard implements CanActivate {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly legalAccepted: LegalAcceptedGuard,
+    private readonly prisma: PrismaService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -71,6 +73,22 @@ export class JwtAuthGuard implements CanActivate {
 
     if (!payload.sub) {
       throw new UnauthorizedException('El token no tiene un sujeto válido.');
+    }
+
+    // ENG-88: quien activó la verificación en dos pasos necesita una sesión
+    // con el segundo paso hecho (`aal2`). Sin esto, la contraseña sola alcanzaría
+    // pidiéndole el token a Supabase directo, salteando el login del backend.
+    // Solo se consulta la base para las sesiones `aal1`: las `aal2` ya pasaron.
+    if (payload.aal === 'aal1') {
+      const profile = await this.prisma.profile.findUnique({
+        where: { id: payload.sub },
+        select: { mfa_enabled: true },
+      });
+      if (profile?.mfa_enabled) {
+        throw new UnauthorizedException(
+          'Falta el código de la verificación en dos pasos. Ingresá de nuevo.',
+        );
+      }
     }
 
     request.user = {
