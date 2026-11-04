@@ -1,6 +1,7 @@
 import {
   ConflictException,
   ForbiddenException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import type { InAppNotificationsService } from '../notifications/in-app-notifications.service';
@@ -449,6 +450,7 @@ describe('ConversationsService', () => {
         CONVERSATION_ID,
         'Julián Pérez',
         NOW,
+        false,
       );
       expect(sent.id).toBe('m-nuevo');
     });
@@ -461,6 +463,41 @@ describe('ConversationsService', () => {
         CONVERSATION_ID,
         'Laura Gómez',
         NOW,
+        false,
+      );
+    });
+
+    it('si falla lo posterior al guardado (bandeja o aviso), igual devuelve el mensaje', async () => {
+      prisma.conversation.updateMany.mockRejectedValue(new Error('db caída'));
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      const sent = await service.send(PATIENT_ID, CONVERSATION_ID, 'Hola', NOW);
+
+      expect(sent.id).toBe('m-nuevo');
+    });
+
+    it('con archivo, guarda la ruta y avisa que es un adjunto', async () => {
+      await service.sendWithAttachment(
+        PATIENT_ID,
+        CONVERSATION_ID,
+        { path: 'c/x.pdf', mime: 'application/pdf', size: 10, content: null },
+        NOW,
+      );
+
+      expect(prisma.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            attachment_url: 'c/x.pdf',
+            content: null,
+          }),
+        }),
+      );
+      expect(notifications.notifyNewMessage).toHaveBeenCalledWith(
+        PRO_ID,
+        CONVERSATION_ID,
+        'Julián Pérez',
+        NOW,
+        true,
       );
     });
 

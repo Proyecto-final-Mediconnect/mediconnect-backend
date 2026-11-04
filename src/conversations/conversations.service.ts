@@ -2,6 +2,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import type { appointment_status } from '../../generated/prisma';
@@ -133,6 +134,8 @@ interface Participants {
  */
 @Injectable()
 export class ConversationsService {
+  private readonly logger = new Logger(ConversationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: InAppNotificationsService,
@@ -379,29 +382,40 @@ export class ConversationsService {
       select: MESSAGE_SELECT,
     });
 
-    // Un mensaje nuevo devuelve el chat a la bandeja de quien lo había ocultado.
-    // El filtro hace que casi siempre sea un UPDATE que no toca ninguna fila.
-    await this.prisma.conversation.updateMany({
-      where: {
-        id: conversationId,
-        OR: [
-          { patient_hidden_at: { not: null } },
-          { professional_hidden_at: { not: null } },
-        ],
-      },
-      data: { patient_hidden_at: null, professional_hidden_at: null },
-    });
+    // Lo que sigue es best-effort: el mensaje ya quedó guardado, y que falle un
+    // aviso o el des-ocultado no debe hacer fallar el envío (el cliente
+    // reintentaría y duplicaría el mensaje; en un adjunto, además, se borraría
+    // un archivo ya referenciado).
+    try {
+      // Un mensaje nuevo devuelve el chat a la bandeja de quien lo había ocultado.
+      // El filtro hace que casi siempre sea un UPDATE que no toca ninguna fila.
+      await this.prisma.conversation.updateMany({
+        where: {
+          id: conversationId,
+          OR: [
+            { patient_hidden_at: { not: null } },
+            { professional_hidden_at: { not: null } },
+          ],
+        },
+        data: { patient_hidden_at: null, professional_hidden_at: null },
+      });
 
-    const recipientId =
-      conversation.patient_id === userId
-        ? conversation.professional_id
-        : conversation.patient_id;
-    await this.notifications.notifyNewMessage(
-      recipientId,
-      conversationId,
-      await this.displayName(userId, conversation),
-      now,
-    );
+      const recipientId =
+        conversation.patient_id === userId
+          ? conversation.professional_id
+          : conversation.patient_id;
+      await this.notifications.notifyNewMessage(
+        recipientId,
+        conversationId,
+        await this.displayName(userId, conversation),
+        now,
+        data.attachment_url !== undefined,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Mensaje ${row.id} guardado, pero falló lo posterior al envío: ${String(err)}`,
+      );
+    }
 
     return toChatMessage(row);
   }
