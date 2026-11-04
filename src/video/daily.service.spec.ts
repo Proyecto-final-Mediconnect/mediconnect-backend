@@ -10,6 +10,7 @@ import {
   ROOM_TTL_SECONDS,
   SPIKE_ROOM_PREFIX,
 } from './daily.config';
+import { TEST_ROOM_PREFIX, TEST_ROOM_TTL_SECONDS } from './test-room.config';
 
 /**
  * `DailyService` contra un `fetch` mockeado: se verifica el contrato que el
@@ -176,6 +177,79 @@ describe('DailyService', () => {
       const dailyError = error as DailyApiError;
       expect(dailyError.getStatus()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
       expect(dailyError.message).not.toContain('ECONNREFUSED');
+    });
+  });
+
+  describe('createTestRoom', () => {
+    const TEST_NAME = `${TEST_ROOM_PREFIX}-0123456789ab`;
+    const TEST_URL = `https://mediconnect.daily.co/${TEST_NAME}`;
+
+    it('sin DAILY_API_KEY da 503 y no llama a Daily', async () => {
+      env = {};
+
+      await expect(service.createTestRoom('Vos')).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('crea una sala privada para una sola persona, que vence en diez minutos', async () => {
+      fetchMock
+        .mockResolvedValueOnce(ok({ name: TEST_NAME, url: TEST_URL }))
+        .mockResolvedValueOnce(ok({ token: 'token-prueba' }));
+      const before = Math.floor(Date.now() / 1000);
+
+      const sala = await service.createTestRoom('Vos');
+
+      const body = JSON.parse(
+        (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string,
+      ) as {
+        name: string;
+        privacy: string;
+        properties: Record<string, unknown>;
+      };
+      expect(body.privacy).toBe('private');
+      expect(body.name).toMatch(
+        new RegExp(`^${TEST_ROOM_PREFIX}-[0-9a-f-]{12}$`),
+      );
+      expect(body.properties).toMatchObject({
+        max_participants: 1,
+        enable_prejoin_ui: true,
+        enable_chat: false,
+        enable_screenshare: false,
+        enable_recording: false,
+        eject_at_room_exp: true,
+      });
+      const exp = body.properties.exp as number;
+      expect(exp).toBeGreaterThanOrEqual(before + TEST_ROOM_TTL_SECONDS);
+      expect(exp).toBeLessThanOrEqual(before + TEST_ROOM_TTL_SECONDS + 5);
+
+      expect(sala).toEqual({
+        url: `${TEST_URL}?t=token-prueba`,
+        expiraEl: new Date(exp * 1000).toISOString(),
+      });
+    });
+
+    it('el token es de esa sala, vence con ella y no es owner', async () => {
+      fetchMock
+        .mockResolvedValueOnce(ok({ name: TEST_NAME, url: TEST_URL }))
+        .mockResolvedValueOnce(ok({ token: 'token-prueba' }));
+
+      await service.createTestRoom('Vos');
+
+      const sala = JSON.parse(
+        (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string,
+      ) as { properties: { exp: number } };
+      const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+      expect(url).toBe('https://api.daily.co/v1/meeting-tokens');
+      expect(JSON.parse(init.body as string)).toEqual({
+        properties: {
+          room_name: TEST_NAME,
+          user_name: 'Vos',
+          is_owner: false,
+          exp: sala.properties.exp,
+        },
+      });
     });
   });
 
