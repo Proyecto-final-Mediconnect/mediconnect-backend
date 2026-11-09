@@ -67,7 +67,13 @@ describe('Push tokens (e2e)', () => {
   });
 
   function signToken(): Promise<string> {
-    return new SignJWT({ email: 'paciente@test.com', role: 'authenticated' })
+    // `aal2` como el resto de los e2e: con un token sin segundo paso el guard
+    // consulta `profiles.mfa_enabled` (ENG-88), que este mock no tiene.
+    return new SignJWT({
+      email: 'paciente@test.com',
+      role: 'authenticated',
+      aal: 'aal2',
+    })
       .setProtectedHeader({ alg: 'ES256' })
       .setSubject(SUB)
       .setIssuer(ISSUER)

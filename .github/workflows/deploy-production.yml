@@ -82,6 +82,11 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        # Desde ENG-187 (#106) el `postinstall` del propio proyecto corre
+        # `prisma generate`, y `prisma.config.ts` no carga sin `DATABASE_URL`.
+        # Sin esto el deploy corta en el install y no aplica nada.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: pnpm install --frozen-lockfile
 
       - name: Generate Prisma Client
