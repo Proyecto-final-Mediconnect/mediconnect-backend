@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { ExecutionContext, Injectable } from '@nestjs/common';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { cloudflareClientIp } from '../http/client-ip';
+import { USER_THROTTLE_KEY } from './user-throttler.guard';
 
 /**
  * Rate limit por IP real del cliente, no por IP del proxy (ENG-84).
@@ -28,6 +29,17 @@ import { cloudflareClientIp } from '../http/client-ip';
  */
 @Injectable()
 export class ClientIpThrottlerGuard extends ThrottlerGuard {
+  /**
+   * Los handlers marcados con `@UserThrottled()` se cuentan por usuario en
+   * `UserThrottlerGuard`. Acá se saltean para no contarlos dos veces (y que una
+   * IP compartida no agote el cupo de todos los de esa IP).
+   */
+  protected override shouldSkip(context: ExecutionContext): Promise<boolean> {
+    return Promise.resolve(
+      Boolean(Reflect.getMetadata(USER_THROTTLE_KEY, context.getHandler())),
+    );
+  }
+
   protected override async getTracker(
     req: Record<string, unknown>,
   ): Promise<string> {
