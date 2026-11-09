@@ -112,6 +112,7 @@ export class VideoConsultationService {
       recording,
       now,
     );
+    await this.recordFirstJoin(appointment.id, role, now);
 
     const token = await this.daily.createConsultationToken({
       roomName: room.name,
@@ -309,6 +310,34 @@ export class VideoConsultationService {
     }
 
     return { name: winner.daily_room_name, url: winner.daily_room_url };
+  }
+
+  /**
+   * Deja escrita la primera entrada de cada rol (ENG-189). El cierre automático
+   * del turno la usa para distinguir una consulta que ocurrió de una a la que
+   * el paciente faltó.
+   *
+   * El filtro `IS NULL` hace que reconectarse no pise la primera entrada, sin
+   * leer antes: dos entradas simultáneas del mismo rol escriben una sola vez.
+   * No es best-effort: si esto no queda escrito, el job podría marcar como "no
+   * asistió" a un paciente que sí entró, y ese turno no se reembolsa.
+   */
+  private async recordFirstJoin(
+    appointmentId: string,
+    role: ConsultationRole,
+    now: Date,
+  ): Promise<void> {
+    if (role === 'PACIENTE') {
+      await this.prisma.consultation.updateMany({
+        where: { appointment_id: appointmentId, patient_joined_at: null },
+        data: { patient_joined_at: now },
+      });
+    } else {
+      await this.prisma.consultation.updateMany({
+        where: { appointment_id: appointmentId, professional_joined_at: null },
+        data: { professional_joined_at: now },
+      });
+    }
   }
 
   /**

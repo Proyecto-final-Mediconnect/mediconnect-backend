@@ -436,12 +436,15 @@ model Appointment {
 
 /// Sesión efectivamente realizada (glosario: Consulta), 1:1 con el turno.
 model Consultation {
-  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  appointment_id     String    @unique @db.Uuid
-  started_at         DateTime? @db.Timestamptz(6)
-  ended_at           DateTime? @db.Timestamptz(6)
-  professional_notes String?
-  created_at         DateTime  @default(now()) @db.Timestamptz(6)
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  appointment_id         String    @unique @db.Uuid
+  started_at             DateTime? @db.Timestamptz(6)
+  ended_at               DateTime? @db.Timestamptz(6)
+  /// Primera entrada de cada rol a la sala (ENG-189). La usa el cierre automático.
+  patient_joined_at      DateTime? @db.Timestamptz(6)
+  professional_joined_at DateTime? @db.Timestamptz(6)
+  professional_notes     String?
+  created_at             DateTime  @default(now()) @db.Timestamptz(6)
 
   appointment             Appointment           @relation(fields: [appointment_id], references: [id])
   video_session           VideoSession?

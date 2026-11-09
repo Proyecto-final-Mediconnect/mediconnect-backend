@@ -57,7 +57,7 @@ describe('VideoConsultationService', () => {
     deleteRoom: jest.Mock;
   };
   let prisma: {
-    consultation: { upsert: jest.Mock };
+    consultation: { upsert: jest.Mock; updateMany: jest.Mock };
     videoSession: {
       upsert: jest.Mock;
       updateMany: jest.Mock;
@@ -90,7 +90,10 @@ describe('VideoConsultationService', () => {
     };
 
     prisma = {
-      consultation: { upsert: jest.fn().mockResolvedValue({ id: 'cons-1' }) },
+      consultation: {
+        upsert: jest.fn().mockResolvedValue({ id: 'cons-1' }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       videoSession: {
         upsert: jest.fn().mockResolvedValue({
           id: 'vs-1',
@@ -369,6 +372,46 @@ describe('VideoConsultationService', () => {
         'off',
       );
       expect(access.expiresAt).toBe('2026-08-27T15:45:00.000Z');
+    });
+  });
+
+  describe('quién entró a la sala (ENG-189)', () => {
+    it('registra la primera entrada del paciente sin pisar una anterior', async () => {
+      await service.join('jwt', PATIENT, APPOINTMENT, DENTRO_DE_LA_VENTANA);
+
+      expect(prisma.consultation.updateMany).toHaveBeenCalledWith({
+        where: { appointment_id: APPOINTMENT, patient_joined_at: null },
+        data: { patient_joined_at: DENTRO_DE_LA_VENTANA },
+      });
+    });
+
+    it('registra la del profesional en su propia columna', async () => {
+      await service.join(
+        'jwt',
+        PROFESSIONAL,
+        APPOINTMENT,
+        DENTRO_DE_LA_VENTANA,
+      );
+
+      expect(prisma.consultation.updateMany).toHaveBeenCalledWith({
+        where: { appointment_id: APPOINTMENT, professional_joined_at: null },
+        data: { professional_joined_at: DENTRO_DE_LA_VENTANA },
+      });
+    });
+
+    it('no registra nada si rechaza por horario', async () => {
+      await expect(
+        service.join(
+          'jwt',
+          PATIENT,
+          APPOINTMENT,
+          new Date(
+            new Date(appointmentRow().scheduled_at).getTime() - 60 * 60_000,
+          ),
+        ),
+      ).rejects.toThrow();
+
+      expect(prisma.consultation.updateMany).not.toHaveBeenCalled();
     });
   });
 

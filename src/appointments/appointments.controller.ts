@@ -15,6 +15,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
+import { AppointmentClosingService } from './appointment-closing.service';
 import { AppointmentsService } from './appointments.service';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
@@ -23,7 +24,10 @@ import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
 @Controller('appointments')
 @UseGuards(JwtAuthGuard)
 export class AppointmentsController {
-  constructor(private readonly appointments: AppointmentsService) {}
+  constructor(
+    private readonly appointments: AppointmentsService,
+    private readonly closing: AppointmentClosingService,
+  ) {}
 
   /**
    * Reserva un turno. Rate limit más ajustado que el default de 60/min: cada
@@ -97,5 +101,32 @@ export class AppointmentsController {
   ) {
     const { userId, accessToken } = requireAuth(req);
     return this.appointments.reschedule(accessToken, userId, id, dto);
+  }
+
+  /**
+   * El profesional finaliza la consulta (ENG-189): el turno queda `COMPLETADO`
+   * y el paciente ya puede reseñarlo. Idempotente. Las reglas están en
+   * `AppointmentClosingService.complete`.
+   */
+  @Patch(':id/complete')
+  complete(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.closing.complete(accessToken, userId, id);
+  }
+
+  /**
+   * El profesional marca que el paciente no se presentó (ENG-189). No
+   * reembolsa. Idempotente.
+   */
+  @Patch(':id/no-show')
+  markNoShow(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.closing.markNoShow(accessToken, userId, id);
   }
 }

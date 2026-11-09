@@ -11,6 +11,9 @@ name: Scheduled Jobs
 # - close-expired-medipass-sessions (ENG-104): deja escrito el cierre de los
 #   accesos al MediPass que vencieron (30 min) o se cortaron. Las lecturas ya
 #   los rechazan aunque este job no haya pasado.
+# - close-finished-appointments (ENG-189): cierra los turnos confirmados cuya
+#   sala ya cerró: COMPLETADO si entraron los dos, NO_ASISTIO si solo entró el
+#   profesional. Los que el profesional no abrió quedan como están.
 #
 # Secrets que necesita (Settings → Secrets and variables → Actions):
 #   - RENDER_BACKEND_URL  el mismo que usa keepalive.yml.
@@ -74,6 +77,19 @@ jobs:
           curl -fsS --max-time 60 --retry 3 --retry-all-errors
           -X POST -H "Authorization: Bearer $JOBS_SECRET"
           "$RENDER_BACKEND_URL/internal/jobs/close-expired-medipass-sessions"
+        env:
+          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
+          JOBS_SECRET: ${{ secrets.JOBS_SECRET }}
+
+  close-finished-appointments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cerrar turnos terminados
+        run: >-
+          curl -fsS --max-time 60 --retry 3 --retry-all-errors
+          -X POST -H "Authorization: Bearer $JOBS_SECRET"
+          "$RENDER_BACKEND_URL/internal/jobs/close-finished-appointments"
         env:
           RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
           JOBS_SECRET: ${{ secrets.JOBS_SECRET }}

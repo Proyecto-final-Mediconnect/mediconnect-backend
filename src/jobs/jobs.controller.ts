@@ -5,6 +5,7 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import { AppointmentClosingService } from '../appointments/appointment-closing.service';
 import { UnpaidReleaseService } from '../appointments/unpaid-release.service';
 import { MediPassService } from '../medipass/medipass.service';
 import {
@@ -29,6 +30,7 @@ export class JobsController {
     private readonly unpaidRelease: UnpaidReleaseService,
     private readonly notifications: AppointmentNotificationsService,
     private readonly medipass: MediPassService,
+    private readonly closing: AppointmentClosingService,
   ) {}
 
   /** ENG-101: libera los turnos que no se pagaron en 15 minutos. */
@@ -54,5 +56,22 @@ export class JobsController {
   @HttpCode(HttpStatus.OK)
   async closeExpiredMediPassSessions(): Promise<{ closed: number }> {
     return { closed: await this.medipass.closeExpiredSessions() };
+  }
+
+  /**
+   * ENG-189: cierra los turnos confirmados cuya sala ya cerró, según quién
+   * entró. No toca los turnos a los que el profesional no entró.
+   */
+  @Post('close-finished-appointments')
+  @HttpCode(HttpStatus.OK)
+  async closeFinishedAppointments(): Promise<{
+    completed: number;
+    noShow: number;
+  }> {
+    const closed = await this.closing.closeFinished();
+    return {
+      completed: closed.filter((c) => c.status === 'COMPLETADO').length,
+      noShow: closed.filter((c) => c.status === 'NO_ASISTIO').length,
+    };
   }
 }

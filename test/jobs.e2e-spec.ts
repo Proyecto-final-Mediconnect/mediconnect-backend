@@ -19,6 +19,7 @@ const URL = '/internal/jobs/close-expired-medipass-sessions';
 describe('Jobs internos (e2e)', () => {
   let app: INestApplication<App>;
   const executeRaw = jest.fn();
+  const queryRaw = jest.fn();
   const previo = process.env.JOBS_SECRET;
 
   async function levantar(secret: string | undefined) {
@@ -38,6 +39,8 @@ describe('Jobs internos (e2e)', () => {
       .useValue({
         ...legalAcceptedPrismaMock(),
         $executeRaw: executeRaw,
+        $transaction: (cb: (tx: unknown) => unknown) =>
+          cb({ $queryRaw: queryRaw }),
       })
       .compile();
     app = moduleFixture.createNestApplication();
@@ -84,5 +87,23 @@ describe('Jobs internos (e2e)', () => {
       .set('Authorization', `Bearer ${SECRET}`)
       .expect(200);
     expect(res.body).toEqual({ closed: 2 });
+  });
+
+  it('ENG-189: el cierre de turnos también exige el secreto', async () => {
+    await levantar(SECRET);
+    await request(app.getHttpServer())
+      .post('/internal/jobs/close-finished-appointments')
+      .expect(401);
+    expect(queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('ENG-189: con el secreto devuelve cuántos completó y cuántos marcó no asistió', async () => {
+    queryRaw.mockResolvedValue([]);
+    await levantar(SECRET);
+    const res = await request(app.getHttpServer())
+      .post('/internal/jobs/close-finished-appointments')
+      .set('Authorization', `Bearer ${SECRET}`)
+      .expect(200);
+    expect(res.body).toEqual({ completed: 0, noShow: 0 });
   });
 });

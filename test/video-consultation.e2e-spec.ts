@@ -83,7 +83,10 @@ describe('Videoconsulta desde un turno (e2e)', () => {
     const prisma = {
       profile: { findUnique: jest.fn() },
       ...legalAcceptedPrismaMock(),
-      consultation: { upsert: jest.fn().mockResolvedValue({ id: 'cons-1' }) },
+      consultation: {
+        upsert: jest.fn().mockResolvedValue({ id: 'cons-1' }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       videoSession: {
         upsert: jest.fn().mockResolvedValue({
           id: 'vs-1',
