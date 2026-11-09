@@ -4,10 +4,12 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateReviewDto } from './dto/create-review.dto';
 import type { ModerateReviewDto } from './dto/moderate-review.dto';
+import { containsContactInfo, isInappropriate } from './language-filter';
 
 /** Cuántas reseñas por página, en el perfil y en la cola de moderación. */
 export const REVIEWS_PAGE_SIZE = 10;
@@ -66,6 +68,13 @@ export interface ModerationReviewView {
   moderatedAt: string | null;
 }
 
+/** La respuesta pública de un profesional a una reseña (ENG-106). */
+export interface ReviewResponseView {
+  reviewId: string;
+  content: string;
+  createdAt: string;
+}
+
 export interface ModerationPage {
   reviews: ModerationReviewView[];
   page: number;
@@ -120,6 +129,14 @@ export class ReviewsService {
     }
     if (appointment.review) {
       throw new ConflictException('Ya dejaste una reseña para esta consulta.');
+    }
+    // ENG-107: el filtro corre antes de guardar, y la reseña no llega a la cola.
+    // Se le pide al paciente que la reformule en lugar de rechazarla después:
+    // es una por turno, y un rechazo lo dejaría sin poder opinar.
+    if (dto.comment && isInappropriate(dto.comment)) {
+      throw new UnprocessableEntityException(
+        'Tu comentario tiene palabras que no podemos publicar. Reformulalo sin insultos: las críticas son bienvenidas.',
+      );
     }
 
     try {
@@ -228,6 +245,115 @@ export class ReviewsService {
     };
   }
 
+  /**
+   * Las reseñas aprobadas que recibió el profesional, con su promedio y sus
+   * respuestas (ENG-106). Son las mismas que ve cualquiera en su perfil: las
+   * pendientes y las rechazadas no, porque no hay nada que responder en público.
+   */
+  async listReceived(
+    professionalId: string,
+    page: number,
+  ): Promise<PublicReviewPage> {
+    await this.assertProfessional(professionalId);
+    return this.listApproved(professionalId, page);
+  }
+
+  /**
+   * Responde en público una reseña aprobada propia, o cambia la respuesta que ya
+   * tenía (ENG-106). Una sola por reseña.
+   *
+   * No pasa por la cola de moderación: la escribe el profesional con nombre y
+   * matrícula, sobre una reseña que un moderador ya aprobó. Sí pasa por el mismo
+   * filtro de lenguaje que las reseñas (ENG-107), y queda en `audit_logs`.
+   */
+  async respond(
+    professionalId: string,
+    reviewId: string,
+    content: string,
+    now: Date = new Date(),
+  ): Promise<ReviewResponseView> {
+    await this.assertProfessional(professionalId);
+    await this.assertOwnApprovedReview(professionalId, reviewId);
+    if (isInappropriate(content)) {
+      throw new UnprocessableEntityException(
+        'Tu respuesta tiene palabras que no podemos publicar. Reformulala, por favor.',
+      );
+    }
+
+    if (containsContactInfo(content)) {
+      throw new UnprocessableEntityException(
+        'Tu respuesta no puede incluir links, mails ni teléfonos.',
+      );
+    }
+
+    const row = await this.prisma.$transaction(async (tx) => {
+      const previa = await tx.reviewResponse.findUnique({
+        where: { review_id: reviewId },
+        select: { content: true },
+      });
+      const saved = await tx.reviewResponse.upsert({
+        where: { review_id: reviewId },
+        create: {
+          review_id: reviewId,
+          professional_id: professionalId,
+          content,
+          created_at: now,
+        },
+        // Se conserva la fecha de la primera versión (no hay updated_at).
+        update: { content },
+        select: { review_id: true, content: true, created_at: true },
+      });
+      await tx.auditLog.create({
+        data: {
+          actor_id: professionalId,
+          action: 'REVIEW_RESPONSE_SAVED',
+          resource_type: 'review_responses',
+          resource_id: reviewId,
+          metadata: {
+            length: content.length,
+            previousContent: previa?.content ?? null,
+          },
+        },
+      });
+      return saved;
+    });
+
+    return {
+      reviewId: row.review_id,
+      content: row.content,
+      createdAt: row.created_at.toISOString(),
+    };
+  }
+
+  /** Borra la respuesta propia a una reseña (ENG-106). Sin respuesta, 404. */
+  async deleteResponse(
+    professionalId: string,
+    reviewId: string,
+  ): Promise<void> {
+    await this.assertProfessional(professionalId);
+    await this.prisma.$transaction(async (tx) => {
+      const previa = await tx.reviewResponse.findFirst({
+        where: { review_id: reviewId, professional_id: professionalId },
+        select: { content: true },
+      });
+      const { count } = await tx.reviewResponse.deleteMany({
+        where: { review_id: reviewId, professional_id: professionalId },
+      });
+      if (count === 0) {
+        throw new NotFoundException('Esa reseña no tiene una respuesta tuya.');
+      }
+      await tx.auditLog.create({
+        data: {
+          actor_id: professionalId,
+          action: 'REVIEW_RESPONSE_DELETED',
+          resource_type: 'review_responses',
+          resource_id: reviewId,
+          metadata: { previousContent: previa?.content ?? null },
+        },
+      });
+    });
+  }
+
   /** La cola del moderador: las pendientes primero las más viejas, que esperan hace más. */
   async listForModeration(
     moderatorId: string,
@@ -326,6 +452,44 @@ export class ReviewsService {
     }
 
     return toModerationView(row);
+  }
+
+  /** Responder es del rol PROFESIONAL, que vive en `profiles`, no en el JWT. */
+  private async assertProfessional(userId: string): Promise<void> {
+    const profile = await this.prisma.profile.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (profile?.role !== 'PROFESIONAL') {
+      throw new ForbiddenException(
+        'Solo un profesional puede responder reseñas.',
+      );
+    }
+  }
+
+  /**
+   * La reseña es del profesional y está aprobada. Ajena o inexistente dan el
+   * mismo 404: un 403 confirmaría que existe.
+   */
+  private async assertOwnApprovedReview(
+    professionalId: string,
+    reviewId: string,
+  ): Promise<void> {
+    const review = await this.prisma.review.findUnique({
+      where: { id: reviewId },
+      select: { professional_id: true, status: true },
+    });
+    if (
+      !review ||
+      review.professional_id.toLowerCase() !== professionalId.toLowerCase()
+    ) {
+      throw new NotFoundException('No encontramos esa reseña.');
+    }
+    if (review.status !== 'APROBADA') {
+      throw new ConflictException(
+        'Solo se puede responder una reseña publicada.',
+      );
+    }
   }
 
   /** Moderar es solo del rol MODERADOR, que vive en `profiles`, no en el JWT. */
