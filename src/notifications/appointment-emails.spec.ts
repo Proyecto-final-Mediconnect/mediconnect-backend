@@ -53,4 +53,29 @@ describe('renderAppointmentEmail', () => {
     expect(email.html).not.toContain('<a ');
     expect(email.text).not.toContain('Mis turnos:');
   });
+
+  describe('RESENA_PEDIDA (ENG-190)', () => {
+    const conTurno = {
+      ...DATA,
+      appointmentUrl:
+        'https://app.test/turnos/44444444-4444-4444-8444-444444444444',
+    };
+
+    it('pregunta por la consulta y lleva al turno para calificarla', () => {
+      const email = renderAppointmentEmail('RESENA_PEDIDA', conTurno);
+
+      expect(email.subject).toBe('¿Cómo fue tu consulta con Ana Gómez?');
+      expect(email.html).toContain(
+        'href="https://app.test/turnos/44444444-4444-4444-8444-444444444444"',
+      );
+      expect(email.html).toContain('Calificar la consulta');
+    });
+
+    it('no habla de cancelar ni de entrar a la sala', () => {
+      const email = renderAppointmentEmail('RESENA_PEDIDA', conTurno);
+
+      expect(email.text).not.toMatch(/cancel/i);
+      expect(email.text).not.toMatch(/unos minutos antes/i);
+    });
+  });
 });

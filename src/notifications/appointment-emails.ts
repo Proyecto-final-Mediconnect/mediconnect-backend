@@ -4,7 +4,8 @@ import { AR_TIMEZONE, toLocalDateTime } from '../common/time/argentina-time';
 export type AppointmentEmailKind =
   | 'TURNO_RESERVADO'
   | 'RECORDATORIO_24H'
-  | 'RECORDATORIO_1H';
+  | 'RECORDATORIO_1H'
+  | 'RESENA_PEDIDA';
 
 export interface AppointmentEmailData {
   patientFirstName: string;
@@ -13,6 +14,8 @@ export interface AppointmentEmailData {
   durationMinutes: number;
   /** URL de "Mis turnos" en la web, o `null` si no hay `WEB_ORIGIN` válido. */
   myAppointmentsUrl: string | null;
+  /** URL del turno en la web, donde está el formulario de reseña (ENG-190). */
+  appointmentUrl?: string | null;
 }
 
 export interface RenderedEmail {
@@ -60,14 +63,29 @@ export function renderAppointmentEmail(
         subject: `Tu turno con ${pro} empieza en una hora`,
         lead: `Tu turno con ${pro} empieza en una hora, a las ${startTime} (hora de Argentina).`,
       },
+      RESENA_PEDIDA: {
+        subject: `¿Cómo fue tu consulta con ${pro}?`,
+        lead: `Contanos cómo te fue en tu consulta con ${pro} del ${date}.`,
+      },
     };
   const { subject, lead } = copy[kind];
+  const pideResena = kind === 'RESENA_PEDIDA';
 
-  const details = `Es una videoconsulta de ${data.durationMinutes} minutos. Podés entrar desde "Mis turnos" unos minutos antes de la hora.`;
+  const details = pideResena
+    ? 'Tu opinión ayuda a otros pacientes a elegir, y te lleva un minuto. Te lo pedimos una sola vez.'
+    : `Es una videoconsulta de ${data.durationMinutes} minutos. Podés entrar desde "Mis turnos" unos minutos antes de la hora.`;
   const cancel =
-    kind === 'RECORDATORIO_1H'
+    kind === 'RECORDATORIO_1H' || pideResena
       ? null
       : 'Si no vas a poder asistir, cancelalo desde "Mis turnos" así el horario queda libre para otra persona.';
+  // El pedido de reseña lleva al turno, donde está el formulario; los avisos de
+  // turno, a "Mis turnos". Si la web pide ingresar, vuelve al mismo link.
+  const link = pideResena
+    ? {
+        url: data.appointmentUrl ?? data.myAppointmentsUrl,
+        label: 'Calificar la consulta',
+      }
+    : { url: data.myAppointmentsUrl, label: 'Ver mis turnos' };
 
   const text = [
     `Hola ${data.patientFirstName}:`,
@@ -75,9 +93,7 @@ export function renderAppointmentEmail(
     lead,
     details,
     ...(cancel ? [cancel] : []),
-    ...(data.myAppointmentsUrl
-      ? ['', `Mis turnos: ${data.myAppointmentsUrl}`]
-      : []),
+    ...(link.url ? ['', `${link.label}: ${link.url}`] : []),
     '',
     'MediConnect',
   ].join('\n');
@@ -90,8 +106,8 @@ export function renderAppointmentEmail(
     <p>${escapeHtml(details)}</p>
     ${cancel ? `<p>${escapeHtml(cancel)}</p>` : ''}
     ${
-      data.myAppointmentsUrl
-        ? `<p><a href="${escapeHtml(data.myAppointmentsUrl)}">Ver mis turnos</a></p>`
+      link.url
+        ? `<p><a href="${escapeHtml(link.url)}">${escapeHtml(link.label)}</a></p>`
         : ''
     }
     <p style="color: #6b7280;">MediConnect</p>

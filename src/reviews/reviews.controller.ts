@@ -25,13 +25,17 @@ import {
   ModerationQueryDto,
   ReviewPageQueryDto,
 } from './dto/review-list-query.dto';
+import { ReviewPromptsService } from './review-prompts.service';
 import { ReviewsService } from './reviews.service';
 
 /** Dejar una reseña (ENG-80) y ver las propias. */
 @Controller()
 @UseGuards(JwtAuthGuard)
 export class ReviewsController {
-  constructor(private readonly reviews: ReviewsService) {}
+  constructor(
+    private readonly reviews: ReviewsService,
+    private readonly prompts: ReviewPromptsService,
+  ) {}
 
   /** La reseña de la consulta de un turno propio y terminado. Una por turno. */
   @Post('appointments/:appointmentId/review')
@@ -52,6 +56,29 @@ export class ReviewsController {
   listMine(@Req() req: Request) {
     const { userId } = requireAuth(req);
     return this.reviews.listMine(userId);
+  }
+
+  /**
+   * Turnos que el paciente puede reseñar y todavía no reseñó ni descartó: la
+   * tarjeta "¿Cómo fue tu consulta?" del inicio (ENG-190).
+   */
+  @Get('reviews/pending')
+  listPending(@Req() req: Request) {
+    const { userId } = requireAuth(req);
+    return this.prompts.listPending(userId);
+  }
+
+  /** Descarta la tarjeta de un turno: no vuelve en ningún dispositivo (ENG-190). */
+  @Post('reviews/pending/:appointmentId/dismiss')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async dismiss(
+    @Req() req: Request,
+    @Param('appointmentId', new ParseUUIDPipe({ version: '4' }))
+    appointmentId: string,
+  ): Promise<void> {
+    const { userId } = requireAuth(req);
+    await this.prompts.dismiss(userId, appointmentId);
   }
 
   /** Las reseñas publicadas que recibió el profesional, con sus respuestas (ENG-106). */

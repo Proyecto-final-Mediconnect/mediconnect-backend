@@ -14,6 +14,8 @@ name: Scheduled Jobs
 # - close-finished-appointments (ENG-189): cierra los turnos confirmados cuya
 #   sala ya cerró: COMPLETADO si entraron los dos, NO_ASISTIO si solo entró el
 #   profesional. Los que el profesional no abrió quedan como están.
+# - send-review-requests (ENG-190): un mail por turno pidiendo la reseña, 3 h
+#   después de que cierra la sala.
 #
 # Secrets que necesita (Settings → Secrets and variables → Actions):
 #   - RENDER_BACKEND_URL  el mismo que usa keepalive.yml.
@@ -90,6 +92,19 @@ jobs:
           curl -fsS --max-time 60 --retry 3 --retry-all-errors
           -X POST -H "Authorization: Bearer $JOBS_SECRET"
           "$RENDER_BACKEND_URL/internal/jobs/close-finished-appointments"
+        env:
+          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
+          JOBS_SECRET: ${{ secrets.JOBS_SECRET }}
+
+  send-review-requests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Pedir reseñas
+        run: >-
+          curl -fsS --max-time 60 --retry 3 --retry-all-errors
+          -X POST -H "Authorization: Bearer $JOBS_SECRET"
+          "$RENDER_BACKEND_URL/internal/jobs/send-review-requests"
         env:
           RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
           JOBS_SECRET: ${{ secrets.JOBS_SECRET }}

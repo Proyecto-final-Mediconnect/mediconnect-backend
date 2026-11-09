@@ -152,6 +152,44 @@ describe('ReviewsService', () => {
       ).rejects.toThrow('Solo se puede reseñar una consulta que ya se hizo.');
     });
 
+    it('ENG-190: el paciente que entró a la sala reseña aunque el turno no esté completado', async () => {
+      prisma.appointment.findUnique.mockResolvedValue({
+        patient_id: PATIENT,
+        professional_id: PRO,
+        status: 'CONFIRMADO',
+        review: null,
+        consultation: { patient_joined_at: new Date('2026-11-20T15:01:00Z') },
+      });
+      await service.create(PATIENT, TURNO, { rating: 5 });
+      expect(prisma.review.create).toHaveBeenCalled();
+    });
+
+    it('ENG-190: un turno confirmado al que el paciente no entró no se reseña', async () => {
+      prisma.appointment.findUnique.mockResolvedValue({
+        patient_id: PATIENT,
+        professional_id: PRO,
+        status: 'CONFIRMADO',
+        review: null,
+        consultation: { patient_joined_at: null },
+      });
+      await expect(
+        service.create(PATIENT, TURNO, { rating: 4 }),
+      ).rejects.toThrow('Solo se puede reseñar una consulta que ya se hizo.');
+    });
+
+    it('ENG-190: un turno en NO_ASISTIO no se reseña aunque haya consulta', async () => {
+      prisma.appointment.findUnique.mockResolvedValue({
+        patient_id: PATIENT,
+        professional_id: PRO,
+        status: 'NO_ASISTIO',
+        review: null,
+        consultation: { patient_joined_at: new Date('2026-11-20T15:01:00Z') },
+      });
+      await expect(
+        service.create(PATIENT, TURNO, { rating: 4 }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
     it('una sola reseña por turno', async () => {
       prisma.appointment.findUnique.mockResolvedValue({
         patient_id: PATIENT,

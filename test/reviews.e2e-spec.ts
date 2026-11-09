@@ -27,7 +27,8 @@ describe('Reseñas (e2e)', () => {
   let privateKey: CryptoKey;
   let publicKey: CryptoKey;
   let prisma: {
-    appointment: { findUnique: jest.Mock };
+    appointment: { findUnique: jest.Mock; findMany: jest.Mock };
+    reviewPromptDismissal: { upsert: jest.Mock };
     review: {
       create: jest.Mock;
       findMany: jest.Mock;
@@ -61,7 +62,9 @@ describe('Reseñas (e2e)', () => {
           status: 'COMPLETADO',
           review: null,
         }),
+        findMany: jest.fn().mockResolvedValue([]),
       },
+      reviewPromptDismissal: { upsert: jest.fn().mockResolvedValue({}) },
       review: {
         create: jest.fn().mockResolvedValue({
           id: RESENA,
@@ -178,6 +181,36 @@ describe('Reseñas (e2e)', () => {
     expect(res.body).toMatchObject({ status: 'PENDIENTE_MODERACION' });
     // Un comentario en blanco no se guarda como "".
     expect(prisma.review.create.mock.calls[0][0].data.comment).toBeNull();
+  });
+
+  describe('pedido de reseña (ENG-190)', () => {
+    it('las pendientes piden sesión', async () => {
+      await request(app.getHttpServer()).get('/reviews/pending').expect(401);
+    });
+
+    it('devuelve las pendientes del paciente', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/reviews/pending')
+        .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+        .expect(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it('descartar devuelve 204 y guarda el descarte', async () => {
+      await request(app.getHttpServer())
+        .post(`/reviews/pending/${TURNO}/dismiss`)
+        .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+        .expect(204);
+      expect(prisma.reviewPromptDismissal.upsert).toHaveBeenCalled();
+    });
+
+    it('descartar un turno ajeno da 404', async () => {
+      await request(app.getHttpServer())
+        .post(`/reviews/pending/${TURNO}/dismiss`)
+        .set('Authorization', `Bearer ${await signToken(PRO)}`)
+        .expect(404);
+      expect(prisma.reviewPromptDismissal.upsert).not.toHaveBeenCalled();
+    });
   });
 
   it('una calificación fuera de 1 a 5 da 400', async () => {

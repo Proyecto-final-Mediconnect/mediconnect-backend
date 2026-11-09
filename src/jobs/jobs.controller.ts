@@ -59,6 +59,16 @@ export class JobsController {
   }
 
   /**
+   * ENG-190: un mail por turno pidiendo la reseña, 3 horas después de que
+   * cierra la sala. Idempotente: el envío se reclama en `notifications`.
+   */
+  @Post('send-review-requests')
+  @HttpCode(HttpStatus.OK)
+  sendReviewRequests(): Promise<SendSummary> {
+    return this.notifications.sendReviewRequests();
+  }
+
+  /**
    * ENG-189: cierra los turnos confirmados cuya sala ya cerró, según quién
    * entró. No toca los turnos a los que el profesional no entró.
    */

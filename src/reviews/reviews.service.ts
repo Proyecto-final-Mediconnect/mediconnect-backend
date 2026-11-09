@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import type { CreateReviewDto } from './dto/create-review.dto';
 import type { ModerateReviewDto } from './dto/moderate-review.dto';
 import { containsContactInfo, isInappropriate } from './language-filter';
+import { isReviewable } from './reviewable';
 
 /** Cuántas reseñas por página, en el perfil y en la cola de moderación. */
 export const REVIEWS_PAGE_SIZE = 10;
@@ -97,7 +98,8 @@ export class ReviewsService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Deja la reseña de un turno propio y terminado. Una por turno: la tabla
+   * Deja la reseña de un turno propio y terminado, o al que el paciente ya
+   * entró (ENG-190, ver `isReviewable`). Una por turno: la tabla
    * tiene `appointment_id` único, y acá se contesta 409 antes de chocar con él.
    * Nace pendiente de moderación y no se ve hasta que se apruebe.
    */
@@ -113,6 +115,7 @@ export class ReviewsService {
         professional_id: true,
         status: true,
         review: { select: { id: true } },
+        consultation: { select: { patient_joined_at: true } },
       },
     });
     // Ajeno o inexistente dan lo mismo: un 403 confirmaría que el turno existe.
@@ -122,7 +125,12 @@ export class ReviewsService {
     ) {
       throw new NotFoundException('No encontramos ese turno.');
     }
-    if (appointment.status !== 'COMPLETADO') {
+    if (
+      !isReviewable(
+        appointment.status,
+        appointment.consultation?.patient_joined_at,
+      )
+    ) {
       throw new ConflictException(
         'Solo se puede reseñar una consulta que ya se hizo.',
       );

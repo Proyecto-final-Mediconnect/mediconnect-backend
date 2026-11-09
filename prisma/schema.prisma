@@ -92,6 +92,7 @@ enum notification_type {
   TURNO_CANCELADO
   TURNO_REPROGRAMADO
   MEDIPASS_ACCESO
+  RESENA_PEDIDA
 }
 
 enum notification_channel {
@@ -123,16 +124,17 @@ model Profile {
   /// La confirmación del turno no entra: es parte del servicio, no publicidad.
   email_reminders Boolean   @default(true)
 
-  patient                Patient?
-  professional           Professional?
-  notifications          Notification[]
-  push_tokens            PushToken[]
-  messages               Message[]
-  moderated_reviews      Review[]          @relation("ReviewModerator")
-  audit_logs             AuditLog[]
-  medipass_as_consultant MediPassSession[] @relation("MediPassConsultant")
-  medipass_revoked       MediPassSession[] @relation("MediPassRevoker")
-  legal_acceptances      LegalAcceptance[]
+  patient                  Patient?
+  professional             Professional?
+  notifications            Notification[]
+  push_tokens              PushToken[]
+  review_prompt_dismissals ReviewPromptDismissal[]
+  messages                 Message[]
+  moderated_reviews        Review[]                @relation("ReviewModerator")
+  audit_logs               AuditLog[]
+  medipass_as_consultant   MediPassSession[]       @relation("MediPassConsultant")
+  medipass_revoked         MediPassSession[]       @relation("MediPassRevoker")
+  legal_acceptances        LegalAcceptance[]
 
   @@map("profiles")
 }
@@ -418,12 +420,13 @@ model Appointment {
   created_at                    DateTime           @default(now()) @db.Timestamptz(6)
   updated_at                    DateTime           @default(now()) @db.Timestamptz(6)
 
-  patient       Patient        @relation(fields: [patient_id], references: [profile_id])
-  professional  Professional   @relation(fields: [professional_id], references: [profile_id])
-  consultation  Consultation?
-  payment       Payment?
-  review        Review?
-  notifications Notification[]
+  patient                 Patient                @relation(fields: [patient_id], references: [profile_id])
+  professional            Professional           @relation(fields: [professional_id], references: [profile_id])
+  consultation            Consultation?
+  payment                 Payment?
+  review                  Review?
+  review_prompt_dismissal ReviewPromptDismissal?
+  notifications           Notification[]
 
   @@index([professional_id, scheduled_at])
   @@index([patient_id, scheduled_at])
@@ -902,4 +905,19 @@ model ChainHeadSnapshot {
   patient Patient @relation(fields: [patient_id], references: [profile_id])
 
   @@map("chain_head_snapshots")
+}
+
+/// El paciente descartó el pedido de reseña de un turno (ENG-190): la tarjeta
+/// del inicio no vuelve y el mail no sale. Uno por turno.
+model ReviewPromptDismissal {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id     String   @db.Uuid
+  appointment_id String   @unique(map: "review_prompt_dismissals_appointment_key") @db.Uuid
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+
+  patient     Profile     @relation(fields: [patient_id], references: [id], onDelete: Cascade)
+  appointment Appointment @relation(fields: [appointment_id], references: [id], onDelete: Cascade)
+
+  @@index([patient_id], map: "review_prompt_dismissals_patient_idx")
+  @@map("review_prompt_dismissals")
 }
