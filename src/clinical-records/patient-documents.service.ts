@@ -8,6 +8,10 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
+import {
+  allowedExtension,
+  MAX_FILE_BYTES,
+} from '../common/files/file-signature';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ClinicalRecordsService, sameUuid } from './clinical-records.service';
@@ -24,7 +28,7 @@ import type {
 export const PATIENT_DOCUMENTS_BUCKET = 'patient-documents';
 
 /** El tope del bucket y de la tabla (`patient_documents_size_check`). */
-export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+export const MAX_DOCUMENT_BYTES = MAX_FILE_BYTES;
 
 /**
  * Cuota por paciente, contando solo los documentos no retirados. Sin ella, una
@@ -35,19 +39,6 @@ export const MAX_TOTAL_BYTES_PER_PATIENT = 200 * 1024 * 1024;
 
 /** Cuánto vive una URL de descarga: lo justo para abrirla (Sprint 0 §5.3.1). */
 export const DOWNLOAD_URL_TTL_SECONDS = 5 * 60;
-
-/**
- * Los tipos aceptados, con la firma con la que empieza cada archivo. Se mira el
- * contenido y no solo el `Content-Type`, que lo pone el cliente: un ejecutable
- * renombrado a `.pdf` no entra.
- */
-// Un `Map` y no un objeto: `Content-Type` lo manda el cliente y `constructor` o
-// `__proto__` no pueden resolver a nada del prototipo.
-const ALLOWED = new Map<string, { ext: string; magic: number[] }>([
-  ['application/pdf', { ext: 'pdf', magic: [0x25, 0x50, 0x44, 0x46] }], // %PDF
-  ['image/png', { ext: 'png', magic: [0x89, 0x50, 0x4e, 0x47] }],
-  ['image/jpeg', { ext: 'jpg', magic: [0xff, 0xd8, 0xff] }],
-]);
 
 /** Lo que Multer adjunta del archivo subido. */
 export interface UploadedDocumentFile {
@@ -140,8 +131,9 @@ export class PatientDocumentsService {
     if (file.size === 0) {
       throw new BadRequestException('El archivo está vacío.');
     }
-    const tipo = ALLOWED.get(file.mimetype);
-    if (!tipo || !startsWith(file.buffer, tipo.magic)) {
+    // Se mira el contenido y no solo el `Content-Type` (ver `file-signature.ts`).
+    const ext = allowedExtension(file.mimetype, file.buffer);
+    if (!ext) {
       throw new BadRequestException('Solo se pueden subir PDF, JPG o PNG.');
     }
     if (file.size > MAX_DOCUMENT_BYTES) {
@@ -165,7 +157,7 @@ export class PatientDocumentsService {
     // Nombre aleatorio y sin el nombre original: el nombre de un archivo puede
     // decir más de lo que hace falta ("VIH_positivo.pdf"). La carpeta es el
     // paciente, que es lo que miran las políticas de Storage.
-    const storagePath = `${patientId}/${randomUUID()}.${tipo.ext}`;
+    const storagePath = `${patientId}/${randomUUID()}.${ext}`;
 
     // Con service role y no con el token del paciente: el bucket no tiene política
     // de INSERT, así la única forma de subir pasa por acá (firma, rate limit, cuota
@@ -390,8 +382,4 @@ export class PatientDocumentsService {
       );
     }
   }
-}
-
-function startsWith(buffer: Buffer, magic: number[]): boolean {
-  return magic.every((byte, i) => buffer[i] === byte);
 }

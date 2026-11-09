@@ -102,6 +102,18 @@ describe('renderInAppNotification', () => {
     );
   });
 
+  it('mensaje con archivo (ENG-102): texto por defecto, sin contenido', () => {
+    expect(
+      renderInAppNotification('NUEVO_MENSAJE', {
+        from: 'Julián',
+        adjunto: true,
+      }).body,
+    ).toBe('Julián: 📎 Archivo adjunto');
+    expect(
+      renderInAppNotification('NUEVO_MENSAJE', { adjunto: true }).body,
+    ).toBe('📎 Archivo adjunto');
+  });
+
   it('un tipo desconocido sale con un texto neutro', () => {
     expect(renderInAppNotification('OTRO', {})).toEqual({
       title: 'Aviso',

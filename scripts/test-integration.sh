@@ -25,5 +25,9 @@ if [ "${SKIP_DOCKER:-}" != "true" ]; then
   docker compose up -d --wait postgres-test
 fi
 
+# El schema declara un índice GIN con `gin_trgm_ops` (ENG-49): `pg_trgm` tiene que
+# existir antes del `db push`. Supabase la trae de fábrica; un Postgres pelado no.
+echo 'create extension if not exists pg_trgm;' | pnpm exec prisma db execute --stdin --schema prisma/schema.prisma
+
 pnpm exec prisma db push --accept-data-loss
 pnpm exec jest --config ./test/jest-integration.json --runInBand "$@"

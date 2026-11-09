@@ -2,6 +2,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import type { appointment_status } from '../../generated/prisma';
@@ -31,13 +32,23 @@ export interface ChatCounterpart {
   rol: ChatRole;
 }
 
+/** El archivo de un mensaje (ENG-102). El archivo se pide aparte, con una URL firmada. */
+export interface ChatAttachment {
+  /** `application/pdf`, `image/jpeg` o `image/png`. */
+  tipo: string;
+  /** En bytes. */
+  tamano: number;
+}
+
 export interface ChatMessage {
   id: string;
   conversacionId: string;
   autorId: string;
+  /** Vacío si el mensaje es solo un archivo. */
   contenido: string;
   enviadoEl: string;
   leidoEl: string | null;
+  adjunto: ChatAttachment | null;
 }
 
 export interface ConversationSummary {
@@ -66,6 +77,8 @@ const MESSAGE_SELECT = {
   conversation_id: true,
   sender_id: true,
   content: true,
+  attachment_mime: true,
+  attachment_size: true,
   created_at: true,
   read_at: true,
 } as const;
@@ -81,6 +94,8 @@ interface MessageRow {
   conversation_id: string;
   sender_id: string;
   content: string | null;
+  attachment_mime: string | null;
+  attachment_size: number | null;
   created_at: Date;
   read_at: Date | null;
 }
@@ -120,6 +135,8 @@ interface Participants {
  */
 @Injectable()
 export class ConversationsService {
+  private readonly logger = new Logger(ConversationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: InAppNotificationsService,
@@ -299,62 +316,130 @@ export class ConversationsService {
     now: Date = new Date(),
   ): Promise<ChatMessage> {
     const conversation = await this.participantsOf(userId, conversationId);
+    return this.deliver(userId, conversationId, conversation, { content }, now);
+  }
 
+  /**
+   * Manda un mensaje con un archivo que ya está en Storage (ENG-102). Lo llama
+   * `ChatAttachmentsService` después de validar y subir el archivo, que es quien
+   * sabe de buckets: acá solo se guarda el mensaje, igual que uno de texto.
+   */
+  async sendWithAttachment(
+    userId: string,
+    conversationId: string,
+    attachment: {
+      path: string;
+      mime: string;
+      size: number;
+      content: string | null;
+    },
+    now: Date = new Date(),
+  ): Promise<ChatMessage> {
+    const conversation = await this.participantsOf(userId, conversationId);
+    return this.deliver(
+      userId,
+      conversationId,
+      conversation,
+      {
+        content: attachment.content,
+        attachment_url: attachment.path,
+        attachment_mime: attachment.mime,
+        attachment_size: attachment.size,
+      },
+      now,
+    );
+  }
+
+  /**
+   * Que `userId` sea participante de la conversación, o 404. Para los adjuntos,
+   * que se validan antes de subir nada a Storage.
+   */
+  async assertParticipant(
+    userId: string,
+    conversationId: string,
+  ): Promise<void> {
+    await this.participantsOf(userId, conversationId);
+  }
+
+  /** Guarda el mensaje, devuelve el chat a las bandejas y avisa a la otra persona. */
+  private async deliver(
+    userId: string,
+    conversationId: string,
+    conversation: Participants,
+    data: {
+      content: string | null;
+      attachment_url?: string;
+      attachment_mime?: string;
+      attachment_size?: number;
+    },
+    now: Date,
+  ): Promise<ChatMessage> {
     const row = await this.prisma.message.create({
       data: {
         conversation_id: conversationId,
         sender_id: userId,
-        content,
+        ...data,
         created_at: now,
       },
       select: MESSAGE_SELECT,
     });
 
-    // Un mensaje nuevo devuelve el chat a la bandeja de quien lo había ocultado.
-    // El filtro hace que casi siempre sea un UPDATE que no toca ninguna fila.
-    await this.prisma.conversation.updateMany({
-      where: {
-        id: conversationId,
-        OR: [
-          { patient_hidden_at: { not: null } },
-          { professional_hidden_at: { not: null } },
-        ],
-      },
-      data: { patient_hidden_at: null, professional_hidden_at: null },
-    });
-
-    const recipientId =
-      conversation.patient_id === userId
-        ? conversation.professional_id
-        : conversation.patient_id;
-    const from = await this.displayName(userId, conversation);
-    const noticeCreated = await this.notifications.notifyNewMessage(
-      recipientId,
-      conversationId,
-      from,
-      now,
-    );
-    // El push sale del backend y no del cliente suscrito a Realtime: el stream
-    // puede perder un evento (spike ENG-52) y ese mensaje no avisaría. Sin el
-    // texto del mensaje: aparece en la pantalla bloqueada y puede ser clínico.
-    //
-    // Solo si se creó el aviso in-app: misma regla de uno por conversación sin
-    // leer, para no hacer sonar el celular por cada mensaje de una ráfaga.
-    //
-    // Sin `await`: Expo puede tardar hasta el timeout y eso no puede demorar la
-    // respuesta del chat. `sendToUser` nunca tira, así que no queda una promesa
-    // rechazada sin manejar.
-    if (noticeCreated) {
-      void this.push.sendToUser(recipientId, {
-        title: 'Nuevo mensaje',
-        body: from ? `${from} te escribió.` : 'Tenés un mensaje nuevo.',
-        data: {
-          tipo: 'NUEVO_MENSAJE',
-          conversationId,
-          contraparteId: userId,
-          nombre: from,
+    // Lo que sigue es best-effort: el mensaje ya quedó guardado, y que falle un
+    // aviso o el des-ocultado no debe hacer fallar el envío (el cliente
+    // reintentaría y duplicaría el mensaje; en un adjunto, además, se borraría
+    // un archivo ya referenciado).
+    try {
+      // Un mensaje nuevo devuelve el chat a la bandeja de quien lo había ocultado.
+      // El filtro hace que casi siempre sea un UPDATE que no toca ninguna fila.
+      await this.prisma.conversation.updateMany({
+        where: {
+          id: conversationId,
+          OR: [
+            { patient_hidden_at: { not: null } },
+            { professional_hidden_at: { not: null } },
+          ],
         },
+        data: { patient_hidden_at: null, professional_hidden_at: null },
       });
+
+      const recipientId =
+        conversation.patient_id === userId
+          ? conversation.professional_id
+          : conversation.patient_id;
+      const from = await this.displayName(userId, conversation);
+      const noticeCreated = await this.notifications.notifyNewMessage(
+        recipientId,
+        conversationId,
+        from,
+        now,
+        data.attachment_url !== undefined,
+      );
+      // El push sale del backend y no del cliente suscrito a Realtime: el stream
+      // puede perder un evento (spike ENG-52) y ese mensaje no avisaría. Sin el
+      // texto del mensaje: aparece en la pantalla bloqueada y puede ser clínico.
+      //
+      // Solo si se creó el aviso in-app: misma regla de uno por conversación sin
+      // leer, para no hacer sonar el celular por cada mensaje de una ráfaga.
+      //
+      // Sin `await`: Expo puede tardar hasta el timeout y eso no puede demorar la
+      // respuesta del chat. `sendToUser` nunca tira, así que no queda una promesa
+      // rechazada sin manejar.
+      if (noticeCreated) {
+        void this.push.sendToUser(recipientId, {
+          title: 'Nuevo mensaje',
+          body: from ? `${from} te escribió.` : 'Tenés un mensaje nuevo.',
+          data: {
+            tipo: 'NUEVO_MENSAJE',
+            conversationId,
+            contraparteId: userId,
+            nombre: from,
+          },
+        });
+      }
+    } catch (err) {
+      this.logger.error(
+        `Mensaje ${row.id} guardado, pero falló lo posterior al envío: ${String(err)}`,
+      );
     }
 
     return toChatMessage(row);
@@ -513,6 +598,10 @@ function toChatMessage(row: MessageRow): ChatMessage {
     contenido: row.content ?? '',
     enviadoEl: row.created_at.toISOString(),
     leidoEl: row.read_at?.toISOString() ?? null,
+    adjunto:
+      row.attachment_mime && row.attachment_size !== null
+        ? { tipo: row.attachment_mime, tamano: row.attachment_size }
+        : null,
   };
 }
 

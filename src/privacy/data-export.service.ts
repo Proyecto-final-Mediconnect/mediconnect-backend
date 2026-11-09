@@ -498,7 +498,8 @@ export class DataExportService {
           select: {
             sender_id: true,
             content: true,
-            attachment_url: true,
+            attachment_mime: true,
+            attachment_size: true,
             created_at: true,
             read_at: true,
           },
@@ -511,7 +512,11 @@ export class DataExportService {
       mensajes: c.messages.map((m) => ({
         de: m.sender_id === userId ? 'yo' : 'la otra persona',
         texto: m.content,
-        adjunto: m.attachment_url,
+        // El tipo y el tamaño, no la ruta en Storage: la ruta no le sirve a
+        // nadie fuera del sistema. El archivo se abre desde el chat.
+        adjunto: m.attachment_mime
+          ? { tipo: m.attachment_mime, bytes: m.attachment_size }
+          : null,
         enviadoEl: iso(m.created_at),
         leidoEl: iso(m.read_at),
       })),
