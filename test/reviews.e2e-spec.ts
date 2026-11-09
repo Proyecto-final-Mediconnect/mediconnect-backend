@@ -37,9 +37,15 @@ describe('Reseñas (e2e)', () => {
       findUniqueOrThrow: jest.Mock;
     };
     profile: { findUnique: jest.Mock };
-    reviewResponse: { upsert: jest.Mock; deleteMany: jest.Mock };
+    reviewResponse: {
+      upsert: jest.Mock;
+      deleteMany: jest.Mock;
+      findUnique: jest.Mock;
+      findFirst: jest.Mock;
+    };
     auditLog: { create: jest.Mock };
     notification: { create: jest.Mock };
+    $transaction: jest.Mock;
   };
 
   beforeAll(async () => {
@@ -99,10 +105,17 @@ describe('Reseñas (e2e)', () => {
           created_at: CREATED,
         }),
         deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUnique: jest.fn().mockResolvedValue(null),
+        findFirst: jest.fn().mockResolvedValue({ content: 'Gracias.' }),
       },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
       notification: { create: jest.fn().mockResolvedValue({}) },
+      $transaction: jest.fn(),
     };
+    // respond() y deleteResponse() corren en una transacción interactiva.
+    prisma.$transaction.mockImplementation(
+      (cb: (tx: typeof prisma) => unknown) => cb(prisma),
+    );
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],

@@ -45,6 +45,8 @@ const ESCRITURAS: Record<string, ('INSERT' | 'UPDATE' | 'DELETE')[]> = {
   profiles: ['UPDATE'],
   push_tokens: ['DELETE'],
   refunds: ['INSERT', 'UPDATE'],
+  // ENG-106: el profesional responde, edita y borra su respuesta.
+  review_responses: ['INSERT', 'UPDATE', 'DELETE'],
   reviews: ['INSERT', 'UPDATE', 'DELETE'],
   schedule_blocks: ['DELETE'],
   schedule_rules: ['DELETE'],
