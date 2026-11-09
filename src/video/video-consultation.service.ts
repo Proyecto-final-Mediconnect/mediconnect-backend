@@ -42,6 +42,11 @@ export type ConsultationRole = 'PACIENTE' | 'PROFESIONAL';
 
 export interface VideoConsultationAccess {
   appointmentId: string;
+  /**
+   * La consulta del turno: la evolución que el profesional carga al terminar
+   * queda asociada a ella (ENG-191).
+   */
+  consultationId: string;
   role: ConsultationRole;
   /** URL de la sala **con** el meeting token. Es efímera: no se persiste. */
   roomUrl: string;
@@ -129,6 +134,7 @@ export class VideoConsultationService {
 
     return {
       appointmentId: appointment.id,
+      consultationId: room.consultationId,
       role,
       roomUrl: `${room.url}?t=${token}`,
       expiresAt: closesAt.toISOString(),
@@ -244,7 +250,7 @@ export class VideoConsultationService {
     expiresAtUnix: number,
     recording: RecordingMode,
     now: Date,
-  ): Promise<{ name: string; url: string }> {
+  ): Promise<{ name: string; url: string; consultationId: string }> {
     const consultation = await this.prisma.consultation.upsert({
       where: { appointment_id: appointment.id },
       create: { appointment_id: appointment.id, started_at: now },
@@ -266,7 +272,11 @@ export class VideoConsultationService {
     });
 
     if (session.daily_room_name && session.daily_room_url) {
-      return { name: session.daily_room_name, url: session.daily_room_url };
+      return {
+        name: session.daily_room_name,
+        url: session.daily_room_url,
+        consultationId: consultation.id,
+      };
     }
 
     const room = await this.daily.createConsultationRoom(
@@ -283,7 +293,8 @@ export class VideoConsultationService {
       data: { daily_room_name: room.name, daily_room_url: room.url },
     });
 
-    if (claimed.count === 1) return room;
+    if (claimed.count === 1)
+      return { ...room, consultationId: consultation.id };
 
     // Perdimos la carrera: la sala que acabamos de crear no la va a usar nadie.
     // Se borra porque Daily factura por minuto de participante y una sala
@@ -308,7 +319,11 @@ export class VideoConsultationService {
       );
     }
 
-    return { name: winner.daily_room_name, url: winner.daily_room_url };
+    return {
+      name: winner.daily_room_name,
+      url: winner.daily_room_url,
+      consultationId: consultation.id,
+    };
   }
 
   /**

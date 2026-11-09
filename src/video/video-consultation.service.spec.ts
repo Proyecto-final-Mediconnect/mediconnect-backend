@@ -139,6 +139,8 @@ describe('VideoConsultationService', () => {
       );
 
       expect(access.role).toBe('PACIENTE');
+      // ENG-191: la evolución que se carga al terminar se asocia a la consulta.
+      expect(access.consultationId).toBe('cons-1');
       expect(access.roomUrl).toBe(
         'https://mediconnect.daily.co/consulta-abc123?t=tok',
       );
