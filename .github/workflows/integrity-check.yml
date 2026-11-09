@@ -58,6 +58,10 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        # El `postinstall` corre `prisma generate` (ENG-187), que necesita
+        # `DATABASE_URL` para cargar `prisma.config.ts`.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: pnpm install --frozen-lockfile
 
       - name: Generate Prisma Client
