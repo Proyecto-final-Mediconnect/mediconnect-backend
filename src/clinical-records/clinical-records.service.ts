@@ -7,6 +7,11 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  toVitalBlock,
+  VITAL_SELECT,
+  type VitalBlock,
+} from '../medipass/vital-block';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
@@ -708,6 +713,64 @@ export class ClinicalRecordsService {
     await this.recordAccess(viewerId, patientId, asPatient, entries.length);
 
     return entries;
+  }
+
+  /**
+   * Alergias, medicación y condiciones del paciente, para la columna de la
+   * videoconsulta (ENG-191).
+   *
+   * Son los mismos datos vitales que el paciente carga para su MediPass
+   * (ENG-136), con el mismo armado defensivo (`toVitalBlock`), menos el
+   * contacto de emergencia: en una consulta programada no hace falta, y lo que
+   * no hace falta no se entrega.
+   *
+   * Mismas reglas que la HC: el paciente ve lo suyo y el profesional necesita
+   * relación (`assertCanReadFor`). Y como son datos de salud, cada lectura queda
+   * en `audit_logs` y falla cerrado igual que `recordAccess`.
+   */
+  async readPatientVital(
+    viewerId: string,
+    patientId: string,
+    now: Date = new Date(),
+  ): Promise<Omit<VitalBlock, 'contacto'>> {
+    const asPatient = sameUuid(viewerId, patientId);
+    if (!asPatient) {
+      await this.assertCanReadFor(viewerId, patientId);
+    }
+
+    const patient = await this.prisma.patient.findUnique({
+      where: { profile_id: patientId },
+      select: VITAL_SELECT,
+    });
+    // Con relación pero sin ficha cargada: no hay nada que mostrar todavía.
+    if (!patient) {
+      throw new NotFoundException(
+        'Este paciente todavía no completó su ficha.',
+      );
+    }
+
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actor_id: viewerId,
+          action: 'PATIENT_VITAL_READ',
+          resource_type: 'patients',
+          resource_id: patientId,
+          metadata: { role: asPatient ? 'PACIENTE' : 'PROFESIONAL' },
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `No se pudo auditar la lectura de los datos vitales de ${patientId} por ${viewerId}: ${String(error)}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos registrar el acceso a la ficha del paciente, así que no la mostramos. Probá de nuevo en unos minutos.',
+      );
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { contacto, ...vital } = toVitalBlock(patient, now);
+    return vital;
   }
 
   /**
