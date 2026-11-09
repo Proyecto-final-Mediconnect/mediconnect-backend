@@ -37,8 +37,15 @@ describe('Reseñas (e2e)', () => {
       findUniqueOrThrow: jest.Mock;
     };
     profile: { findUnique: jest.Mock };
+    reviewResponse: {
+      upsert: jest.Mock;
+      deleteMany: jest.Mock;
+      findUnique: jest.Mock;
+      findFirst: jest.Mock;
+    };
     auditLog: { create: jest.Mock };
     notification: { create: jest.Mock };
+    $transaction: jest.Mock;
   };
 
   beforeAll(async () => {
@@ -91,9 +98,24 @@ describe('Reseñas (e2e)', () => {
       profile: {
         findUnique: jest.fn().mockResolvedValue({ role: 'MODERADOR' }),
       },
+      reviewResponse: {
+        upsert: jest.fn().mockResolvedValue({
+          review_id: RESENA,
+          content: 'Gracias.',
+          created_at: CREATED,
+        }),
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUnique: jest.fn().mockResolvedValue(null),
+        findFirst: jest.fn().mockResolvedValue({ content: 'Gracias.' }),
+      },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
       notification: { create: jest.fn().mockResolvedValue({}) },
+      $transaction: jest.fn(),
     };
+    // respond() y deleteResponse() corren en una transacción interactiva.
+    prisma.$transaction.mockImplementation(
+      (cb: (tx: typeof prisma) => unknown) => cb(prisma),
+    );
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -206,5 +228,86 @@ describe('Reseñas (e2e)', () => {
       .get('/moderation/reviews')
       .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
       .expect(403);
+  });
+
+  it('un comentario con insultos da 422 con un mensaje para reformularlo (ENG-107)', async () => {
+    const res = await request(app.getHttpServer())
+      .post(`/appointments/${TURNO}/review`)
+      .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+      .send({ rating: 1, comment: 'Un b0lud0 total' })
+      .expect(422);
+
+    expect(res.body.message).toMatch(/Reformulalo/);
+    expect(prisma.review.create).not.toHaveBeenCalled();
+  });
+
+  describe('respuestas del profesional (ENG-106)', () => {
+    beforeEach(() => {
+      prisma.profile.findUnique.mockResolvedValue({ role: 'PROFESIONAL' });
+      prisma.review.findUnique.mockResolvedValue({
+        professional_id: PRO,
+        status: 'APROBADA',
+      });
+    });
+
+    it('sin sesión no se responde ni se borra', async () => {
+      await request(app.getHttpServer())
+        .put(`/reviews/${RESENA}/response`)
+        .send({ content: 'Gracias.' })
+        .expect(401);
+      await request(app.getHttpServer())
+        .delete(`/reviews/${RESENA}/response`)
+        .expect(401);
+      expect(prisma.reviewResponse.upsert).not.toHaveBeenCalled();
+    });
+
+    it('responde y devuelve la respuesta', async () => {
+      const res = await request(app.getHttpServer())
+        .put(`/reviews/${RESENA}/response`)
+        .set('Authorization', `Bearer ${await signToken(PRO)}`)
+        .send({ content: '  Gracias.  ' })
+        .expect(200);
+
+      expect(res.body).toEqual({
+        reviewId: RESENA,
+        content: 'Gracias.',
+        createdAt: CREATED.toISOString(),
+      });
+      expect(prisma.reviewResponse.upsert.mock.calls[0][0].create.content).toBe(
+        'Gracias.',
+      );
+    });
+
+    it('una respuesta vacía o de más de 1000 caracteres da 400', async () => {
+      const token = await signToken(PRO);
+      for (const content of ['   ', 'a'.repeat(1001)]) {
+        await request(app.getHttpServer())
+          .put(`/reviews/${RESENA}/response`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ content })
+          .expect(400);
+      }
+      expect(prisma.reviewResponse.upsert).not.toHaveBeenCalled();
+    });
+
+    it('borra la respuesta con 204', async () => {
+      await request(app.getHttpServer())
+        .delete(`/reviews/${RESENA}/response`)
+        .set('Authorization', `Bearer ${await signToken(PRO)}`)
+        .expect(204);
+    });
+
+    it('las reseñas recibidas son solo para profesionales', async () => {
+      await request(app.getHttpServer())
+        .get('/reviews/received')
+        .set('Authorization', `Bearer ${await signToken(PRO)}`)
+        .expect(200);
+
+      prisma.profile.findUnique.mockResolvedValue({ role: 'PACIENTE' });
+      await request(app.getHttpServer())
+        .get('/reviews/received')
+        .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+        .expect(403);
+    });
   });
 });

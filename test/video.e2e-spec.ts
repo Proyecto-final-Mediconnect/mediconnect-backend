@@ -36,7 +36,13 @@ describe('Spike de Daily.co (e2e)', () => {
     createSpikeRoom: jest.Mock;
     getMeetingSessions: jest.Mock;
     deleteRoom: jest.Mock;
+    createTestRoom: jest.Mock;
     isConfigured: jest.Mock;
+  };
+
+  const SALA_DE_PRUEBA = {
+    url: 'https://mediconnect.daily.co/prueba-0123456789ab?t=token',
+    expiraEl: '2026-11-04T18:10:00.000Z',
   };
 
   const ROOM = {
@@ -66,6 +72,7 @@ describe('Spike de Daily.co (e2e)', () => {
       createSpikeRoom: jest.fn().mockResolvedValue(ROOM),
       getMeetingSessions: jest.fn().mockResolvedValue([]),
       deleteRoom: jest.fn().mockResolvedValue(undefined),
+      createTestRoom: jest.fn().mockResolvedValue(SALA_DE_PRUEBA),
       isConfigured: jest.fn().mockReturnValue(true),
     };
 
@@ -99,14 +106,14 @@ describe('Spike de Daily.co (e2e)', () => {
     await app.close();
   });
 
-  function signToken(): Promise<string> {
+  function signToken(sub = SUB): Promise<string> {
     return new SignJWT({
       email: 'pro@test.com',
       role: 'authenticated',
       aal: 'aal2',
     })
       .setProtectedHeader({ alg: 'ES256' })
-      .setSubject(SUB)
+      .setSubject(sub)
       .setIssuer(ISSUER)
       .setAudience('authenticated')
       .setIssuedAt()
@@ -192,6 +199,71 @@ describe('Spike de Daily.co (e2e)', () => {
         .expect(400);
 
       expect(daily.deleteRoom).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /video/test-room (probar cámara y micrófono)', () => {
+    it('sin sesión devuelve 401 y no crea ninguna sala', async () => {
+      await request(app.getHttpServer()).post('/video/test-room').expect(401);
+
+      expect(daily.createTestRoom).not.toHaveBeenCalled();
+    });
+
+    it('con sesión devuelve la URL con el token, sin que nada la guarde en caché', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/video/test-room')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(201);
+
+      expect(res.body).toEqual(SALA_DE_PRUEBA);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(daily.createTestRoom).toHaveBeenCalledTimes(1);
+    });
+
+    it('sin Daily configurado devuelve el 503 explicado', async () => {
+      daily.createTestRoom.mockRejectedValueOnce(
+        new ServiceUnavailableException('falta DAILY_API_KEY'),
+      );
+
+      await request(app.getHttpServer())
+        .post('/video/test-room')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(503);
+    });
+
+    it('corta al cuarto pedido del minuto: cada sala es una llamada que se factura', async () => {
+      const token = await signToken();
+      for (let i = 0; i < 3; i++) {
+        await request(app.getHttpServer())
+          .post('/video/test-room')
+          .set('Authorization', `Bearer ${token}`)
+          .expect(201);
+      }
+
+      await request(app.getHttpServer())
+        .post('/video/test-room')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(429);
+      expect(daily.createTestRoom).toHaveBeenCalledTimes(3);
+    });
+
+    it('el cupo es por usuario: otro usuario en la misma IP no hereda el límite', async () => {
+      const otro = '22222222-2222-4222-8222-222222222222';
+      const ip = '190.12.34.56';
+      for (let i = 0; i < 3; i++) {
+        await request(app.getHttpServer())
+          .post('/video/test-room')
+          .set('CF-Connecting-IP', ip)
+          .set('Authorization', `Bearer ${await signToken()}`)
+          .expect(201);
+      }
+
+      await request(app.getHttpServer())
+        .post('/video/test-room')
+        .set('CF-Connecting-IP', ip)
+        .set('Authorization', `Bearer ${await signToken(otro)}`)
+        .expect(201);
+      expect(daily.createTestRoom).toHaveBeenCalledTimes(4);
     });
   });
 });

@@ -135,6 +135,7 @@ export class InAppNotificationsService {
     conversationId: string,
     from: string,
     now: Date = new Date(),
+    withAttachment = false,
   ): Promise<void> {
     try {
       const pending = await this.prisma.notification.count({
@@ -150,7 +151,9 @@ export class InAppNotificationsService {
           user_id: recipientId,
           type: 'NUEVO_MENSAJE',
           channel: 'IN_APP',
-          payload: { conversationId, from },
+          payload: withAttachment
+            ? { conversationId, from, adjunto: true }
+            : { conversationId, from },
           sent_at: now,
         },
       });

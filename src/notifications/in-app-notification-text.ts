@@ -70,6 +70,13 @@ export function renderInAppNotification(
       };
     case 'NUEVO_MENSAJE': {
       const from = text(p.from);
+      // Un mensaje solo-archivo no tiene texto que mostrar (ENG-102).
+      if (p.adjunto === true) {
+        return {
+          title: 'Mensaje nuevo',
+          body: from ? `${from}: 📎 Archivo adjunto` : '📎 Archivo adjunto',
+        };
+      }
       return {
         title: 'Mensaje nuevo',
         body: from ? `${from} te escribió.` : 'Tenés un mensaje sin leer.',

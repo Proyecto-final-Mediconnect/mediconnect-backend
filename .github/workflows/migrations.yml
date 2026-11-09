@@ -1,0 +1,195 @@
+name: Migraciones
+
+# ENG-187 · La cadena de migraciones se valida ACÁ, no en el deploy.
+#
+# `prisma migrate deploy` corría en un solo lugar del proyecto:
+# `deploy-production.yml`. El CI de integración prepara la base con
+# `prisma db push` (`scripts/test-integration.sh`), que deriva el esquema del
+# `schema.prisma` y **se saltea los archivos de migración por completo**.
+#
+# Para una migración que solo crea tablas da igual: el esquema resultante es el
+# mismo. Para una con lógica —un dedup, un backfill, un `raise`— no, y hay por
+# lo menos seis así (ENG-170, ENG-65, ENG-70 ×2, ENG-164, ENG-145).
+#
+# Sin este workflow, la primera vez que las migraciones corren en orden contra
+# una base es el deploy de producción. Si una falla, el deploy se corta con la
+# base a medio migrar y destrabarlo pide un `prisma migrate resolve` a mano (ver
+# el README). Es el punto 2 de la review de backend#83..#90 del 02/11, que pedía
+# verificarlas "en CI o contra una base real".
+#
+# Los triggers acompañan a los de `ci.yml` e `integration-tests.yml` por el mismo
+# motivo documentado allá: sin el filtro de `branches` en `pull_request`, un PR
+# apilado sobre otra rama de feature también queda cubierto; y `edited` está
+# porque reapuntar la base de un PR no dispara los tipos por defecto.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - 'prisma/**'
+      - 'prisma.config.ts'
+      - 'package.json'
+      - '.github/workflows/migrations.yml'
+  push:
+    branches:
+      - 'release/**'
+      - 'main'
+    paths:
+      - 'prisma/**'
+      - 'prisma.config.ts'
+      - 'package.json'
+      - '.github/workflows/migrations.yml'
+
+# Solo lectura del repo: ningún job de este workflow escribe nada.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migraciones:
+    name: Cadena de migraciones
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: mediconnect
+          POSTGRES_PASSWORD: mediconnect
+          POSTGRES_DB: mediconnect_migrations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mediconnect -d mediconnect_migrations"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Base propia y vacía: el punto es que las migraciones corran desde cero,
+      # como en un deploy a una base nueva.
+      DATABASE_URL: 'postgresql://mediconnect:mediconnect@localhost:5432/mediconnect_migrations?schema=public'
+      # El seed construye el cliente de Supabase al arrancar. No hace red.
+      SUPABASE_URL: https://placeholder.supabase.co
+      SUPABASE_ANON_KEY: placeholder-anon-key
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Las migraciones asumen la base de Supabase, no un Postgres pelado: usan
+      # `auth.uid()` 52 veces, cuelgan un trigger de `auth.users` y otorgan
+      # privilegios a los roles `anon` y `authenticated`. Un `postgres:15`
+      # limpio no tiene nada de eso, y la segunda migración se cae con
+      # `ERROR: schema "auth" does not exist`.
+      #
+      # OJO: es una SIMULACIÓN casera de Supabase, no la real. Aproxima roles
+      # (anon/authenticated/service_role), extensiones (pgcrypto/citext/pg_trgm),
+      # `auth.users` mínima y `auth.uid()`. Puede divergir de Supabase (otras
+      # columnas de auth.users, schemas como storage/extensions, versión de
+      # Postgres). Si una migración empieza a usar algo más, agregarlo acá; la
+      # alternativa más fiel es la imagen `supabase/postgres` como service.
+      #
+      # Esto recrea el mínimo que las migraciones necesitan: la misma receta
+      # que ya repiten los specs de integración, acá en un solo lugar.
+      #
+      # Que haga falta es, en sí, información útil: **la cadena de migraciones
+      # no se puede aplicar sobre un PostgreSQL vacío**. Para levantar el
+      # proyecto en una base nueva hay que crear estos objetos primero, y eso no
+      # estaba escrito en ningún lado.
+      - name: Preparar los objetos que aporta Supabase
+        run: |
+          PGPASSWORD=mediconnect psql -h localhost -U mediconnect \
+            -v ON_ERROR_STOP=1 -d mediconnect_migrations <<'SQL'
+          do $$ begin create role anon nologin noinherit;
+            exception when duplicate_object then null; end $$;
+          do $$ begin create role authenticated nologin noinherit;
+            exception when duplicate_object then null; end $$;
+          do $$ begin create role service_role nologin noinherit bypassrls;
+            exception when duplicate_object then null; end $$;
+
+          -- Extensiones. Ninguna migración las crea: el `schema.prisma` las
+          -- declara en `previewFeatures`/`extensions` y Supabase las trae de
+          -- fábrica, así que el código asume que están. `pg_trgm` es la que
+          -- hace falta para el índice GIN del catálogo (ENG-49) y es la que
+          -- cortó la corrida anterior con `gin_trgm_ops does not exist`.
+          create extension if not exists pgcrypto;
+          create extension if not exists citext;
+          create extension if not exists pg_trgm;
+
+          create schema if not exists auth;
+
+          -- Lo mínimo de `auth.users` que tocan las migraciones: el trigger
+          -- `on_auth_user_created` lee `id`, `email` y `raw_user_meta_data`.
+          create table if not exists auth.users (
+            id                 uuid primary key default gen_random_uuid(),
+            email              text,
+            raw_user_meta_data jsonb
+          );
+
+          -- `auth.uid()` de Supabase: el claim `sub` del JWT que entra por
+          -- PostgREST. Igual que en los specs de integración.
+          create or replace function auth.uid() returns uuid as $$
+            select nullif(
+              current_setting('request.jwt.claims', true)::json ->> 'sub',
+              ''
+            )::uuid
+          $$ language sql stable;
+
+          grant usage on schema public to anon, authenticated;
+          grant usage on schema auth to authenticated;
+          SQL
+
+      # El corazón del workflow: las migraciones, en orden, contra una base
+      # vacía. Lo que esto cubre y `db push` no: que cada archivo SQL sea válido,
+      # que el orden alcance (hay tres timestamps duplicados y Prisma desempata
+      # por el resto del nombre), y que la lógica de las que hacen algo más que
+      # DDL se ejecute de verdad.
+      - name: Aplicar las migraciones desde cero
+        run: pnpm exec prisma migrate deploy
+
+      # Detecta que alguien haya tocado el `schema.prisma` sin crear la
+      # migración correspondiente. Es el caso que el CI de hoy NO ve: con
+      # `db push` el esquema sale del schema, así que un cambio sin migración
+      # pasa verde y después falta en producción.
+      #
+      # Se compara la base **que acaban de producir las migraciones** contra el
+      # `schema.prisma`, sin shadow database. Con `--shadow-database-url`,
+      # Prisma resetea esa base y se lleva puestas las extensiones que el
+      # bootstrap creó, y el diff falla por `gin_trgm_ops` en vez de por drift.
+      #
+      # `--exit-code` devuelve 2 cuando hay diferencias.
+      - name: Verificar que el schema y las migraciones coincidan
+        run: |
+          pnpm exec prisma migrate diff \
+            --from-schema-datasource ./prisma/schema.prisma \
+            --to-schema-datamodel ./prisma/schema.prisma \
+            --exit-code
+          echo "Sin drift: las migraciones producen el mismo esquema que schema.prisma."
+
+      # El deploy corre `db:setup` = `migrate deploy && db:seed`, así que el seed
+      # es parte del camino que hay que probar. Además es el que primero choca
+      # con una migración que aplicó pero dejó los datos en un estado raro.
+      - name: Correr el seed sobre las migraciones
+        run: pnpm run db:seed
+
+      # Dos veces: el seed tiene que ser idempotente. Es lo que pasa en cada
+      # deploy a partir del segundo.
+      - name: Correr el seed otra vez (idempotencia)
+        run: pnpm run db:seed

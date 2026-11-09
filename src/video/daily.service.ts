@@ -6,6 +6,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomBytes } from 'node:crypto';
 import {
   CONSULTATION_ROOM_PREFIX,
   consultationRoomProperties,
@@ -18,6 +19,11 @@ import {
   SPIKE_ROOM_PREFIX,
   TOKEN_TTL_SECONDS,
 } from './daily.config';
+import {
+  TEST_ROOM_PREFIX,
+  TEST_ROOM_TTL_SECONDS,
+  testRoomProperties,
+} from './test-room.config';
 
 /**
  * Cliente de la API REST de Daily.co (ENG-51).
@@ -50,6 +56,14 @@ export interface SpikeRoom {
   professionalUrl: string;
   patientUrl: string;
   maxParticipants: number;
+}
+
+/** Sala de prueba de cámara y micrófono, lista para abrir. */
+export interface TestRoom {
+  /** URL de la sala con el meeting token: es la credencial, no se guarda en ningún lado. */
+  url: string;
+  /** Cuándo vence la sala. ISO-8601. */
+  expiraEl: string;
 }
 
 /** Sala de una videoconsulta real (ENG-56). Sin tokens: se emiten por ingreso. */
@@ -225,6 +239,35 @@ export class DailyService {
         ...(params.startRecording === true && { start_cloud_recording: true }),
       },
     }).then((response) => response.token);
+  }
+
+  /**
+   * Crea una sala de prueba para una sola persona y devuelve su URL con el
+   * token (ver `test-room.config.ts`).
+   *
+   * Privada como las de consulta: la URL sin el token no abre nada. El token
+   * vence con la sala y no es owner: no hay nadie a quien moderar.
+   */
+  async createTestRoom(userName: string): Promise<TestRoom> {
+    this.assertConfigured();
+
+    const exp = Math.floor(Date.now() / 1000) + TEST_ROOM_TTL_SECONDS;
+    const room = await this.request<DailyRoomResponse>('POST', '/rooms', {
+      name: `${TEST_ROOM_PREFIX}-${randomBytes(8).toString('hex')}`,
+      privacy: 'private',
+      properties: testRoomProperties(exp),
+    });
+    const token = await this.createMeetingToken(
+      room.name,
+      userName,
+      false,
+      exp,
+    );
+
+    return {
+      url: `${room.url}?t=${token}`,
+      expiraEl: new Date(exp * 1000).toISOString(),
+    };
   }
 
   /**
