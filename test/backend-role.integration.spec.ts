@@ -43,7 +43,8 @@ const ESCRITURAS: Record<string, ('INSERT' | 'UPDATE' | 'DELETE')[]> = {
   // ENG-86: la baja saca al profesional del catálogo.
   professionals: ['UPDATE'],
   profiles: ['UPDATE'],
-  push_tokens: ['DELETE'],
+  // ENG-71: el registro del token es un upsert; la baja y los vencidos, delete.
+  push_tokens: ['INSERT', 'UPDATE', 'DELETE'],
   refunds: ['INSERT', 'UPDATE'],
   // ENG-106: el profesional responde, edita y borra su respuesta.
   review_responses: ['INSERT', 'UPDATE', 'DELETE'],

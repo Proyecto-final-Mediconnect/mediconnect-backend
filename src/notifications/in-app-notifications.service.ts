@@ -129,6 +129,9 @@ export class InAppNotificationsService {
    *
    * **Nunca tira**, por lo mismo que `notifyProfessional`: el mensaje ya quedó
    * guardado y eso es lo importante.
+   *
+   * Devuelve `true` solo si dejó un aviso nuevo: el push (ENG-71) sigue la misma
+   * regla y sale una vez por conversación sin leer, no por mensaje.
    */
   async notifyNewMessage(
     recipientId: string,
@@ -136,7 +139,7 @@ export class InAppNotificationsService {
     from: string,
     now: Date = new Date(),
     withAttachment = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const pending = await this.prisma.notification.count({
         where: {
@@ -144,7 +147,7 @@ export class InAppNotificationsService {
           read_at: null,
         },
       });
-      if (pending > 0) return;
+      if (pending > 0) return false;
 
       await this.prisma.notification.create({
         data: {
@@ -157,10 +160,12 @@ export class InAppNotificationsService {
           sent_at: now,
         },
       });
+      return true;
     } catch (err) {
       this.logger.error(
         `No se pudo dejar el aviso de mensaje de la conversación ${conversationId}: ${String(err)}`,
       );
+      return false;
     }
   }
 

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import type { appointment_status } from '../../generated/prisma';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
+import { PushService } from '../notifications/push.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 /** Cuántos mensajes trae cada página del historial. */
@@ -139,6 +140,7 @@ export class ConversationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: InAppNotificationsService,
+    private readonly push: PushService,
   ) {}
 
   /** Las conversaciones del usuario, la más activa primero, y con quién puede abrir una nueva. */
@@ -404,13 +406,36 @@ export class ConversationsService {
         conversation.patient_id === userId
           ? conversation.professional_id
           : conversation.patient_id;
-      await this.notifications.notifyNewMessage(
+      const from = await this.displayName(userId, conversation);
+      const noticeCreated = await this.notifications.notifyNewMessage(
         recipientId,
         conversationId,
-        await this.displayName(userId, conversation),
+        from,
         now,
         data.attachment_url !== undefined,
       );
+      // El push sale del backend y no del cliente suscrito a Realtime: el stream
+      // puede perder un evento (spike ENG-52) y ese mensaje no avisaría. Sin el
+      // texto del mensaje: aparece en la pantalla bloqueada y puede ser clínico.
+      //
+      // Solo si se creó el aviso in-app: misma regla de uno por conversación sin
+      // leer, para no hacer sonar el celular por cada mensaje de una ráfaga.
+      //
+      // Sin `await`: Expo puede tardar hasta el timeout y eso no puede demorar la
+      // respuesta del chat. `sendToUser` nunca tira, así que no queda una promesa
+      // rechazada sin manejar.
+      if (noticeCreated) {
+        void this.push.sendToUser(recipientId, {
+          title: 'Nuevo mensaje',
+          body: from ? `${from} te escribió.` : 'Tenés un mensaje nuevo.',
+          data: {
+            tipo: 'NUEVO_MENSAJE',
+            conversationId,
+            contraparteId: userId,
+            nombre: from,
+          },
+        });
+      }
     } catch (err) {
       this.logger.error(
         `Mensaje ${row.id} guardado, pero falló lo posterior al envío: ${String(err)}`,
