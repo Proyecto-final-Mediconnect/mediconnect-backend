@@ -328,7 +328,7 @@ export class ConversationsService {
         ? conversation.professional_id
         : conversation.patient_id;
     const from = await this.displayName(userId, conversation);
-    await this.notifications.notifyNewMessage(
+    const noticeCreated = await this.notifications.notifyNewMessage(
       recipientId,
       conversationId,
       from,
@@ -337,17 +337,25 @@ export class ConversationsService {
     // El push sale del backend y no del cliente suscrito a Realtime: el stream
     // puede perder un evento (spike ENG-52) y ese mensaje no avisaría. Sin el
     // texto del mensaje: aparece en la pantalla bloqueada y puede ser clínico.
-    // Nunca tira.
-    await this.push.sendToUser(recipientId, {
-      title: 'Nuevo mensaje',
-      body: `${from} te escribió.`,
-      data: {
-        tipo: 'NUEVO_MENSAJE',
-        conversationId,
-        contraparteId: userId,
-        nombre: from,
-      },
-    });
+    //
+    // Solo si se creó el aviso in-app: misma regla de uno por conversación sin
+    // leer, para no hacer sonar el celular por cada mensaje de una ráfaga.
+    //
+    // Sin `await`: Expo puede tardar hasta el timeout y eso no puede demorar la
+    // respuesta del chat. `sendToUser` nunca tira, así que no queda una promesa
+    // rechazada sin manejar.
+    if (noticeCreated) {
+      void this.push.sendToUser(recipientId, {
+        title: 'Nuevo mensaje',
+        body: from ? `${from} te escribió.` : 'Tenés un mensaje nuevo.',
+        data: {
+          tipo: 'NUEVO_MENSAJE',
+          conversationId,
+          contraparteId: userId,
+          nombre: from,
+        },
+      });
+    }
 
     return toChatMessage(row);
   }

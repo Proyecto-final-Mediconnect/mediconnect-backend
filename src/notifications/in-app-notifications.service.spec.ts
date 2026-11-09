@@ -224,7 +224,7 @@ describe('InAppNotificationsService', () => {
     };
 
     it('deja un aviso con la conversación y quién escribió', async () => {
-      await service.notifyNewMessage(
+      const created = await service.notifyNewMessage(
         USER_ID,
         CONVERSATION_ID,
         'Julián Pérez',
@@ -243,14 +243,21 @@ describe('InAppNotificationsService', () => {
           sent_at: NOW,
         },
       });
+      expect(created).toBe(true);
     });
 
     it('si ya hay un aviso sin leer de esa conversación, no deja otro', async () => {
       prisma.notification.count.mockResolvedValue(1);
 
-      await service.notifyNewMessage(USER_ID, CONVERSATION_ID, 'Julián', NOW);
+      const created = await service.notifyNewMessage(
+        USER_ID,
+        CONVERSATION_ID,
+        'Julián',
+        NOW,
+      );
 
       expect(prisma.notification.create).not.toHaveBeenCalled();
+      expect(created).toBe(false);
     });
 
     it('nunca tira: si la base falla, lo loguea y sigue', async () => {
@@ -258,7 +265,7 @@ describe('InAppNotificationsService', () => {
 
       await expect(
         service.notifyNewMessage(USER_ID, CONVERSATION_ID, 'Julián', NOW),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
       expect(logError).toHaveBeenCalled();
     });
 

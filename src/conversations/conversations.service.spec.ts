@@ -113,7 +113,7 @@ describe('ConversationsService', () => {
       },
     };
     notifications = {
-      notifyNewMessage: jest.fn().mockResolvedValue(undefined),
+      notifyNewMessage: jest.fn().mockResolvedValue(true),
       markConversationRead: jest.fn().mockResolvedValue(undefined),
     };
     push = { sendToUser: jest.fn().mockResolvedValue(undefined) };
@@ -470,6 +470,35 @@ describe('ConversationsService', () => {
       // Lo que aparece en la pantalla bloqueada no puede traer datos de salud.
       expect(JSON.stringify(push.sendToUser.mock.calls[0])).not.toContain(
         'pecho',
+      );
+    });
+
+    it('si ya había un aviso sin leer de esa conversación, no manda otro push', async () => {
+      notifications.notifyNewMessage.mockResolvedValue(false);
+
+      await service.send(PATIENT_ID, CONVERSATION_ID, 'Otro mensaje', NOW);
+
+      expect(prisma.message.create).toHaveBeenCalled();
+      expect(push.sendToUser).not.toHaveBeenCalled();
+    });
+
+    it('no espera al push: si Expo tarda, el mensaje responde igual', async () => {
+      push.sendToUser.mockReturnValue(new Promise<void>(() => {}));
+
+      const sent = await service.send(PATIENT_ID, CONVERSATION_ID, 'Hola', NOW);
+
+      expect(sent.id).toBe('m-nuevo');
+      expect(push.sendToUser).toHaveBeenCalled();
+    });
+
+    it('sin nombre de quien escribe, el push usa un texto genérico', async () => {
+      prisma.patient.findUnique.mockResolvedValue(null);
+
+      await service.send(PATIENT_ID, CONVERSATION_ID, 'Hola', NOW);
+
+      expect(push.sendToUser).toHaveBeenCalledWith(
+        PRO_ID,
+        expect.objectContaining({ body: 'Tenés un mensaje nuevo.' }),
       );
     });
 

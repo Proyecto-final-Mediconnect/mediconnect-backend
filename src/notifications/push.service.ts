@@ -105,6 +105,10 @@ export class PushService {
       if (!tickets) return;
 
       // Los tickets vuelven en el mismo orden que los mensajes.
+      // TODO(ENG-71): `DeviceNotRegistered` a veces no llega en el ticket sino
+      // en el receipt (`/--/api/v2/push/getReceipts` con los ids de los tickets,
+      // minutos después). Sin consultarlos, esos tokens muertos quedan hasta que
+      // un ticket posterior devuelva el error. Sumarlo como job si molesta.
       const unregistered = tokens.filter(
         (_, i) =>
           tickets[i]?.status === 'error' &&
