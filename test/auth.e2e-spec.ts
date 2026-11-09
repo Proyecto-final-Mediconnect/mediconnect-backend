@@ -35,12 +35,14 @@ describe('Auth registro (e2e)', () => {
   });
 
   const createMany = jest.fn();
+  const auditCreate = jest.fn();
 
   beforeEach(async () => {
     signUp.mockReset();
     signInWithPassword.mockReset();
     refreshSession.mockReset();
     createMany.mockReset().mockResolvedValue({ count: 1 });
+    auditCreate.mockReset().mockResolvedValue({});
     resetPasswordForEmail.mockReset();
     verifyOtp.mockReset();
     updateUser.mockReset();
@@ -71,7 +73,10 @@ describe('Auth registro (e2e)', () => {
       // Auth no usa Prisma, pero el PrismaModule global intentaría conectar a la
       // base real en onModuleInit: lo reemplazamos por un stub sin lifecycle.
       .overrideProvider(PrismaService)
-      .useValue({ legalAcceptance: { createMany } })
+      .useValue({
+        legalAcceptance: { createMany },
+        auditLog: { create: auditCreate },
+      })
       // Este spec prueba el contrato con la aceptación EXIGIDA, que es el
       // estado final de ENG-140. En producción arranca apagada para poder
       // desplegar el backend antes que la web; el caso apagado está cubierto en
@@ -541,6 +546,162 @@ describe('Auth registro (e2e)', () => {
         .expect(400);
 
       expect(res.body.message).toMatch(/no es válido o ya venció/);
+    });
+  });
+
+  describe('verificación en dos pasos (ENG-88)', () => {
+    const conFactor = {
+      data: {
+        session: { access_token: 'acc-aal1', refresh_token: 'ref-aal1' },
+        user: {
+          id: 'uid',
+          email: creds.email,
+          factors: [{ id: 'f-1', factor_type: 'totp', status: 'verified' }],
+        },
+      },
+      error: null,
+    };
+
+    function goTrue(body: unknown, status = 200): Response {
+      return {
+        ok: status < 400,
+        status,
+        text: () => Promise.resolve(JSON.stringify(body)),
+      } as Response;
+    }
+
+    afterEach(() => jest.restoreAllMocks());
+
+    it('con la verificación activa, la contraseña sola no abre la sesión: pide el código', async () => {
+      signInWithPassword.mockResolvedValue(conFactor);
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send(creds)
+        .expect(200);
+
+      expect(res.body).toEqual({
+        user: { id: 'uid', email: creds.email },
+        mfaRequired: true,
+      });
+      const cookies = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
+      expect(
+        cookies.some((c) =>
+          /^sb-mfa-pending=acc-aal1;.*Path=\/auth\/mfa;.*HttpOnly/i.test(c),
+        ),
+      ).toBe(true);
+      // Las de sesión se limpian, no se setean.
+      expect(cookies.some((c) => /^sb-access-token=acc/.test(c))).toBe(false);
+      expect(cookies.some((c) => /^sb-refresh-token=ref/.test(c))).toBe(false);
+    });
+
+    it('el código cambia el primer paso por la sesión completa', async () => {
+      jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValueOnce(
+          goTrue({
+            factors: [{ id: 'f-1', factor_type: 'totp', status: 'verified' }],
+          }),
+        )
+        .mockResolvedValueOnce(goTrue({ id: 'challenge-1' }))
+        .mockResolvedValueOnce(
+          goTrue({
+            access_token: 'acc-aal2',
+            refresh_token: 'ref-aal2',
+            user: { id: 'uid', email: creds.email },
+          }),
+        );
+
+      const res = await request(app.getHttpServer())
+        .post('/auth/mfa/verify')
+        .set('Cookie', 'sb-mfa-pending=acc-aal1')
+        .set('CF-Connecting-IP', '203.0.113.7')
+        .set('User-Agent', 'Navegador/1.0')
+        .send({ code: '123456' })
+        .expect(200);
+
+      // Abre la sesión: no se cachea, igual que en mobile.
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(auditCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'MFA_LOGIN_OK',
+          metadata: {
+            ip: '203.0.113.7',
+            userAgent: 'Navegador/1.0',
+            factorId: 'f-1',
+          },
+        }),
+      });
+      const cookies = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
+      expect(
+        cookies.some((c) => /^sb-access-token=acc-aal2;.*HttpOnly/i.test(c)),
+      ).toBe(true);
+      expect(cookies.some((c) => /^sb-refresh-token=ref-aal2;/.test(c))).toBe(
+        true,
+      );
+      expect(cookies.some((c) => /^sb-mfa-pending=;/.test(c))).toBe(true);
+      expect(res.body.accessToken).toBeUndefined();
+    });
+
+    it('el bloqueo por códigos incorrectos es por persona: un login nuevo no lo reinicia', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch');
+      const conFactorGoTrue = goTrue({
+        id: 'uid',
+        factors: [{ id: 'f-1', factor_type: 'totp', status: 'verified' }],
+      });
+      for (let i = 0; i < 5; i++) {
+        fetchSpy
+          .mockResolvedValueOnce(conFactorGoTrue)
+          .mockResolvedValueOnce(goTrue({ id: 'challenge' }))
+          .mockResolvedValueOnce(goTrue({}, 422));
+        await request(app.getHttpServer())
+          .post('/auth/mfa/verify')
+          .set('Cookie', 'sb-mfa-pending=token-login-1')
+          .send({ code: '000000' })
+          .expect(400);
+      }
+
+      // Otro token del primer paso (un login nuevo) de la misma persona.
+      fetchSpy.mockResolvedValueOnce(conFactorGoTrue);
+      const res = await request(app.getHttpServer())
+        .post('/auth/mfa/verify')
+        .set('Cookie', 'sb-mfa-pending=token-login-2')
+        .send({ code: '123456' })
+        .expect(429);
+
+      expect(res.body.message).toMatch(/Demasiados códigos incorrectos/);
+      expect(auditCreate).toHaveBeenLastCalledWith({
+        data: expect.objectContaining({ action: 'MFA_LOGIN_LOCKED' }),
+      });
+    });
+
+    it('el logout borra también la cookie del primer paso', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/auth/logout')
+        .expect(200);
+
+      const cookies = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
+      expect(
+        cookies.some((c) => /^sb-mfa-pending=;.*Path=\/auth\/mfa/.test(c)),
+      ).toBe(true);
+    });
+
+    it('sin el primer paso, o pasados los cinco minutos, da 401', async () => {
+      await request(app.getHttpServer())
+        .post('/auth/mfa/verify')
+        .send({ code: '123456' })
+        .expect(401);
+    });
+
+    it('un código que no son seis números da 400 sin llamar a Supabase', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch');
+
+      await request(app.getHttpServer())
+        .post('/auth/mfa/verify')
+        .set('Cookie', 'sb-mfa-pending=acc-aal1')
+        .send({ code: '12ab' })
+        .expect(400);
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
   });
 });

@@ -1,3 +1,4 @@
+import { clearMfaCache } from './mfa-status-cache';
 import {
   ExecutionContext,
   ForbiddenException,
@@ -8,6 +9,7 @@ import { generateKeyPair, SignJWT } from 'jose';
 import { JWKSTimeout } from 'jose/errors';
 import { LegalAcceptedGuard } from '../../legal/legal-accepted.guard';
 import { SupabaseService } from '../../supabase/supabase.service';
+import type { PrismaService } from '../../prisma/prisma.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
@@ -26,6 +28,12 @@ describe('JwtAuthGuard', () => {
   // La aceptación legal tiene su propio spec: acá solo importa que se invoque
   // después de autenticar y que su resultado sea el del guard.
   const legalCanActivate = jest.fn();
+  /** `profiles.mfa_enabled` (ENG-88): solo se lee para las sesiones `aal1`. */
+  const profileFindUnique = jest.fn();
+  const prisma = {
+    profile: { findUnique: profileFindUnique },
+  } as unknown as PrismaService;
+
   const legalAccepted = {
     canActivate: legalCanActivate,
   } as unknown as LegalAcceptedGuard;
@@ -41,11 +49,13 @@ describe('JwtAuthGuard', () => {
       sub?: string | null;
       email?: string;
       role?: string;
+      aal?: 'aal1' | 'aal2';
     } = {},
   ): Promise<string> {
     const jwt = new SignJWT({
       email: overrides.email ?? 'paciente@test.com',
       role: overrides.role ?? 'authenticated',
+      ...(overrides.aal && { aal: overrides.aal }),
     })
       .setProtectedHeader({ alg: 'ES256' })
       .setIssuer(overrides.issuer ?? ISSUER)
@@ -78,7 +88,9 @@ describe('JwtAuthGuard', () => {
       getIssuer: () => ISSUER,
     } as unknown as SupabaseService;
     legalCanActivate.mockReset().mockResolvedValue(true);
-    guard = new JwtAuthGuard(supabase, legalAccepted);
+    profileFindUnique.mockReset().mockResolvedValue({ mfa_enabled: false });
+    clearMfaCache();
+    guard = new JwtAuthGuard(supabase, legalAccepted, prisma);
   });
 
   it('permite el acceso con un token válido en el header Authorization y adjunta el usuario', async () => {
@@ -187,7 +199,8 @@ describe('JwtAuthGuard', () => {
       },
       getIssuer: () => ISSUER,
     } as unknown as SupabaseService;
-    guard = new JwtAuthGuard(supabase, legalAccepted);
+    clearMfaCache();
+    guard = new JwtAuthGuard(supabase, legalAccepted, prisma);
 
     const token = await sign();
     const request = { headers: { authorization: `Bearer ${token}` } };
@@ -204,7 +217,8 @@ describe('JwtAuthGuard', () => {
       },
       getIssuer: () => ISSUER,
     } as unknown as SupabaseService;
-    guard = new JwtAuthGuard(supabase, legalAccepted);
+    clearMfaCache();
+    guard = new JwtAuthGuard(supabase, legalAccepted, prisma);
 
     const token = await sign();
     const request = { headers: { authorization: `Bearer ${token}` } };
@@ -240,5 +254,73 @@ describe('JwtAuthGuard', () => {
       UnauthorizedException,
     );
     expect(legalCanActivate).not.toHaveBeenCalled();
+  });
+
+  describe('verificación en dos pasos (ENG-88)', () => {
+    function requestWith(token: string) {
+      return { headers: { authorization: `Bearer ${token}` } };
+    }
+
+    it('con la verificación activa, una sesión sin el segundo paso (aal1) da 401', async () => {
+      profileFindUnique.mockResolvedValue({ mfa_enabled: true });
+      const token = await sign({ aal: 'aal1' });
+
+      await expect(
+        guard.canActivate(makeContext(requestWith(token))),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(legalCanActivate).not.toHaveBeenCalled();
+    });
+
+    it('sin la verificación activa, una sesión aal1 pasa como siempre', async () => {
+      const token = await sign({ aal: 'aal1' });
+
+      await expect(
+        guard.canActivate(makeContext(requestWith(token))),
+      ).resolves.toBe(true);
+      expect(profileFindUnique).toHaveBeenCalledWith({
+        where: { id: expect.any(String) },
+        select: { mfa_enabled: true },
+      });
+    });
+
+    it('con la verificación activa, un token sin claim aal también da 401 (no falla abierto)', async () => {
+      profileFindUnique.mockResolvedValue({ mfa_enabled: true });
+      const token = await sign();
+
+      await expect(
+        guard.canActivate(makeContext(requestWith(token))),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('cachea el estado un rato: no consulta la base en cada request', async () => {
+      const token = await sign({ aal: 'aal1' });
+
+      await guard.canActivate(makeContext(requestWith(token)));
+      await guard.canActivate(makeContext(requestWith(token)));
+
+      expect(profileFindUnique).toHaveBeenCalledTimes(1);
+    });
+
+    it('el caché vence a los 30 segundos', async () => {
+      const token = await sign({ aal: 'aal1' });
+      const now = Date.now();
+      const spy = jest.spyOn(Date, 'now').mockReturnValue(now);
+      await guard.canActivate(makeContext(requestWith(token)));
+      spy.mockReturnValue(now + 31_000);
+      await guard.canActivate(makeContext(requestWith(token)));
+      spy.mockRestore();
+
+      expect(profileFindUnique).toHaveBeenCalledTimes(2);
+    });
+
+    it('una sesión con el segundo paso (aal2) pasa sin consultar la base', async () => {
+      profileFindUnique.mockResolvedValue({ mfa_enabled: true });
+      const token = await sign({ aal: 'aal2' });
+
+      await expect(
+        guard.canActivate(makeContext(requestWith(token))),
+      ).resolves.toBe(true);
+      expect(profileFindUnique).not.toHaveBeenCalled();
+    });
   });
 });

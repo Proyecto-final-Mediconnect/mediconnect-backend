@@ -350,6 +350,46 @@ describe('AuthService', () => {
       accessToken: 'acc',
       refreshToken: 'ref',
       user: { id: 'uid', email: loginDto.email },
+      mfaRequired: false,
+    });
+  });
+
+  it('con un factor TOTP verificado, el login avisa que falta el segundo paso (ENG-88)', async () => {
+    signInWithPassword.mockResolvedValue({
+      data: {
+        session: { access_token: 'acc', refresh_token: 'ref' },
+        user: {
+          id: 'uid',
+          email: loginDto.email,
+          factors: [
+            { id: 'f-0', factor_type: 'totp', status: 'unverified' },
+            { id: 'f-1', factor_type: 'totp', status: 'verified' },
+          ],
+        },
+      },
+      error: null,
+    });
+
+    await expect(service.login(loginDto)).resolves.toMatchObject({
+      mfaRequired: true,
+    });
+  });
+
+  it('un factor que quedó sin verificar no pide el segundo paso', async () => {
+    signInWithPassword.mockResolvedValue({
+      data: {
+        session: { access_token: 'acc', refresh_token: 'ref' },
+        user: {
+          id: 'uid',
+          email: loginDto.email,
+          factors: [{ id: 'f-0', factor_type: 'totp', status: 'unverified' }],
+        },
+      },
+      error: null,
+    });
+
+    await expect(service.login(loginDto)).resolves.toMatchObject({
+      mfaRequired: false,
     });
   });
 
@@ -606,6 +646,20 @@ describe('AuthService', () => {
           expect(signOut).not.toHaveBeenCalled();
         },
       );
+
+      it('con la verificación en dos pasos activa (insufficient_aal) lo explica', async () => {
+        updateUser.mockResolvedValue({
+          data: { user: null },
+          error: { status: 401, code: 'insufficient_aal', message: 'AAL2' },
+        });
+
+        const { status, body } = await caught();
+
+        expect(status).toBe(400);
+        expect(body.code).toBe('RECOVERY_LINK_CONSUMED');
+        expect(body.message).toMatch(/verificación en dos pasos/);
+        expect(signOut).not.toHaveBeenCalled();
+      });
 
       it('si Supabase no responde al cambiar la contraseña: 503 con el mismo code', async () => {
         updateUser.mockResolvedValue({

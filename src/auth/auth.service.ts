@@ -238,6 +238,12 @@ export class AuthService {
       accessToken: data.session.access_token,
       refreshToken: data.session.refresh_token,
       user: { id: data.user.id, email: data.user.email },
+      // ENG-88: con la verificación en dos pasos activa, esta sesión es solo el
+      // primer paso (`aal1`). Los controllers no la entregan como sesión: piden
+      // el código y la cambian por una `aal2`.
+      mfaRequired: (data.user.factors ?? []).some(
+        (f) => f.factor_type === 'totp' && f.status === 'verified',
+      ),
     };
   }
 
@@ -371,6 +377,20 @@ export class AuthService {
       if (updateError.code === 'same_password') {
         throw new BadRequestException({
           message: `La contraseña nueva tiene que ser distinta de la anterior. ${NEW_LINK_HINT}`,
+          code: RECOVERY_LINK_CONSUMED_CODE,
+        });
+      }
+      // ENG-88: con la verificación en dos pasos activa, Supabase Auth exige
+      // una sesión `aal2` para cambiar la contraseña, y la de recuperación es
+      // `aal1`. Llevarla a `aal2` pide el código TOTP, que este endpoint no
+      // recibe: sumarlo cambia el contrato con la web y la app. PENDIENTE:
+      // un paso con el código en el restablecimiento. Mientras tanto, un
+      // mensaje claro y la recuperación por soporte (borrar el factor desde el
+      // panel de Supabase, ver docs).
+      if (updateError.code === 'insufficient_aal') {
+        throw new BadRequestException({
+          message:
+            'Tu cuenta tiene activa la verificación en dos pasos y por ahora no se puede restablecer la contraseña con el enlace del mail. Escribinos a soporte para recuperar el acceso.',
           code: RECOVERY_LINK_CONSUMED_CODE,
         });
       }
