@@ -647,6 +647,20 @@ describe('AuthService', () => {
         },
       );
 
+      it('con la verificación en dos pasos activa (insufficient_aal) lo explica', async () => {
+        updateUser.mockResolvedValue({
+          data: { user: null },
+          error: { status: 401, code: 'insufficient_aal', message: 'AAL2' },
+        });
+
+        const { status, body } = await caught();
+
+        expect(status).toBe(400);
+        expect(body.code).toBe('RECOVERY_LINK_CONSUMED');
+        expect(body.message).toMatch(/verificación en dos pasos/);
+        expect(signOut).not.toHaveBeenCalled();
+      });
+
       it('si Supabase no responde al cambiar la contraseña: 503 con el mismo code', async () => {
         updateUser.mockResolvedValue({
           data: { user: null },
