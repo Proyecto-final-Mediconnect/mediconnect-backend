@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Header,
   HttpCode,
   HttpStatus,
   Post,
@@ -19,7 +20,7 @@ import { legalAcceptanceContext } from '../legal/acceptance-context';
 import { SkipLegal } from '../legal/skip-legal.decorator';
 import { MfaCodeDto } from './dto/mfa.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
-import { MfaService } from './mfa.service';
+import { MfaService, mfaAuditContext } from './mfa.service';
 import { mfaPendingTracker } from './mfa-throttle';
 
 const ACCESS_TOKEN_COOKIE = 'sb-access-token';
@@ -172,6 +173,8 @@ export class AuthController {
    */
   @Post('mfa/verify')
   @HttpCode(HttpStatus.OK)
+  // Como en mobile: la respuesta abre la sesión y no se cachea.
+  @Header('Cache-Control', 'no-store')
   @Throttle({
     default: { limit: 5, ttl: 60_000, getTracker: mfaPendingTracker },
   })
@@ -186,7 +189,11 @@ export class AuthController {
         'Pasaron más de cinco minutos. Ingresá tu email y contraseña de nuevo.',
       );
     }
-    const session = await this.mfa.verifyLogin(pending, dto.code);
+    const session = await this.mfa.verifyLogin(
+      pending,
+      dto.code,
+      mfaAuditContext(req),
+    );
     this.clearMfaPendingCookie(res);
     this.setSessionCookies(res, session);
     return { user: session.user };

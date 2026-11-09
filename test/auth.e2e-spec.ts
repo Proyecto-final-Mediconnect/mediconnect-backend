@@ -35,12 +35,14 @@ describe('Auth registro (e2e)', () => {
   });
 
   const createMany = jest.fn();
+  const auditCreate = jest.fn();
 
   beforeEach(async () => {
     signUp.mockReset();
     signInWithPassword.mockReset();
     refreshSession.mockReset();
     createMany.mockReset().mockResolvedValue({ count: 1 });
+    auditCreate.mockReset().mockResolvedValue({});
     resetPasswordForEmail.mockReset();
     verifyOtp.mockReset();
     updateUser.mockReset();
@@ -71,7 +73,10 @@ describe('Auth registro (e2e)', () => {
       // Auth no usa Prisma, pero el PrismaModule global intentaría conectar a la
       // base real en onModuleInit: lo reemplazamos por un stub sin lifecycle.
       .overrideProvider(PrismaService)
-      .useValue({ legalAcceptance: { createMany } })
+      .useValue({
+        legalAcceptance: { createMany },
+        auditLog: { create: auditCreate },
+      })
       // Este spec prueba el contrato con la aceptación EXIGIDA, que es el
       // estado final de ENG-140. En producción arranca apagada para poder
       // desplegar el backend antes que la web; el caso apagado está cubierto en
@@ -610,9 +615,23 @@ describe('Auth registro (e2e)', () => {
       const res = await request(app.getHttpServer())
         .post('/auth/mfa/verify')
         .set('Cookie', 'sb-mfa-pending=acc-aal1')
+        .set('CF-Connecting-IP', '203.0.113.7')
+        .set('User-Agent', 'Navegador/1.0')
         .send({ code: '123456' })
         .expect(200);
 
+      // Abre la sesión: no se cachea, igual que en mobile.
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(auditCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'MFA_LOGIN_OK',
+          metadata: {
+            ip: '203.0.113.7',
+            userAgent: 'Navegador/1.0',
+            factorId: 'f-1',
+          },
+        }),
+      });
       const cookies = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
       expect(
         cookies.some((c) => /^sb-access-token=acc-aal2;.*HttpOnly/i.test(c)),
@@ -622,6 +641,38 @@ describe('Auth registro (e2e)', () => {
       );
       expect(cookies.some((c) => /^sb-mfa-pending=;/.test(c))).toBe(true);
       expect(res.body.accessToken).toBeUndefined();
+    });
+
+    it('el bloqueo por códigos incorrectos es por persona: un login nuevo no lo reinicia', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch');
+      const conFactorGoTrue = goTrue({
+        id: 'uid',
+        factors: [{ id: 'f-1', factor_type: 'totp', status: 'verified' }],
+      });
+      for (let i = 0; i < 5; i++) {
+        fetchSpy
+          .mockResolvedValueOnce(conFactorGoTrue)
+          .mockResolvedValueOnce(goTrue({ id: 'challenge' }))
+          .mockResolvedValueOnce(goTrue({}, 422));
+        await request(app.getHttpServer())
+          .post('/auth/mfa/verify')
+          .set('Cookie', 'sb-mfa-pending=token-login-1')
+          .send({ code: '000000' })
+          .expect(400);
+      }
+
+      // Otro token del primer paso (un login nuevo) de la misma persona.
+      fetchSpy.mockResolvedValueOnce(conFactorGoTrue);
+      const res = await request(app.getHttpServer())
+        .post('/auth/mfa/verify')
+        .set('Cookie', 'sb-mfa-pending=token-login-2')
+        .send({ code: '123456' })
+        .expect(429);
+
+      expect(res.body.message).toMatch(/Demasiados códigos incorrectos/);
+      expect(auditCreate).toHaveBeenLastCalledWith({
+        data: expect.objectContaining({ action: 'MFA_LOGIN_LOCKED' }),
+      });
     });
 
     it('el logout borra también la cookie del primer paso', async () => {

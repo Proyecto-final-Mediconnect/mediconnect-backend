@@ -5,12 +5,14 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Req,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import type { Request } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { MobileMfaVerifyDto } from './dto/mfa.dto';
-import { MfaService } from './mfa.service';
+import { MfaService, mfaAuditContext } from './mfa.service';
 import { mfaPendingTracker } from './mfa-throttle';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { SkipLegal } from '../legal/skip-legal.decorator';
@@ -93,10 +95,12 @@ export class AuthMobileController {
   })
   async verifyMfa(
     @Body() dto: MobileMfaVerifyDto,
+    @Req() req: Request,
   ): Promise<MobileSessionResponse> {
     const { user, accessToken, refreshToken } = await this.mfa.verifyLogin(
       dto.mfaToken,
       dto.code,
+      mfaAuditContext(req),
     );
     return { user, accessToken, refreshToken };
   }

@@ -142,6 +142,80 @@ describe('MfaService', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
+    it('si el factor quedó verificado sin el perfil, lo corrige antes del 409', async () => {
+      fetchMock.mockResolvedValueOnce(
+        ok({ factors: [{ id: 'x', factor_type: 'totp', status: 'verified' }] }),
+      );
+
+      await expect(service.startEnrollment(USER, 't')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(prisma.profile.update).toHaveBeenCalledWith({
+        where: { id: USER },
+        data: { mfa_enabled: true },
+      });
+    });
+
+    it('solo borra factores TOTP sin verificar', async () => {
+      fetchMock
+        .mockResolvedValueOnce(
+          ok({
+            factors: [
+              { id: 'tel', factor_type: 'phone', status: 'unverified' },
+              { id: 'viejo', factor_type: 'totp', status: 'unverified' },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(ok())
+        .mockResolvedValueOnce(
+          ok({ id: FACTOR, totp: { qr_code: 'qr', secret: 's' } }),
+        );
+
+      await service.startEnrollment(USER, 't');
+
+      expect(llamadas()).toEqual([
+        'GET /user',
+        'DELETE /factors/viejo',
+        'POST /factors',
+      ]);
+    });
+
+    it('si falla guardar el perfil tras verificar, da 503 y se puede reintentar', async () => {
+      prisma.profile.update.mockRejectedValueOnce(new Error('db'));
+      fetchMock
+        .mockResolvedValueOnce(ok({ id: 'challenge-1' }))
+        .mockResolvedValueOnce(ok(SESION_AAL2));
+
+      await expect(
+        service.confirmEnrollment(USER, 't', FACTOR, '123456'),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+
+      // El reintento con otro código verifica el mismo factor (ya verificado
+      // en Supabase) y esta vez guarda el perfil.
+      fetchMock
+        .mockResolvedValueOnce(ok({ id: 'challenge-2' }))
+        .mockResolvedValueOnce(ok(SESION_AAL2));
+      await expect(
+        service.confirmEnrollment(USER, 't', FACTOR, '654321'),
+      ).resolves.toMatchObject({ accessToken: 'acc-aal2' });
+      expect(prisma.profile.update).toHaveBeenLastCalledWith({
+        where: { id: USER },
+        data: { mfa_enabled: true },
+      });
+    });
+
+    it('un fallo al auditar la activación no la convierte en error', async () => {
+      prisma.auditLog.create.mockRejectedValue(new Error('db'));
+      fetchMock
+        .mockResolvedValueOnce(ok({ id: 'challenge-1' }))
+        .mockResolvedValueOnce(ok(SESION_AAL2));
+
+      await expect(
+        service.confirmEnrollment(USER, 't', FACTOR, '123456'),
+      ).resolves.toMatchObject({ accessToken: 'acc-aal2' });
+    });
+
     it('al confirmar con el código, la deja activa en el perfil y en la auditoría', async () => {
       fetchMock
         .mockResolvedValueOnce(ok({ id: 'challenge-1' }))
@@ -328,7 +402,7 @@ describe('MfaService', () => {
       expect(acciones()).toEqual(['MFA_LOGIN_OK']);
     });
 
-    it('audita cada código incorrecto y bloquea el token tras 5', async () => {
+    it('audita cada código incorrecto y bloquea a la persona tras 5', async () => {
       for (let i = 0; i < 5; i++) {
         fetchMock
           .mockResolvedValueOnce(conFactor)
@@ -346,20 +420,97 @@ describe('MfaService', () => {
         'MFA_LOGIN_LOCKED',
       ]);
 
+      // Bloqueada: solo se consulta quién es, no se prueba el código.
       fetchMock.mockClear();
+      fetchMock.mockResolvedValueOnce(conFactor);
       await expect(service.verifyLogin('tok', '123456')).rejects.toMatchObject({
         status: 429,
       });
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(llamadas()).toEqual(['GET /user']);
 
-      // Otro token no se ve afectado.
+      // Un login nuevo (otro token del primer paso) no reinicia el contador.
+      fetchMock.mockClear();
+      fetchMock.mockResolvedValueOnce(conFactor);
+      await expect(
+        service.verifyLogin('token-de-otro-login', '123456'),
+      ).rejects.toMatchObject({ status: 429 });
+      expect(llamadas()).toEqual(['GET /user']);
+
+      // Otra persona no se ve afectada.
       fetchMock
-        .mockResolvedValueOnce(conFactor)
+        .mockResolvedValueOnce(
+          ok({
+            id: 'otra-persona',
+            factors: [{ id: FACTOR, factor_type: 'totp', status: 'verified' }],
+          }),
+        )
         .mockResolvedValueOnce(ok({ id: 'c' }))
         .mockResolvedValueOnce(ok(SESION_AAL2));
       await expect(
         service.verifyLogin('otro', '123456'),
       ).resolves.toBeDefined();
+    });
+
+    it('un ingreso correcto reinicia el contador de la persona', async () => {
+      for (let i = 0; i < 4; i++) {
+        fetchMock
+          .mockResolvedValueOnce(conFactor)
+          .mockResolvedValueOnce(ok({ id: 'c' }))
+          .mockResolvedValueOnce(fail(422));
+        await expect(service.verifyLogin('tok', '000000')).rejects.toThrow(
+          BadRequestException,
+        );
+      }
+      fetchMock
+        .mockResolvedValueOnce(conFactor)
+        .mockResolvedValueOnce(ok({ id: 'c' }))
+        .mockResolvedValueOnce(ok(SESION_AAL2));
+      await service.verifyLogin('tok', '123456');
+
+      fetchMock
+        .mockResolvedValueOnce(conFactor)
+        .mockResolvedValueOnce(ok({ id: 'c' }))
+        .mockResolvedValueOnce(fail(422));
+      await expect(service.verifyLogin('tok', '000000')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(acciones().at(-1)).toBe('MFA_LOGIN_FAILED');
+    });
+
+    it('deja en la auditoría la IP, el user-agent y el factor', async () => {
+      fetchMock
+        .mockResolvedValueOnce(conFactor)
+        .mockResolvedValueOnce(ok({ id: 'c' }))
+        .mockResolvedValueOnce(ok(SESION_AAL2));
+
+      await service.verifyLogin('tok', '123456', {
+        ip: '203.0.113.7',
+        userAgent: 'MediConnect/1.0',
+      });
+
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'MFA_LOGIN_OK',
+          metadata: {
+            ip: '203.0.113.7',
+            userAgent: 'MediConnect/1.0',
+            factorId: FACTOR,
+          },
+        }),
+      });
+    });
+
+    it('sin IP conocida no guarda la clave vacía', async () => {
+      fetchMock
+        .mockResolvedValueOnce(conFactor)
+        .mockResolvedValueOnce(ok({ id: 'c' }))
+        .mockResolvedValueOnce(ok(SESION_AAL2));
+
+      await service.verifyLogin('tok', '123456', { ip: null, userAgent: null });
+
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ metadata: { factorId: FACTOR } }),
+      });
     });
 
     it('un fallo al auditar no tapa el error del código', async () => {
@@ -397,6 +548,19 @@ describe('MfaService', () => {
       await service.startEnrollment(USER, 't');
 
       expect(acciones()).toEqual(['MFA_ENROLL_STARTED']);
+    });
+
+    it('un fallo al auditar el inicio del alta no impide mostrar el QR', async () => {
+      prisma.auditLog.create.mockRejectedValue(new Error('db'));
+      fetchMock
+        .mockResolvedValueOnce(ok({ factors: [] }))
+        .mockResolvedValueOnce(
+          ok({ id: FACTOR, totp: { qr_code: 'qr', secret: 's' } }),
+        );
+
+      await expect(service.startEnrollment(USER, 't')).resolves.toMatchObject({
+        factorId: FACTOR,
+      });
     });
 
     it('un 200 que no es JSON da 503 y no un 500', async () => {

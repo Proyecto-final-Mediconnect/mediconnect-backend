@@ -16,7 +16,7 @@ import { requireAuth } from '../common/http/require-auth';
 import { AuthController } from './auth.controller';
 import { MfaCodeDto, MfaEnrollVerifyDto } from './dto/mfa.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
-import { MfaService } from './mfa.service';
+import { MfaService, mfaAuditContext } from './mfa.service';
 
 /**
  * Activar y desactivar la verificación en dos pasos (ENG-88). Es opcional y
@@ -43,7 +43,7 @@ export class MfaController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   enroll(@Req() req: Request) {
     const { userId, accessToken } = requireAuth(req);
-    return this.mfa.startEnrollment(userId, accessToken);
+    return this.mfa.startEnrollment(userId, accessToken, mfaAuditContext(req));
   }
 
   /**
@@ -66,6 +66,7 @@ export class MfaController {
       accessToken,
       dto.factorId,
       dto.code,
+      mfaAuditContext(req),
     );
     if (req.headers.authorization?.startsWith('Bearer ')) {
       return {
@@ -84,6 +85,6 @@ export class MfaController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async disable(@Req() req: Request, @Body() dto: MfaCodeDto): Promise<void> {
     const { userId, accessToken } = requireAuth(req);
-    await this.mfa.disable(userId, accessToken, dto.code);
+    await this.mfa.disable(userId, accessToken, dto.code, mfaAuditContext(req));
   }
 }
