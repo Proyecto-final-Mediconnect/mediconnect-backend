@@ -33,6 +33,20 @@ describe('language-filter', () => {
     'ｐｅｌｏｔｕｄｏ',
     'pelоtudo',
     'la concha de tu madre',
+    // Separadores entre pedazos de la palabra.
+    'sos un pu-to',
+    'qué bolu do',
+    'h d p',
+    'p.u.t.o',
+    'pe lo tu do',
+    'fo rro',
+    // Derivados.
+    'una pelotudez',
+    'un boludazo',
+    'qué forrazo',
+    'putísimo',
+    'qué mierdita',
+    'una idiotez',
   ])('detecta "%s"', (texto) => {
     expect(isInappropriate(texto)).toBe(true);
   });
@@ -48,9 +62,26 @@ describe('language-filter', () => {
     'Excelente profesional, 10 de 10.',
     'Me mandó a hacer un análisis de sangre y una ecografía.',
     'Tengo una consulta pendiente por el tema del carro de la clínica.',
+    'La reputación del consultorio es muy buena.',
+    'Consulta sobre la caída del pelo. Tu duda es válida.',
+    'El vello es tupido, nada para preocuparse.',
+    'Es tu pedido de estudios, te lo dejo en recepción.',
+    'Me atendió la doctora García, muy amable.',
+    'Quedó forrado el libro de recetas y el padre putativo firmó.',
+    'Vitamina C, D y E todos los días.',
+    'Me dio la orden para el laboratorio.',
     '',
   ])('deja pasar "%s"', (texto) => {
     expect(isInappropriate(texto)).toBe(false);
+  });
+
+  // Falsos positivos aceptados a propósito (ver el comentario del filtro).
+  it.each([
+    'Cambié el forro de la camilla.',
+    'Vino con el pendejo de su hermano.',
+    '¡Qué carajo!',
+  ])('bloquea igual "%s"', (texto) => {
+    expect(isInappropriate(texto)).toBe(true);
   });
 
   it('devuelve lo que encontró, sin repetir', () => {
@@ -69,12 +100,28 @@ describe('language-filter', () => {
       '11 5555-1234',
       '+54 9 11 5555 1234',
       'w\u200Bww.clinica.com',
+      'juan@gmail.com',
+      'www.x.com',
+      'midominio.com.ar',
+      'instagram.com/x',
+      'Instagram.com/x',
+      'CLINICA.COM',
+      'juan.perez.com',
+      'gmail . com',
+      'juan arroba gmail punto com',
+      'gmail(.)com',
+      'www punto clinica',
     ])('detecta "%s"', (t) => expect(containsContactInfo(t)).toBe(true));
 
     it.each([
       'Gracias por la devolución.',
       'Lo esperamos el 12.11.2026 a las 10.30. Un saludo, Dr. Pérez.',
       'Tomar 2 comprimidos cada 8 horas.',
+      'Gracias por venir. Me alegra que esté mejor.',
+      'Saludos. Info del estudio en la próxima consulta.',
+      'No.Me equivoqué con el horario.',
+      'Gracias.Co-pago a cargo de la obra social.',
+      'Hasta pronto. Comí algo antes del estudio.',
     ])('no detecta "%s"', (t) => expect(containsContactInfo(t)).toBe(false));
   });
 });

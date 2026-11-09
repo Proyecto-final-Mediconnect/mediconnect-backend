@@ -78,6 +78,7 @@ export class ReviewsController {
 
   /** Borra la respuesta propia a una reseña (ENG-106). */
   @Delete('reviews/:reviewId/response')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @HttpCode(HttpStatus.NO_CONTENT)
   async deleteResponse(
     @Req() req: Request,
