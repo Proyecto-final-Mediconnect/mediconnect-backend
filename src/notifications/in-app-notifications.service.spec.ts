@@ -245,6 +245,26 @@ describe('InAppNotificationsService', () => {
       });
     });
 
+    it('con archivo, marca el aviso como adjunto', async () => {
+      await service.notifyNewMessage(
+        USER_ID,
+        CONVERSATION_ID,
+        'Julián',
+        NOW,
+        true,
+      );
+
+      expect(prisma.notification.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          payload: {
+            conversationId: CONVERSATION_ID,
+            from: 'Julián',
+            adjunto: true,
+          },
+        }),
+      });
+    });
+
     it('si ya hay un aviso sin leer de esa conversación, no deja otro', async () => {
       prisma.notification.count.mockResolvedValue(1);
 
