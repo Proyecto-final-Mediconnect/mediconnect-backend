@@ -242,6 +242,8 @@ model Professional {
   @@index([status, last_name, first_name, profile_id])
   // Filtro por rango de precio dentro de los validados.
   @@index([status, consultation_price])
+  /// Búsqueda por nombre (ENG-49): GIN con pg_trgm. Requiere la extensión.
+  @@index([first_name(ops: raw("gin_trgm_ops")), last_name(ops: raw("gin_trgm_ops"))], type: Gin, map: "professionals_name_trgm_idx")
   @@map("professionals")
 }
 
@@ -369,7 +371,7 @@ model ScheduleBlock {
   // borrarlo. Sin ese modificador el índice no serviría para el caso "día
   // completo" (start_time null), porque NULL != NULL.
   @@unique([professional_id, block_date, start_time], map: "schedule_blocks_professional_date_start_key")
-  @@index([professional_id, block_date])
+  @@index([professional_id, block_date], map: "schedule_blocks_professional_date_idx")
   @@map("schedule_blocks")
 }
 
