@@ -5,6 +5,7 @@ import { generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { MAX_CHAT_BYTES_PER_USER } from './../src/conversations/chat-attachments.service';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SupabaseService } from './../src/supabase/supabase.service';
 import { legalAcceptedPrismaMock } from './legal-accepted.mock';
@@ -33,6 +34,8 @@ describe('Conversations (e2e)', () => {
   const notificationCount = jest.fn();
   const notificationCreate = jest.fn();
   const messageFindFirst = jest.fn();
+  /** Suma de bytes ya mandados por chat: la usa el tope de 200 MB (ENG-102). */
+  const messageAggregate = jest.fn();
   /** Storage del chat (ENG-102): lo que sube el backend y lo que firma con el token del usuario. */
   const storageUpload = jest.fn();
   const storageRemove = jest.fn();
@@ -51,6 +54,7 @@ describe('Conversations (e2e)', () => {
       notificationCount,
       notificationCreate,
       messageFindFirst,
+      messageAggregate,
       storageUpload,
       storageRemove,
       storageSign,
@@ -62,6 +66,8 @@ describe('Conversations (e2e)', () => {
       error: null,
     });
     tokenFirmante = undefined;
+    // Por defecto el usuario no mandó ningún archivo todavía.
+    messageAggregate.mockResolvedValue({ _sum: { attachment_size: null } });
 
     profileFindUnique.mockResolvedValue({ role: 'PACIENTE' });
     notificationCount.mockResolvedValue(0);
@@ -74,7 +80,11 @@ describe('Conversations (e2e)', () => {
         findFirst: conversationFindFirst,
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
-      message: { create: messageCreate, findFirst: messageFindFirst },
+      message: {
+        create: messageCreate,
+        findFirst: messageFindFirst,
+        aggregate: messageAggregate,
+      },
       patient: {
         findUnique: jest
           .fn()
@@ -412,6 +422,24 @@ describe('Conversations (e2e)', () => {
         })
         .expect(400);
       expect(storageUpload).not.toHaveBeenCalled();
+    });
+
+    it('pasar el tope de bytes por usuario da 422 y no llega a Storage', async () => {
+      participante();
+      messageAggregate.mockResolvedValue({
+        _sum: { attachment_size: MAX_CHAT_BYTES_PER_USER - 1 },
+      });
+
+      await request(app.getHttpServer())
+        .post(`/conversations/${CONVERSATION_ID}/attachments`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .attach('file', PDF, {
+          filename: 'estudio.pdf',
+          contentType: 'application/pdf',
+        })
+        .expect(422);
+      expect(storageUpload).not.toHaveBeenCalled();
+      expect(messageCreate).not.toHaveBeenCalled();
     });
 
     it('en una conversación ajena da 404 y no sube nada', async () => {
