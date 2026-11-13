@@ -7,6 +7,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+  APPOINTMENT_SELECT,
+  type AppointmentRow,
+} from '../appointments/appointment-row';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
@@ -60,19 +64,6 @@ export interface VideoConsultationAccess {
 }
 
 /** Fila de `appointments` que necesita este flujo. */
-interface AppointmentRow {
-  id: string;
-  patient_id: string;
-  professional_id: string;
-  scheduled_at: string;
-  duration_minutes: number;
-  status: string;
-  created_at: string;
-}
-
-const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, scheduled_at, duration_minutes, status, created_at';
-
 @Injectable()
 export class VideoConsultationService {
   private readonly logger = new Logger(VideoConsultationService.name);
@@ -126,6 +117,7 @@ export class VideoConsultationService {
       // tratamiento de los datos clínicos.
       startRecording: role === 'PROFESIONAL' && recording !== 'off',
     });
+    await this.recordFirstJoin(appointment.id, role, now);
 
     return {
       appointmentId: appointment.id,
@@ -309,6 +301,40 @@ export class VideoConsultationService {
     }
 
     return { name: winner.daily_room_name, url: winner.daily_room_url };
+  }
+
+  /**
+   * Deja escrita la primera entrada de cada rol (ENG-189). El cierre automático
+   * del turno la usa para distinguir una consulta que ocurrió de una a la que
+   * el paciente faltó.
+   *
+   * El filtro `IS NULL` hace que reconectarse no pise la primera entrada, sin
+   * leer antes: dos entradas simultáneas del mismo rol escriben una sola vez.
+   * No es best-effort: si esto no queda escrito, el job podría marcar como "no
+   * asistió" a un paciente que sí entró, y ese turno no se reembolsa.
+   *
+   * "Entró" quiere decir que **pidió la sala** y se le dio el acceso, no que se
+   * conectó a Daily: Daily no le avisa al backend. Si a alguien se le cae la
+   * conexión en la pantalla previa, igual cuenta como que entró. Es una
+   * aproximación aceptada para este alcance (review de #113). Por eso se
+   * escribe después de crear el token: un acceso que no se pudo dar no cuenta.
+   */
+  private async recordFirstJoin(
+    appointmentId: string,
+    role: ConsultationRole,
+    now: Date,
+  ): Promise<void> {
+    if (role === 'PACIENTE') {
+      await this.prisma.consultation.updateMany({
+        where: { appointment_id: appointmentId, patient_joined_at: null },
+        data: { patient_joined_at: now },
+      });
+    } else {
+      await this.prisma.consultation.updateMany({
+        where: { appointment_id: appointmentId, professional_joined_at: null },
+        data: { professional_joined_at: now },
+      });
+    }
   }
 
   /**
