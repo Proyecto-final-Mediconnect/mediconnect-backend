@@ -75,6 +75,9 @@ export class ClinicalRecordsController {
    * auditada. Va antes de `:entryId/...` por orden de rutas, aunque no chocan.
    */
   @Get('vital')
+  // Cada lectura escribe una fila en `audit_logs`: el límite protege también
+  // a esa tabla de un cliente en bucle (review de #115).
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   vital(
     @Req() req: Request,
     @Param('patientId', new ParseUUIDPipe({ version: '4' }))
