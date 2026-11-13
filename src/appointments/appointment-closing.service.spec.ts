@@ -38,6 +38,11 @@ describe('AppointmentClosingService', () => {
     auditLog: { create: jest.Mock; createMany: jest.Mock };
     $queryRaw: jest.Mock;
   };
+  /** Quién entró a la sala. Por defecto los dos: la consulta se hizo. */
+  let joined: {
+    patient_joined_at: Date | null;
+    professional_joined_at: Date | null;
+  } | null;
 
   function build(row: unknown, error: unknown = null) {
     const maybeSingle = jest.fn().mockResolvedValue({ data: row, error });
@@ -59,12 +64,16 @@ describe('AppointmentClosingService', () => {
     };
     const prisma = {
       $transaction: jest.fn((cb: (t: typeof tx) => unknown) => cb(tx)),
+      consultation: { findUnique: jest.fn(() => Promise.resolve(joined)) },
     } as unknown as PrismaService;
 
     service = new AppointmentClosingService(prisma, supabase);
   }
 
-  beforeEach(() => build(appointmentRow()));
+  beforeEach(() => {
+    joined = { patient_joined_at: at(1), professional_joined_at: at(0) };
+    build(appointmentRow());
+  });
 
   describe('complete', () => {
     it('completa el turno y cierra la consulta y la sesión de video', async () => {
@@ -175,7 +184,45 @@ describe('AppointmentClosingService', () => {
     });
   });
 
+  describe('quién entró a la sala (review de #113)', () => {
+    it('complete da 409 si el profesional no entró', async () => {
+      joined = null;
+      await expect(
+        service.complete('jwt', PROFESSIONAL, APPOINTMENT, at(25)),
+      ).rejects.toThrow('Todavía no entraste a la sala de esta consulta.');
+      expect(tx.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('complete da 409 si el paciente no entró: corresponde no asistió', async () => {
+      joined = { patient_joined_at: null, professional_joined_at: at(0) };
+      await expect(
+        service.complete('jwt', PROFESSIONAL, APPOINTMENT, at(25)),
+      ).rejects.toThrow(/marcalo como no asistió/);
+    });
+
+    it('no-show da 409 si el paciente entró a la sala', async () => {
+      await expect(
+        service.markNoShow('jwt', PROFESSIONAL, APPOINTMENT, at(20)),
+      ).rejects.toThrow(
+        'El paciente entró a la sala, así que no se puede marcar como no asistió.',
+      );
+      expect(tx.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('no-show da 409 si el profesional no entró', async () => {
+      joined = { patient_joined_at: null, professional_joined_at: null };
+      await expect(
+        service.markNoShow('jwt', PROFESSIONAL, APPOINTMENT, at(20)),
+      ).rejects.toThrow(/No entraste a la sala/);
+    });
+  });
+
   describe('markNoShow', () => {
+    beforeEach(() => {
+      // El caso válido: entró el profesional y el paciente no.
+      joined = { patient_joined_at: null, professional_joined_at: at(0) };
+    });
+
     it('deja el turno en NO_ASISTIO sin cerrar la sesión de video', async () => {
       const result = await service.markNoShow(
         'jwt',

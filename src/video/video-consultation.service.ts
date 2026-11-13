@@ -112,7 +112,6 @@ export class VideoConsultationService {
       recording,
       now,
     );
-    await this.recordFirstJoin(appointment.id, role, now);
 
     const token = await this.daily.createConsultationToken({
       roomName: room.name,
@@ -127,6 +126,7 @@ export class VideoConsultationService {
       // tratamiento de los datos clínicos.
       startRecording: role === 'PROFESIONAL' && recording !== 'off',
     });
+    await this.recordFirstJoin(appointment.id, role, now);
 
     return {
       appointmentId: appointment.id,
@@ -321,6 +321,12 @@ export class VideoConsultationService {
    * leer antes: dos entradas simultáneas del mismo rol escriben una sola vez.
    * No es best-effort: si esto no queda escrito, el job podría marcar como "no
    * asistió" a un paciente que sí entró, y ese turno no se reembolsa.
+   *
+   * "Entró" quiere decir que **pidió la sala** y se le dio el acceso, no que se
+   * conectó a Daily: Daily no le avisa al backend. Si a alguien se le cae la
+   * conexión en la pantalla previa, igual cuenta como que entró. Es una
+   * aproximación aceptada para este alcance (review de #113). Por eso se
+   * escribe después de crear el token: un acceso que no se pudo dar no cuenta.
    */
   private async recordFirstJoin(
     appointmentId: string,

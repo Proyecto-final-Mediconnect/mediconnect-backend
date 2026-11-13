@@ -74,9 +74,14 @@ export class AppointmentClosingService {
    * cierran la consulta y la sesión de video.
    *
    * Se puede desde que abre la sala hasta {@link MANUAL_CLOSE_HOURS_AFTER} horas
-   * después del final. Idempotente: si el turno ya está completado devuelve lo
-   * mismo sin escribir nada, porque "Finalizar" se puede tocar dos veces o
-   * reintentarse tras un error de red.
+   * después del final, y **solo si entraron los dos** (`assertWhoJoined`): es
+   * la misma regla que usa el job para decir que una consulta se hizo. Sin
+   * esto, un turno al que nadie entró quedaba completado y habilitaba la
+   * reseña. Si el paciente no entró, lo que corresponde es "no asistió".
+   *
+   * Idempotente: si el turno ya está completado devuelve lo mismo sin escribir
+   * nada, porque "Finalizar" se puede tocar dos veces o reintentarse tras un
+   * error de red.
    */
   async complete(
     accessToken: string,
@@ -102,6 +107,7 @@ export class AppointmentClosingService {
       now,
       'La consulta todavía no empezó.',
     );
+    await this.assertWhoJoined(row.id, 'COMPLETADO');
 
     await this.close(row, 'COMPLETADO', userId, now);
     return { id: row.id, status: 'COMPLETADO' };
@@ -114,6 +120,11 @@ export class AppointmentClosingService {
    * Desde la hora del turno: antes no se puede saber que faltó. No reembolsa
    * nada; es lo mismo que `refundPercentFor` le da a un turno pasado
    * (`cancellation-policy.ts`). Idempotente como `complete`.
+   *
+   * Solo si el profesional entró a la sala y el paciente no
+   * (`assertWhoJoined`), igual que el job. Sin esto el profesional podía
+   * marcar ausente a un paciente que sí entró —que pierde el reembolso y la
+   * reseña— o a uno al que él mismo dejó plantado.
    */
   async markNoShow(
     accessToken: string,
@@ -135,6 +146,7 @@ export class AppointmentClosingService {
       now,
       'Todavía no es la hora del turno.',
     );
+    await this.assertWhoJoined(row.id, 'NO_ASISTIO');
 
     await this.close(row, 'NO_ASISTIO', userId, now);
     return { id: row.id, status: 'NO_ASISTIO' };
@@ -225,6 +237,44 @@ export class AppointmentClosingService {
       );
     }
     return row;
+  }
+
+  /**
+   * Quién entró a la sala, con la misma regla que el job (`closeFinished`):
+   *
+   * - `COMPLETADO` exige que hayan entrado los dos.
+   * - `NO_ASISTIO` exige que haya entrado el profesional y el paciente no.
+   *
+   * Sin fila de `consultations` no entró nadie: la crea el primero que entra.
+   */
+  private async assertWhoJoined(
+    appointmentId: string,
+    target: ClosedStatus,
+  ): Promise<void> {
+    const consultation = await this.prisma.consultation.findUnique({
+      where: { appointment_id: appointmentId },
+      select: { patient_joined_at: true, professional_joined_at: true },
+    });
+    const professional = !!consultation?.professional_joined_at;
+    const patient = !!consultation?.patient_joined_at;
+
+    if (!professional) {
+      throw new ConflictException(
+        target === 'COMPLETADO'
+          ? 'Todavía no entraste a la sala de esta consulta.'
+          : 'No entraste a la sala de este turno, así que no se puede marcar que el paciente no asistió.',
+      );
+    }
+    if (target === 'COMPLETADO' && !patient) {
+      throw new ConflictException(
+        'El paciente no entró a la sala. Si no se presentó, marcalo como no asistió.',
+      );
+    }
+    if (target === 'NO_ASISTIO' && patient) {
+      throw new ConflictException(
+        'El paciente entró a la sala, así que no se puede marcar como no asistió.',
+      );
+    }
   }
 
   /** Estado que admite el cierre y ventana horaria de un cierre manual. */
