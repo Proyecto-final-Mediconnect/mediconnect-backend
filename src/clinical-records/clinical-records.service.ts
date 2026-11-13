@@ -7,6 +7,16 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  toVitalBlock,
+  VITAL_SELECT,
+  type VitalBlock,
+} from '../medipass/vital-block';
+import {
+  JOIN_OPENS_MINUTES_BEFORE,
+  joinWindowFor,
+} from '../video/consultation.config';
+
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
@@ -24,6 +34,21 @@ import {
 } from './clinical-entry.fhir';
 import { CorrectClinicalEntryDto } from './dto/correct-clinical-entry.dto';
 import { CreateClinicalEntryDto } from './dto/create-clinical-entry.dto';
+
+/**
+ * Lo que lee `readPatientVital`: el bloque vital sin el contacto de emergencia,
+ * que no se entrega y por eso tampoco se trae de la base.
+ */
+const VITAL_SIN_CONTACTO = (() => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { emergency_contact, ...resto } = VITAL_SELECT;
+  return resto;
+})();
+
+/** Hasta cuántas horas después del final del turno el profesional todavía ve
+ *  la ficha: es el tiempo para cargar la evolución (igual que el cierre manual
+ *  del turno, ENG-189). */
+export const VITAL_READ_HOURS_AFTER = 24;
 
 /**
  * Escritura y lectura de la Historia Clínica (ENG-57).
@@ -708,6 +733,125 @@ export class ClinicalRecordsService {
     await this.recordAccess(viewerId, patientId, asPatient, entries.length);
 
     return entries;
+  }
+
+  /**
+   * Alergias, medicación y condiciones del paciente, para la columna de la
+   * videoconsulta (ENG-191).
+   *
+   * Son los mismos datos vitales que el paciente carga para su MediPass
+   * (ENG-136), con el mismo armado defensivo (`toVitalBlock`), menos el
+   * contacto de emergencia: en una consulta programada no hace falta, y lo que
+   * no hace falta no se entrega (ni se lee de la base, ver `VITAL_SIN_CONTACTO`).
+   *
+   * **Acceso más angosto que la HC** (review de #115): esta lectura va por
+   * Prisma, sin RLS detrás, así que el control de acá es el único. El
+   * profesional necesita un turno `CONFIRMADO` con el paciente cuya consulta
+   * esté en curso o haya terminado hace poco (`assertInConsultation`). No
+   * alcanzan un turno sin pagar a futuro ni haber firmado una entrada hace
+   * años, que sí habilitan la HC.
+   *
+   * La lectura se audita como una lectura de la HC (`CLINICAL_RECORD_READ`,
+   * `scope: vital`): así aparece en "Quién miró mi historia" (ENG-165) y en el
+   * export de datos, como pide la Ley 26.529. Falla cerrado igual que
+   * `recordAccess`.
+   */
+  async readPatientVital(
+    viewerId: string,
+    patientId: string,
+    now: Date = new Date(),
+  ): Promise<Omit<VitalBlock, 'contacto'>> {
+    const asPatient = sameUuid(viewerId, patientId);
+    if (!asPatient) {
+      await this.assertInConsultation(viewerId, patientId, now);
+    }
+
+    const patient = await this.prisma.patient.findUnique({
+      where: { profile_id: patientId },
+      select: VITAL_SIN_CONTACTO,
+    });
+    // Con relación pero sin ficha cargada: no hay nada que mostrar todavía.
+    if (!patient) {
+      throw new NotFoundException(
+        'Este paciente todavía no completó su ficha.',
+      );
+    }
+
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actor_id: viewerId,
+          action: 'CLINICAL_RECORD_READ',
+          resource_type: 'clinical_record_entries',
+          resource_id: patientId,
+          metadata: {
+            role: asPatient ? 'PACIENTE' : 'PROFESIONAL',
+            scope: 'vital',
+          },
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `No se pudo auditar la lectura de los datos vitales de ${patientId} por ${viewerId}: ${String(error)}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos registrar el acceso a la ficha del paciente, así que no la mostramos. Probá de nuevo en unos minutos.',
+      );
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { contacto, ...vital } = toVitalBlock(
+      { ...patient, emergency_contact: null },
+      now,
+    );
+    return vital;
+  }
+
+  /**
+   * El profesional tiene con el paciente un turno `CONFIRMADO` cuya consulta
+   * está abierta o terminó hace poco: desde que abre la sala (10 minutos antes)
+   * hasta {@link VITAL_READ_HOURS_AFTER} horas después del final, que es lo que
+   * tarda en cargar la evolución.
+   *
+   * El 403 es el mismo para cualquier caso que no califica, como en la HC: no
+   * dice si el paciente existe.
+   */
+  private async assertInConsultation(
+    professionalId: string,
+    patientId: string,
+    now: Date,
+  ): Promise<void> {
+    // La duración es por turno: se acota por fecha en la consulta y se termina
+    // de chequear la ventana exacta en memoria.
+    const candidatos = await this.prisma.appointment.findMany({
+      where: {
+        professional_id: professionalId,
+        patient_id: patientId,
+        status: 'CONFIRMADO',
+        scheduled_at: {
+          lte: new Date(now.getTime() + JOIN_OPENS_MINUTES_BEFORE * 60_000),
+          gte: new Date(
+            now.getTime() - (VITAL_READ_HOURS_AFTER + 24) * 3_600_000,
+          ),
+        },
+      },
+      select: { scheduled_at: true, duration_minutes: true },
+    });
+
+    const enConsulta = candidatos.some((t) => {
+      const { opensAt } = joinWindowFor(t.scheduled_at, t.duration_minutes);
+      const fin = t.scheduled_at.getTime() + t.duration_minutes * 60_000;
+      return (
+        now >= opensAt &&
+        now.getTime() <= fin + VITAL_READ_HOURS_AFTER * 3_600_000
+      );
+    });
+
+    if (!enConsulta) {
+      throw new ForbiddenException(
+        'Solo podés ver la ficha de un paciente durante su consulta.',
+      );
+    }
   }
 
   /**

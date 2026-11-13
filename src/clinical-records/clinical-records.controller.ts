@@ -70,6 +70,24 @@ export class ClinicalRecordsController {
   }
 
   /**
+   * Alergias, medicación y condiciones del paciente (ENG-191), para la columna
+   * de la videoconsulta. Mismas reglas de acceso que la HC y la lectura queda
+   * auditada. Va antes de `:entryId/...` por orden de rutas, aunque no chocan.
+   */
+  @Get('vital')
+  // Cada lectura escribe una fila en `audit_logs`: el límite protege también
+  // a esa tabla de un cliente en bucle (review de #115).
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  vital(
+    @Req() req: Request,
+    @Param('patientId', new ParseUUIDPipe({ version: '4' }))
+    patientId: string,
+  ) {
+    const { userId } = requireAuth(req);
+    return this.records.readPatientVital(userId, patientId);
+  }
+
+  /**
    * Agrega una entrada firmada por el profesional autenticado.
    *
    * El `professionalId` sale del JWT y nunca del cuerpo: es la autoría del
