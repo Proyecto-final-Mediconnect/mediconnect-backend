@@ -3,8 +3,8 @@ name: Security
 # Controles de seguridad que promete el Sprint 0 (§4.8.1 y §5.5.5, ENG-166):
 #
 #   - Auditoría de dependencias de producción: falla con una vulnerabilidad high
-#     o critical. Las moderadas no frenan, pero quedan en el log y Dependabot
-#     abre el PR para subirlas. Bloquea en main, en release/** y en el cron
+#     o critical. Las moderadas no frenan, pero quedan en el log para subirlas
+#     a mano. Bloquea en main, en release/** y en el cron
 #     semanal; en un PR solo avisa (ver el job `audit`).
 #   - Escaneo de secretos (gitleaks) sobre los commits del PR: falla si alguien
 #     commitea una clave, un token o una contraseña.
@@ -62,8 +62,7 @@ jobs:
       #
       # Cómo se destraba un rojo en main o en el cron:
       #   1. Mirar el advisory en el log y la ruta que lo trae.
-      #   2. Subir la dependencia directa que lo arrastra (Dependabot suele
-      #      tener el PR abierto) o, si el paquete de arriba no lo arregló,
+      #   2. Subir la dependencia directa que lo arrastra o, si el paquete de arriba no lo arregló,
       #      agregar un override acotado al padre en `pnpm.overrides`
       #      (`padre>dependencia`) y documentarlo en el README.
       #   3. `pnpm install` y confirmar con `pnpm audit --prod --audit-level=high`.
