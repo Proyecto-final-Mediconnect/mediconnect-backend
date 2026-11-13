@@ -9,6 +9,12 @@
 -- Cada columna guarda la PRIMERA entrada de ese rol: reconectarse no la pisa.
 -- Solo agrega columnas nullable, así que es compatible con el código vigente
 -- durante el deploy (expand/contract).
+--
+-- Sin backfill, a propósito: de las consultas anteriores no se sabe quién
+-- entró, y completar las columnas a ciegas podría marcar "no asistió" a quien
+-- sí estuvo. Quedan con las dos en NULL, así que el job no las cierra y hay que
+-- cerrarlas a mano si hace falta. Al 13/11 son 4 turnos CONFIRMADO de prueba,
+-- de septiembre y octubre (review de #113).
 
 alter table public.consultations
   add column if not exists patient_joined_at timestamptz,

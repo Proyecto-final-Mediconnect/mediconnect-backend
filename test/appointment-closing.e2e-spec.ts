@@ -27,6 +27,10 @@ describe('Cierre del turno (e2e)', () => {
   let appointmentRow: Record<string, unknown> | null;
   let appointmentUpdate: jest.Mock;
   let auditCreate: jest.Mock;
+  let joined: {
+    patient_joined_at: Date | null;
+    professional_joined_at: Date | null;
+  };
 
   beforeAll(async () => {
     ({ publicKey, privateKey } = await generateKeyPair('ES256'));
@@ -44,6 +48,10 @@ describe('Cierre del turno (e2e)', () => {
     };
     appointmentUpdate = jest.fn().mockResolvedValue({});
     auditCreate = jest.fn().mockResolvedValue({});
+    joined = {
+      patient_joined_at: new Date('2026-11-20T15:01:00.000Z'),
+      professional_joined_at: new Date('2026-11-20T14:58:00.000Z'),
+    };
 
     const tx = {
       appointment: { update: appointmentUpdate },
@@ -76,6 +84,7 @@ describe('Cierre del turno (e2e)', () => {
         profile: { findUnique: jest.fn() },
         ...legalAcceptedPrismaMock(),
         $transaction: jest.fn((cb: (t: typeof tx) => unknown) => cb(tx)),
+        consultation: { findUnique: jest.fn(() => Promise.resolve(joined)) },
       })
       .compile();
 
@@ -144,6 +153,7 @@ describe('Cierre del turno (e2e)', () => {
   });
 
   it('el profesional marca no asistió: 200', async () => {
+    joined = { ...joined, patient_joined_at: null };
     const res = await request(app.getHttpServer())
       .patch(url('no-show'))
       .set('Authorization', `Bearer ${await signToken(PROFESSIONAL)}`)
@@ -177,5 +187,13 @@ describe('Cierre del turno (e2e)', () => {
       .patch(url('no-show'))
       .set('Authorization', `Bearer ${await signToken(PROFESSIONAL)}`)
       .expect(409);
+  });
+
+  it('no asistió con el paciente adentro da 409 y no escribe (review de #113)', async () => {
+    await request(app.getHttpServer())
+      .patch(url('no-show'))
+      .set('Authorization', `Bearer ${await signToken(PROFESSIONAL)}`)
+      .expect(409);
+    expect(appointmentUpdate).not.toHaveBeenCalled();
   });
 });
