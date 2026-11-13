@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { SupabaseService } from '../supabase/supabase.service';
+import type { DailyService } from '../video/daily.service';
 import { AppointmentClosingService } from './appointment-closing.service';
 
 const APPOINTMENT = '44444444-4444-4444-8444-444444444444';
@@ -39,6 +40,7 @@ describe('AppointmentClosingService', () => {
     $queryRaw: jest.Mock;
   };
   /** Quién entró a la sala. Por defecto los dos: la consulta se hizo. */
+  let deleteRoom: jest.Mock;
   let joined: {
     patient_joined_at: Date | null;
     professional_joined_at: Date | null;
@@ -65,9 +67,15 @@ describe('AppointmentClosingService', () => {
     const prisma = {
       $transaction: jest.fn((cb: (t: typeof tx) => unknown) => cb(tx)),
       consultation: { findUnique: jest.fn(() => Promise.resolve(joined)) },
+      videoSession: {
+        findMany: jest.fn().mockResolvedValue([{ daily_room_name: 'room-1' }]),
+      },
     } as unknown as PrismaService;
+    deleteRoom = jest.fn().mockResolvedValue(undefined);
 
-    service = new AppointmentClosingService(prisma, supabase);
+    service = new AppointmentClosingService(prisma, supabase, {
+      deleteRoom,
+    } as unknown as DailyService);
   }
 
   beforeEach(() => {
@@ -102,6 +110,20 @@ describe('AppointmentClosingService', () => {
           data: { status: 'FINALIZADA', ended_at: at(25) },
         }),
       );
+    });
+
+    it('borra la sala de Daily al finalizar', async () => {
+      await service.complete('jwt', PROFESSIONAL, APPOINTMENT, at(25));
+
+      expect(deleteRoom).toHaveBeenCalledWith('room-1');
+    });
+
+    it('si Daily falla al borrar la sala, el cierre igual se completa', async () => {
+      deleteRoom.mockRejectedValue(new Error('daily caído'));
+
+      await expect(
+        service.complete('jwt', PROFESSIONAL, APPOINTMENT, at(25)),
+      ).resolves.toEqual({ id: APPOINTMENT, status: 'COMPLETADO' });
     });
 
     it('queda auditado con el estado anterior', async () => {

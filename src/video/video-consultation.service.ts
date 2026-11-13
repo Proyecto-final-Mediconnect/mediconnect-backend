@@ -7,6 +7,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+  APPOINTMENT_SELECT,
+  type AppointmentRow,
+} from '../appointments/appointment-row';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
@@ -60,19 +64,6 @@ export interface VideoConsultationAccess {
 }
 
 /** Fila de `appointments` que necesita este flujo. */
-interface AppointmentRow {
-  id: string;
-  patient_id: string;
-  professional_id: string;
-  scheduled_at: string;
-  duration_minutes: number;
-  status: string;
-  created_at: string;
-}
-
-const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, scheduled_at, duration_minutes, status, created_at';
-
 @Injectable()
 export class VideoConsultationService {
   private readonly logger = new Logger(VideoConsultationService.name);
