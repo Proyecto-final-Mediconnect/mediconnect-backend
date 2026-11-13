@@ -152,42 +152,75 @@ describe('ReviewsService', () => {
       ).rejects.toThrow('Solo se puede reseñar una consulta que ya se hizo.');
     });
 
-    it('ENG-190: el paciente que entró a la sala reseña aunque el turno no esté completado', async () => {
-      prisma.appointment.findUnique.mockResolvedValue({
+    describe('ENG-190: consulta en marcha sin completar', () => {
+      const AHORA = new Date('2026-11-20T15:20:00Z');
+      const turno = (over: Record<string, unknown> = {}) => ({
         patient_id: PATIENT,
         professional_id: PRO,
         status: 'CONFIRMADO',
+        scheduled_at: new Date('2026-11-20T15:00:00Z'),
         review: null,
-        consultation: { patient_joined_at: new Date('2026-11-20T15:01:00Z') },
+        consultation: {
+          patient_joined_at: new Date('2026-11-20T15:01:00Z'),
+          professional_joined_at: new Date('2026-11-20T14:58:00Z'),
+        },
+        ...over,
       });
-      await service.create(PATIENT, TURNO, { rating: 5 });
-      expect(prisma.review.create).toHaveBeenCalled();
-    });
 
-    it('ENG-190: un turno confirmado al que el paciente no entró no se reseña', async () => {
-      prisma.appointment.findUnique.mockResolvedValue({
-        patient_id: PATIENT,
-        professional_id: PRO,
-        status: 'CONFIRMADO',
-        review: null,
-        consultation: { patient_joined_at: null },
+      it('entraron los dos y ya es la hora: se puede reseñar', async () => {
+        prisma.appointment.findUnique.mockResolvedValue(turno());
+        await service.create(PATIENT, TURNO, { rating: 5 }, AHORA);
+        expect(prisma.review.create).toHaveBeenCalled();
       });
-      await expect(
-        service.create(PATIENT, TURNO, { rating: 4 }),
-      ).rejects.toThrow('Solo se puede reseñar una consulta que ya se hizo.');
-    });
 
-    it('ENG-190: un turno en NO_ASISTIO no se reseña aunque haya consulta', async () => {
-      prisma.appointment.findUnique.mockResolvedValue({
-        patient_id: PATIENT,
-        professional_id: PRO,
-        status: 'NO_ASISTIO',
-        review: null,
-        consultation: { patient_joined_at: new Date('2026-11-20T15:01:00Z') },
+      it('el profesional no entró: no se reseña (review de #114)', async () => {
+        prisma.appointment.findUnique.mockResolvedValue(
+          turno({
+            consultation: {
+              patient_joined_at: new Date('2026-11-20T15:01:00Z'),
+              professional_joined_at: null,
+            },
+          }),
+        );
+        await expect(
+          service.create(PATIENT, TURNO, { rating: 4 }, AHORA),
+        ).rejects.toThrow('Solo se puede reseñar una consulta que ya se hizo.');
       });
-      await expect(
-        service.create(PATIENT, TURNO, { rating: 4 }),
-      ).rejects.toBeInstanceOf(ConflictException);
+
+      it('antes de la hora del turno no se reseña aunque hayan entrado', async () => {
+        prisma.appointment.findUnique.mockResolvedValue(turno());
+        await expect(
+          service.create(
+            PATIENT,
+            TURNO,
+            { rating: 4 },
+            new Date('2026-11-20T14:55:00Z'),
+          ),
+        ).rejects.toBeInstanceOf(ConflictException);
+      });
+
+      it('el paciente no entró: no se reseña', async () => {
+        prisma.appointment.findUnique.mockResolvedValue(
+          turno({
+            consultation: {
+              patient_joined_at: null,
+              professional_joined_at: new Date(),
+            },
+          }),
+        );
+        await expect(
+          service.create(PATIENT, TURNO, { rating: 4 }, AHORA),
+        ).rejects.toBeInstanceOf(ConflictException);
+      });
+
+      it('NO_ASISTIO no se reseña aunque haya consulta', async () => {
+        prisma.appointment.findUnique.mockResolvedValue(
+          turno({ status: 'NO_ASISTIO' }),
+        );
+        await expect(
+          service.create(PATIENT, TURNO, { rating: 4 }, AHORA),
+        ).rejects.toBeInstanceOf(ConflictException);
+      });
     });
 
     it('una sola reseña por turno', async () => {

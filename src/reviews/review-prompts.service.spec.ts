@@ -1,7 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import type { PrismaService } from '../prisma/prisma.service';
 import { ReviewPromptsService } from './review-prompts.service';
-import { REVIEWABLE_WHERE } from './reviewable';
+import { reviewableWhere } from './reviewable';
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
 const OTHER = '33333333-3333-4333-8333-333333333333';
@@ -34,7 +34,7 @@ describe('ReviewPromptsService', () => {
       expect(prisma.appointment.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: {
-            ...REVIEWABLE_WHERE,
+            ...reviewableWhere(NOW),
             patient_id: PATIENT,
             scheduled_at: {
               gte: new Date('2026-10-21T18:00:00.000Z'),

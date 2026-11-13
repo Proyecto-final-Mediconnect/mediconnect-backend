@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
-import { REVIEWABLE_WHERE } from '../reviews/reviewable';
+import { reviewableWhere } from '../reviews/reviewable';
 import { JOIN_GRACE_MINUTES_AFTER } from '../video/consultation.config';
 import {
   renderAppointmentEmail,
@@ -160,7 +160,7 @@ export class AppointmentNotificationsService {
     const graceMs = JOIN_GRACE_MINUTES_AFTER * 60_000;
     const rows = await this.prisma.appointment.findMany({
       where: {
-        ...REVIEWABLE_WHERE,
+        ...reviewableWhere(now),
         scheduled_at: {
           gte: new Date(
             now.getTime() - REVIEW_REQUEST_MAX_AGE_MS - 24 * HOUR_MS,
@@ -173,7 +173,10 @@ export class AppointmentNotificationsService {
         patient: { profile: { email_reminders: true } },
       },
       select: APPOINTMENT_SELECT,
-      orderBy: { scheduled_at: 'asc' },
+      // Del más nuevo al más viejo: los que se pasan de los 3 días (que el
+      // filtro de abajo descarta) quedan al final de la tanda y no tapan a
+      // los que sí hay que mandar (review de #114).
+      orderBy: { scheduled_at: 'desc' },
       take: BATCH_SIZE,
     });
 

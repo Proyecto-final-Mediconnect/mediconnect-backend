@@ -107,6 +107,7 @@ export class ReviewsService {
     patientId: string,
     appointmentId: string,
     dto: CreateReviewDto,
+    now: Date = new Date(),
   ): Promise<MyReviewView> {
     const appointment = await this.prisma.appointment.findUnique({
       where: { id: appointmentId },
@@ -114,8 +115,11 @@ export class ReviewsService {
         patient_id: true,
         professional_id: true,
         status: true,
+        scheduled_at: true,
         review: { select: { id: true } },
-        consultation: { select: { patient_joined_at: true } },
+        consultation: {
+          select: { patient_joined_at: true, professional_joined_at: true },
+        },
       },
     });
     // Ajeno o inexistente dan lo mismo: un 403 confirmaría que el turno existe.
@@ -125,12 +129,7 @@ export class ReviewsService {
     ) {
       throw new NotFoundException('No encontramos ese turno.');
     }
-    if (
-      !isReviewable(
-        appointment.status,
-        appointment.consultation?.patient_joined_at,
-      )
-    ) {
+    if (!isReviewable(appointment, now)) {
       throw new ConflictException(
         'Solo se puede reseñar una consulta que ya se hizo.',
       );

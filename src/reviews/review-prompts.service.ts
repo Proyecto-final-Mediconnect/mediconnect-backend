@@ -1,9 +1,12 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { REVIEWABLE_WHERE } from './reviewable';
+import { reviewableWhere } from './reviewable';
 
 /** Hasta cuántos días después del turno se sigue pidiendo la reseña. */
 export const PENDING_REVIEW_DAYS = 30;
+
+/** Cuántas pendientes devuelve como máximo `GET /reviews/pending`. */
+export const PENDING_REVIEW_LIMIT = 20;
 
 /** Un turno que el paciente puede reseñar y todavía no reseñó (ENG-190). */
 export interface PendingReviewView {
@@ -39,7 +42,7 @@ export class ReviewPromptsService {
   ): Promise<PendingReviewView[]> {
     const rows = await this.prisma.appointment.findMany({
       where: {
-        ...REVIEWABLE_WHERE,
+        ...reviewableWhere(now),
         patient_id: patientId,
         scheduled_at: {
           gte: new Date(now.getTime() - PENDING_REVIEW_DAYS * 86_400_000),
@@ -61,6 +64,8 @@ export class ReviewPromptsService {
         },
       },
       orderBy: { scheduled_at: 'desc' },
+      // Tope defensivo: la tarjeta del inicio nunca muestra tantas.
+      take: PENDING_REVIEW_LIMIT,
     });
 
     return rows.map((row) => ({

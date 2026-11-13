@@ -66,7 +66,7 @@ describe('Pedido de reseña (integration)', () => {
 
   async function turno(
     status: 'CONFIRMADO' | 'COMPLETADO' | 'NO_ASISTIO',
-    patientJoined: boolean,
+    entraron: 'ninguno' | 'paciente' | 'ambos',
   ) {
     slot += 1;
     const scheduledAt = new Date(NOW.getTime() - slot * HOUR);
@@ -80,31 +80,37 @@ describe('Pedido de reseña (integration)', () => {
         status,
       },
     });
-    if (patientJoined) {
+    if (entraron !== 'ninguno') {
       await prisma.consultation.create({
-        data: { appointment_id: row.id, patient_joined_at: scheduledAt },
+        data: {
+          appointment_id: row.id,
+          patient_joined_at: scheduledAt,
+          professional_joined_at: entraron === 'ambos' ? scheduledAt : null,
+        },
       });
     }
     return row.id;
   }
 
-  it('lista los completados y los confirmados a los que el paciente entró', async () => {
-    const completado = await turno('COMPLETADO', false);
-    const entro = await turno('CONFIRMADO', true);
-    const noEntro = await turno('CONFIRMADO', false);
-    const noAsistio = await turno('NO_ASISTIO', true);
+  it('lista los completados y los confirmados a los que entraron los dos', async () => {
+    const completado = await turno('COMPLETADO', 'ninguno');
+    const entraron = await turno('CONFIRMADO', 'ambos');
+    const soloPaciente = await turno('CONFIRMADO', 'paciente');
+    const noEntro = await turno('CONFIRMADO', 'ninguno');
+    const noAsistio = await turno('NO_ASISTIO', 'ambos');
 
     const ids = (await service.listPending(patientId, NOW)).map(
       (p) => p.appointmentId,
     );
 
-    expect(ids).toEqual(expect.arrayContaining([completado, entro]));
+    expect(ids).toEqual(expect.arrayContaining([completado, entraron]));
+    expect(ids).not.toContain(soloPaciente);
     expect(ids).not.toContain(noEntro);
     expect(ids).not.toContain(noAsistio);
   });
 
   it('el descarte lo saca de la lista y repetirlo no falla', async () => {
-    const id = await turno('COMPLETADO', false);
+    const id = await turno('COMPLETADO', 'ninguno');
 
     await service.dismiss(patientId, id);
     await service.dismiss(patientId, id);
