@@ -8,8 +8,10 @@ import {
 } from '@nestjs/common';
 import type { appointment_status } from '../../generated/prisma';
 import { Prisma } from '../../generated/prisma/client';
+import { APPOINTMENT_SELECT, type AppointmentRow } from './appointment-row';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import { DailyService } from '../video/daily.service';
 import {
   JOIN_GRACE_MINUTES_AFTER,
   isJoinableStatus,
@@ -42,19 +44,6 @@ export interface ClosedAppointment {
   status: ClosedStatus;
 }
 
-interface AppointmentRow {
-  id: string;
-  patient_id: string;
-  professional_id: string;
-  scheduled_at: string;
-  duration_minutes: number;
-  status: string;
-  created_at: string;
-}
-
-const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, scheduled_at, duration_minutes, status, created_at';
-
 const AUDIT_ACTION: Record<ClosedStatus, string> = {
   COMPLETADO: 'APPOINTMENT_COMPLETED',
   NO_ASISTIO: 'APPOINTMENT_NO_SHOW',
@@ -67,6 +56,7 @@ export class AppointmentClosingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly supabase: SupabaseService,
+    private readonly daily: DailyService,
   ) {}
 
   /**
@@ -110,6 +100,7 @@ export class AppointmentClosingService {
     await this.assertWhoJoined(row.id, 'COMPLETADO');
 
     await this.close(row, 'COMPLETADO', userId, now);
+    await this.deleteRooms(row.id);
     return { id: row.id, status: 'COMPLETADO' };
   }
 
@@ -273,6 +264,31 @@ export class AppointmentClosingService {
     if (target === 'NO_ASISTIO' && patient) {
       throw new ConflictException(
         'El paciente entró a la sala, así que no se puede marcar como no asistió.',
+      );
+    }
+  }
+
+  /**
+   * Borra la sala de Daily de un turno finalizado a mano: la sala sigue viva
+   * hasta su `exp` y quien esté adentro sigue conectado, y Daily factura por
+   * minuto de participante. Best-effort: si falla (o Daily no está configurado)
+   * el cierre ya quedó escrito y la sala expira sola.
+   */
+  private async deleteRooms(appointmentId: string): Promise<void> {
+    try {
+      const sessions = await this.prisma.videoSession.findMany({
+        where: {
+          consultation: { appointment_id: appointmentId },
+          daily_room_name: { not: null },
+        },
+        select: { daily_room_name: true },
+      });
+      await Promise.all(
+        sessions.map((s) => this.daily.deleteRoom(s.daily_room_name as string)),
+      );
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo borrar la sala del turno ${appointmentId}: ${String(error)}`,
       );
     }
   }

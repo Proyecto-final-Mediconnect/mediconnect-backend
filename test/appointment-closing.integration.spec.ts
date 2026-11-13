@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '../generated/prisma';
+import type { DailyService } from '../src/video/daily.service';
 import { AppointmentClosingService } from '../src/appointments/appointment-closing.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import type { SupabaseService } from '../src/supabase/supabase.service';
@@ -16,6 +17,7 @@ describe('Cierre automático de turnos (integration)', () => {
   const service = new AppointmentClosingService(
     prisma as unknown as PrismaService,
     {} as SupabaseService,
+    {} as DailyService,
   );
 
   const NOW = new Date('2026-11-20T18:00:00.000Z');
