@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { reviewableWhere } from '../reviews/reviewable';
+import { JOIN_GRACE_MINUTES_AFTER } from '../video/consultation.config';
 import {
   renderAppointmentEmail,
   type AppointmentEmailKind,
@@ -12,6 +14,16 @@ const HOUR_MS = 60 * 60 * 1000;
 /** Tope de envíos por tipo y corrida. El job pasa cada 5 minutos: si un día se
  *  junta más, sale en las corridas siguientes en vez de en un request eterno. */
 const BATCH_SIZE = 50;
+
+/** Cuánto después de que cierra la sala sale el pedido de reseña (ENG-190). */
+export const REVIEW_REQUEST_DELAY_MS = 3 * HOUR_MS;
+
+/**
+ * Hasta cuánto después del cierre de la sala se sigue mandando el pedido. Sin
+ * este corte, el primer deploy le pediría la reseña de cada turno completado
+ * de la historia, incluidos los de la seed.
+ */
+export const REVIEW_REQUEST_MAX_AGE_MS = 3 * 24 * HOUR_MS;
 
 /** `P2002` de Prisma: violación de unicidad. */
 const PRISMA_UNIQUE_VIOLATION = 'P2002';
@@ -123,6 +135,67 @@ export class AppointmentNotificationsService {
     if (due.length > 0) {
       this.logger.log(
         `Emails de turno: ${summary.sent} enviados, ${summary.failed} fallidos.`,
+      );
+    }
+    return summary;
+  }
+
+  /**
+   * Pedido de reseña (ENG-190): **un** mail por turno, 3 horas después de que
+   * cierra la sala. Lo llama el job `send-review-requests`.
+   *
+   * Sale solo si el turno es reseñable (completado, o el paciente entró a la
+   * sala), no tiene reseña ni descarte, y el paciente no apagó los mails
+   * (`email_reminders`, ENG-86). Que no salga dos veces lo garantiza la misma
+   * fila reclamada en `notifications` que usan los recordatorios.
+   */
+  async sendReviewRequests(now: Date = new Date()): Promise<SendSummary> {
+    if (!this.email.isConfigured()) {
+      return { enabled: false, sent: 0, failed: 0 };
+    }
+
+    // La sala cierra a `scheduled_at + duración + tolerancia`, y la duración es
+    // por turno: se acota por fecha en la consulta y se termina de filtrar en
+    // memoria, igual que `dueReminders`.
+    const graceMs = JOIN_GRACE_MINUTES_AFTER * 60_000;
+    const rows = await this.prisma.appointment.findMany({
+      where: {
+        ...reviewableWhere(now),
+        scheduled_at: {
+          gte: new Date(
+            now.getTime() - REVIEW_REQUEST_MAX_AGE_MS - 24 * HOUR_MS,
+          ),
+          lte: new Date(now.getTime() - REVIEW_REQUEST_DELAY_MS - graceMs),
+        },
+        review: { is: null },
+        review_prompt_dismissal: { is: null },
+        notifications: { none: { type: 'RESENA_PEDIDA', channel: 'EMAIL' } },
+        patient: { profile: { email_reminders: true } },
+      },
+      select: APPOINTMENT_SELECT,
+      // Del más nuevo al más viejo: los que se pasan de los 3 días (que el
+      // filtro de abajo descarta) quedan al final de la tanda y no tapan a
+      // los que sí hay que mandar (review de #114).
+      orderBy: { scheduled_at: 'desc' },
+      take: BATCH_SIZE,
+    });
+
+    const due = rows.filter((row) => {
+      const closesAt =
+        row.scheduled_at.getTime() + row.duration_minutes * 60_000 + graceMs;
+      const age = now.getTime() - closesAt;
+      return age >= REVIEW_REQUEST_DELAY_MS && age <= REVIEW_REQUEST_MAX_AGE_MS;
+    });
+
+    const summary: SendSummary = { enabled: true, sent: 0, failed: 0 };
+    for (const appointment of due) {
+      const result = await this.deliver(appointment, 'RESENA_PEDIDA', now);
+      if (result === 'enviado') summary.sent += 1;
+      if (result === 'fallido' || result === 'reintentar') summary.failed += 1;
+    }
+    if (due.length > 0) {
+      this.logger.log(
+        `Pedidos de reseña: ${summary.sent} enviados, ${summary.failed} fallidos.`,
       );
     }
     return summary;
@@ -251,6 +324,7 @@ export class AppointmentNotificationsService {
       scheduledAt: appointment.scheduled_at,
       durationMinutes: appointment.duration_minutes,
       myAppointmentsUrl: this.myAppointmentsUrl(),
+      appointmentUrl: this.webUrl(`/turnos/${appointment.id}`),
     });
 
     try {
@@ -288,10 +362,15 @@ export class AppointmentNotificationsService {
    * El mail sale igual sin el link: la fecha y la hora son lo que importa.
    */
   private myAppointmentsUrl(): string | null {
+    return this.webUrl('/mis-turnos');
+  }
+
+  /** Una ruta de la web, o `null` si `WEB_ORIGIN` no es una URL única. */
+  private webUrl(path: string): string | null {
     const configured = this.config.get<string>('WEB_ORIGIN');
     if (!configured || configured.includes(',')) return null;
     try {
-      return `${new URL(configured).origin}/mis-turnos`;
+      return `${new URL(configured).origin}${path}`;
     } catch {
       return null;
     }

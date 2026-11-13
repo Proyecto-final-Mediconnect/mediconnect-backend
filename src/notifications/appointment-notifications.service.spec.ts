@@ -183,4 +183,88 @@ describe('AppointmentNotificationsService', () => {
       });
     });
   });
+
+  describe('sendReviewRequests (ENG-190)', () => {
+    /** Turno de 30 min cuya sala cerró hace `hours` horas (30 min + 15 de tolerancia). */
+    const closedAgo = (hours: number) => ({
+      ...APPOINTMENT,
+      id: `turno-${hours}`,
+      scheduled_at: new Date(NOW.getTime() - hours * HOUR - 45 * 60_000),
+    });
+
+    it('manda un pedido a las 3 h del cierre de la sala, con el link al turno', async () => {
+      prisma.appointment.findMany.mockResolvedValue([closedAgo(3)]);
+
+      const summary = await service.sendReviewRequests(NOW);
+
+      expect(summary).toEqual({ enabled: true, sent: 1, failed: 0 });
+      expect(prisma.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: 'RESENA_PEDIDA',
+            channel: 'EMAIL',
+          }),
+        }),
+      );
+      expect(email.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subject: '¿Cómo fue tu consulta con Ana Gómez?',
+          html: expect.stringContaining(
+            'https://app.test/turnos/turno-3',
+          ) as string,
+        }),
+      );
+    });
+
+    it('no manda antes de las 3 h ni pasados los 3 días', async () => {
+      prisma.appointment.findMany.mockResolvedValue([
+        closedAgo(2),
+        closedAgo(73),
+      ]);
+
+      const summary = await service.sendReviewRequests(NOW);
+
+      expect(summary.sent).toBe(0);
+      expect(email.send).not.toHaveBeenCalled();
+    });
+
+    it('la consulta excluye reseñados, descartados, ya pedidos y a quien apagó los mails', async () => {
+      await service.sendReviewRequests(NOW);
+
+      expect(prisma.appointment.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            review: { is: null },
+            review_prompt_dismissal: { is: null },
+            notifications: {
+              none: { type: 'RESENA_PEDIDA', channel: 'EMAIL' },
+            },
+            patient: { profile: { email_reminders: true } },
+          }) as unknown,
+        }),
+      );
+    });
+
+    it('si ya se reclamó (job corriendo dos veces), no vuelve a mandar', async () => {
+      prisma.appointment.findMany.mockResolvedValue([closedAgo(3)]);
+      prisma.notification.create.mockRejectedValue(
+        Object.assign(new Error('dup'), { code: 'P2002' }),
+      );
+
+      const summary = await service.sendReviewRequests(NOW);
+
+      expect(summary.sent).toBe(0);
+      expect(email.send).not.toHaveBeenCalled();
+    });
+
+    it('sin email configurado no consulta nada', async () => {
+      email.isConfigured.mockReturnValue(false);
+      await expect(service.sendReviewRequests(NOW)).resolves.toEqual({
+        enabled: false,
+        sent: 0,
+        failed: 0,
+      });
+      expect(prisma.appointment.findMany).not.toHaveBeenCalled();
+    });
+  });
 });
