@@ -17,20 +17,6 @@ import {
   joinWindowFor,
 } from '../video/consultation.config';
 
-/**
- * Lo que lee `readPatientVital`: el bloque vital sin el contacto de emergencia,
- * que no se entrega y por eso tampoco se trae de la base.
- */
-const VITAL_SIN_CONTACTO = (() => {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { emergency_contact, ...resto } = VITAL_SELECT;
-  return resto;
-})();
-
-/** Hasta cuántas horas después del final del turno el profesional todavía ve
- *  la ficha: es el tiempo para cargar la evolución (igual que el cierre manual
- *  del turno, ENG-189). */
-export const VITAL_READ_HOURS_AFTER = 24;
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
@@ -48,6 +34,21 @@ import {
 } from './clinical-entry.fhir';
 import { CorrectClinicalEntryDto } from './dto/correct-clinical-entry.dto';
 import { CreateClinicalEntryDto } from './dto/create-clinical-entry.dto';
+
+/**
+ * Lo que lee `readPatientVital`: el bloque vital sin el contacto de emergencia,
+ * que no se entrega y por eso tampoco se trae de la base.
+ */
+const VITAL_SIN_CONTACTO = (() => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { emergency_contact, ...resto } = VITAL_SELECT;
+  return resto;
+})();
+
+/** Hasta cuántas horas después del final del turno el profesional todavía ve
+ *  la ficha: es el tiempo para cargar la evolución (igual que el cierre manual
+ *  del turno, ENG-189). */
+export const VITAL_READ_HOURS_AFTER = 24;
 
 /**
  * Escritura y lectura de la Historia Clínica (ENG-57).
