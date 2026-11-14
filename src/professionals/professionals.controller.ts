@@ -6,17 +6,21 @@ import {
   Patch,
   Post,
   Put,
+  Query,
   Req,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { CancellationPolicyService } from './cancellation-policy.service';
+import { EarningsQueryDto } from './dto/earnings-query.dto';
 import { UpdateCancellationPolicyDto } from './dto/update-cancellation-policy.dto';
+import { EarningsService } from './earnings.service';
 import { UpdateProfessionalProfileDto } from './dto/update-professional-profile.dto';
 import { ProfessionalsService } from './professionals.service';
 
@@ -44,7 +48,33 @@ export class ProfessionalsController {
   constructor(
     private readonly professionals: ProfessionalsService,
     private readonly cancellationPolicy: CancellationPolicyService,
+    private readonly earnings: EarningsService,
   ) {}
+
+  /**
+   * "Mis cobros" (ENG-194): totales y cobros por turno del período, por fecha
+   * de acreditación. Sin `from`/`to`, el mes en curso. Solo los propios: el id
+   * sale del JWT.
+   */
+  @Get('me/earnings')
+  getMyEarnings(@Req() req: Request, @Query() query: EarningsQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.earnings.list(userId, query);
+  }
+
+  /** Las mismas filas que la tabla, todas, en CSV para Excel. */
+  @Get('me/earnings/export')
+  async exportMyEarnings(
+    @Req() req: Request,
+    @Query() query: EarningsQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<string> {
+    const { userId } = requireAuth(req);
+    const { filename, csv } = await this.earnings.exportCsv(userId, query);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return csv;
+  }
 
   @Get('me')
   getMyProfile(@Req() req: Request) {
