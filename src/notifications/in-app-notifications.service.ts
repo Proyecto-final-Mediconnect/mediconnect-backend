@@ -119,6 +119,58 @@ export class InAppNotificationsService {
   }
 
   /**
+   * Le avisa al paciente que se acreditó su pago y el turno quedó confirmado
+   * (ENG-199). Lo llama el webhook junto con el aviso al profesional.
+   *
+   * **Nunca tira** y no duplica: la unicidad `(appointment_id, type, channel)`
+   * frena el segundo aviso si el webhook llega dos veces.
+   */
+  async notifyPatientPaymentApproved(
+    appointmentId: string,
+    now: Date = new Date(),
+  ): Promise<void> {
+    try {
+      const appointment = await this.prisma.appointment.findUnique({
+        where: { id: appointmentId },
+        select: {
+          patient_id: true,
+          scheduled_at: true,
+          professional: {
+            select: { first_name: true, last_name: true, currency: true },
+          },
+          payment: { select: { amount: true, currency: true } },
+        },
+      });
+      if (!appointment) return;
+
+      await this.prisma.notification.create({
+        data: {
+          user_id: appointment.patient_id,
+          appointment_id: appointmentId,
+          type: 'PAGO_ACREDITADO',
+          channel: 'IN_APP',
+          payload: {
+            appointmentId,
+            professional:
+              `${appointment.professional.first_name} ${appointment.professional.last_name}`.trim(),
+            scheduledAt: appointment.scheduled_at.toISOString(),
+            ...(appointment.payment && {
+              amount: Number(appointment.payment.amount),
+              currency: appointment.payment.currency,
+            }),
+          },
+          sent_at: now,
+        },
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code === PRISMA_UNIQUE_VIOLATION) return;
+      this.logger.error(
+        `No se pudo avisar el pago acreditado del turno ${appointmentId}: ${String(err)}`,
+      );
+    }
+  }
+
+  /**
    * Avisa que llegó un mensaje de chat (ENG-70).
    *
    * **Un aviso por conversación sin leer**, no uno por mensaje: diez mensajes

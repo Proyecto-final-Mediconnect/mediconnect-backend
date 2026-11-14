@@ -237,7 +237,11 @@ export class MercadoPagoService {
         // Vuelve solo al front cuando el pago se aprueba. No se usa como señal
         // de confirmación: el back_url lo dispara el navegador del pagador y es
         // trivial de falsificar. Quien confirma es el webhook (ENG-64).
-        auto_return: 'approved',
+        // MercadoPago rechaza `auto_return` con un back_url `http://` (la web
+        // en localhost): ahí se omite y el pagador vuelve con "Volver al sitio".
+        ...(params.backUrls.success.startsWith('http://')
+          ? {}
+          : { auto_return: 'approved' }),
         expires: true,
         expiration_date_to: toMercadoPagoDate(params.expiresAt),
         // Sin estados intermedios: lo que no se aprueba en el momento se
