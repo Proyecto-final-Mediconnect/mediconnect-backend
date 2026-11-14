@@ -20,9 +20,13 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { XLSX_CONTENT_TYPE } from '../common/excel/excel';
 import { requireAuth } from '../common/http/require-auth';
 import { CancellationPolicyService } from './cancellation-policy.service';
+import { EarningsQueryDto } from './dto/earnings-query.dto';
+import { StatsQueryDto } from './dto/stats-query.dto';
 import { MyPatientsQueryDto } from './dto/my-patients-query.dto';
 import { UpdateCancellationPolicyDto } from './dto/update-cancellation-policy.dto';
+import { EarningsService } from './earnings.service';
 import { UpdateProfessionalProfileDto } from './dto/update-professional-profile.dto';
+import { ProfessionalStatsService } from './professional-stats.service';
 import { MyPatientsService } from './my-patients.service';
 import { ProfessionalsService } from './professionals.service';
 
@@ -50,8 +54,47 @@ export class ProfessionalsController {
   constructor(
     private readonly professionals: ProfessionalsService,
     private readonly cancellationPolicy: CancellationPolicyService,
+    private readonly earnings: EarningsService,
+    private readonly stats: ProfessionalStatsService,
     private readonly myPatients: MyPatientsService,
   ) {}
+
+  /**
+   * "Mis cobros" (ENG-194): totales y cobros por turno del período, por fecha
+   * de acreditación. Sin `from`/`to`, el mes en curso. Solo los propios: el id
+   * sale del JWT.
+   */
+  @Get('me/earnings')
+  getMyEarnings(@Req() req: Request, @Query() query: EarningsQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.earnings.list(userId, query);
+  }
+
+  /** Las mismas filas que la tabla, todas, en CSV para Excel. */
+  @Get('me/earnings/export')
+  async exportMyEarnings(
+    @Req() req: Request,
+    @Query() query: EarningsQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<string> {
+    const { userId } = requireAuth(req);
+    const { filename, csv } = await this.earnings.exportCsv(userId, query);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return csv;
+  }
+
+  /**
+   * "Mi actividad" (ENG-196): turnos por cómo terminaron, tasas de cancelación
+   * y ausentismo, consultas por mes, pacientes y reseñas del período. Sin
+   * `from`/`to`, los últimos tres meses. Solo los propios: el id sale del JWT,
+   * y un paciente recibe 403.
+   */
+  @Get('me/stats')
+  getMyStats(@Req() req: Request, @Query() query: StatsQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.stats.get(userId, query);
+  }
 
   /**
    * "Mis pacientes" (ENG-197): los pacientes cuya historia clínica el

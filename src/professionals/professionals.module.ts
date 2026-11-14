@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { CancellationPolicyService } from './cancellation-policy.service';
+import { EarningsService } from './earnings.service';
+import { ProfessionalStatsService } from './professional-stats.service';
 import { MyPatientsService } from './my-patients.service';
 import { ProfessionalsController } from './professionals.controller';
 import { ProfessionalsService } from './professionals.service';
@@ -23,6 +25,8 @@ import { ReviewsModule } from '../reviews/reviews.module';
     ProfessionalsService,
     PublicProfessionalsService,
     CancellationPolicyService,
+    EarningsService,
+    ProfessionalStatsService,
     MyPatientsService,
   ],
   // ENG-65 (reembolsos) necesita la política para saber cuánto devolver.

@@ -96,6 +96,57 @@ describe('InAppNotificationsService', () => {
     });
   });
 
+  describe('notifyPatientPaymentApproved (ENG-199)', () => {
+    const PAGADO = {
+      patient_id: USER_ID,
+      scheduled_at: new Date('2026-10-23T13:30:00.000Z'),
+      professional: { first_name: 'Ana', last_name: 'García', currency: 'ARS' },
+      payment: { amount: '9500.00', currency: 'ARS' },
+    };
+
+    it('deja el aviso en la bandeja del paciente con el monto y el profesional', async () => {
+      prisma.appointment.findUnique.mockResolvedValue(PAGADO);
+
+      await service.notifyPatientPaymentApproved(APPOINTMENT_ID, NOW);
+
+      expect(prisma.notification.create).toHaveBeenCalledWith({
+        data: {
+          user_id: USER_ID,
+          appointment_id: APPOINTMENT_ID,
+          type: 'PAGO_ACREDITADO',
+          channel: 'IN_APP',
+          payload: {
+            appointmentId: APPOINTMENT_ID,
+            professional: 'Ana García',
+            scheduledAt: '2026-10-23T13:30:00.000Z',
+            amount: 9500,
+            currency: 'ARS',
+          },
+          sent_at: NOW,
+        },
+      });
+    });
+
+    it('un webhook duplicado no deja dos avisos ni loguea error', async () => {
+      prisma.appointment.findUnique.mockResolvedValue(PAGADO);
+      prisma.notification.create.mockRejectedValue({ code: 'P2002' });
+
+      await expect(
+        service.notifyPatientPaymentApproved(APPOINTMENT_ID, NOW),
+      ).resolves.toBeUndefined();
+      expect(logError).not.toHaveBeenCalled();
+    });
+
+    it('nunca tira: si la base falla, lo loguea y sigue', async () => {
+      prisma.appointment.findUnique.mockRejectedValue(new Error('db caída'));
+
+      await expect(
+        service.notifyPatientPaymentApproved(APPOINTMENT_ID, NOW),
+      ).resolves.toBeUndefined();
+      expect(logError).toHaveBeenCalled();
+    });
+  });
+
   describe('listMine', () => {
     it('devuelve los avisos in-app propios con su texto y el contador de no leídos', async () => {
       prisma.notification.findMany.mockResolvedValue([

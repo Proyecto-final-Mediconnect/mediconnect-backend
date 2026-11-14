@@ -72,7 +72,10 @@ describe('PaymentWebhookService', () => {
   };
   let mercadopago: { getPayment: jest.Mock };
   let notifications: { sendConfirmation: jest.Mock };
-  let inApp: { notifyProfessional: jest.Mock };
+  let inApp: {
+    notifyProfessional: jest.Mock;
+    notifyPatientPaymentApproved: jest.Mock;
+  };
   let refunds: { refundUnappliedPayment: jest.Mock };
   let service: PaymentWebhookService;
 
@@ -100,7 +103,10 @@ describe('PaymentWebhookService', () => {
     notifications = {
       sendConfirmation: jest.fn().mockResolvedValue(undefined),
     };
-    inApp = { notifyProfessional: jest.fn().mockResolvedValue(undefined) };
+    inApp = {
+      notifyProfessional: jest.fn().mockResolvedValue(undefined),
+      notifyPatientPaymentApproved: jest.fn().mockResolvedValue(undefined),
+    };
     refunds = {
       refundUnappliedPayment: jest.fn().mockResolvedValue('PROCESADO'),
     };
@@ -191,6 +197,7 @@ describe('PaymentWebhookService', () => {
     // Y no se le confirma por mail un turno que no se confirmó.
     expect(notifications.sendConfirmation).not.toHaveBeenCalled();
     expect(inApp.notifyProfessional).not.toHaveBeenCalled();
+    expect(inApp.notifyPatientPaymentApproved).not.toHaveBeenCalled();
   });
 
   describe('pagos que no se aplican a un turno (ENG-144)', () => {
@@ -335,6 +342,15 @@ describe('PaymentWebhookService', () => {
     );
   });
 
+  it('al confirmar el turno le avisa in-app al paciente que se acreditó (ENG-199)', async () => {
+    await service.handle(signed(), SECRET, NOW);
+
+    expect(inApp.notifyPatientPaymentApproved).toHaveBeenCalledWith(
+      APPOINTMENT_ID,
+      NOW,
+    );
+  });
+
   it('al confirmar el turno manda el email de confirmación (ENG-68)', async () => {
     await service.handle(signed(), SECRET, NOW);
 
@@ -360,6 +376,7 @@ describe('PaymentWebhookService', () => {
     );
     expect(notifications.sendConfirmation).not.toHaveBeenCalled();
     expect(inApp.notifyProfessional).not.toHaveBeenCalled();
+    expect(inApp.notifyPatientPaymentApproved).not.toHaveBeenCalled();
   });
 
   it('monto menor al del turno: no confirma', async () => {
