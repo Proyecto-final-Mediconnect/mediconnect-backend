@@ -141,6 +141,68 @@ describe('EarningsService', () => {
     ).rejects.toThrow('posterior');
   });
 
+  describe('filtros', () => {
+    beforeEach(() => {
+      prisma.payment.findMany.mockResolvedValue([
+        pago('t1', '18000.00'),
+        pago('t2', '9500.00', [{ amount: '9500.00', status: 'PROCESADO' }], {
+          first_name: 'Marina',
+          last_name: 'Quiroga',
+        }),
+        pago('t3', '42000.00', [], {
+          first_name: 'Ernesto',
+          last_name: 'Núñez',
+        }),
+      ]);
+    });
+
+    it('filtra por estado y los totales salen de las filas filtradas', async () => {
+      const vista = await service.list(PRO, { estado: 'REEMBOLSADO' }, NOW);
+
+      expect(vista.rows.map((r) => r.appointmentId)).toEqual(['t2']);
+      expect(vista.totals).toMatchObject({ cobrado: 9500, neto: 0, turnos: 1 });
+    });
+
+    it('busca por paciente sin importar mayúsculas ni tildes', async () => {
+      const vista = await service.list(PRO, { paciente: 'nunez' }, NOW);
+
+      expect(vista.rows.map((r) => r.patient)).toEqual(['Ernesto Núñez']);
+    });
+
+    it('la lista de pacientes es la del período entero, ordenada', async () => {
+      const vista = await service.list(PRO, { paciente: 'nunez' }, NOW);
+
+      expect(vista.pacientes).toEqual([
+        'Ernesto Núñez',
+        'Julián Sosa',
+        'Marina Quiroga',
+      ]);
+    });
+
+    it('ordena de la más vieja a la más nueva o por mayor neto', async () => {
+      const antiguos = await service.list(PRO, { orden: 'ANTIGUOS' }, NOW);
+      const monto = await service.list(PRO, { orden: 'MAYOR_MONTO' }, NOW);
+
+      expect(antiguos.rows.map((r) => r.appointmentId)).toEqual([
+        't3',
+        't2',
+        't1',
+      ]);
+      expect(monto.rows.map((r) => r.appointmentId)).toEqual([
+        't3',
+        't1',
+        't2',
+      ]);
+    });
+
+    it('el CSV respeta los mismos filtros', async () => {
+      const { csv } = await service.exportCsv(PRO, { paciente: 'marina' }, NOW);
+
+      expect(csv.trim().split('\r\n')).toHaveLength(2);
+      expect(csv).toContain('Marina Quiroga');
+    });
+  });
+
   describe('CSV', () => {
     it('tiene las mismas filas que la tabla, con ; y coma decimal para Excel', async () => {
       prisma.payment.findMany.mockResolvedValue([
