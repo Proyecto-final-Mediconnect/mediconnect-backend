@@ -650,6 +650,43 @@ describe('AppointmentPaymentService', () => {
       });
     });
 
+    it('con el pago acreditado devuelve el comprobante (ENG-199)', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        status: 'APROBADO',
+        confirmed_at: new Date('2026-10-01T14:59:00Z'),
+        amount: '9500.00',
+        currency: 'ARS',
+        method: 'account_money',
+        mercadopago_payment_id: '189539998660',
+      });
+
+      await expect(
+        service.readStatus('jwt', PATIENT, APPOINTMENT),
+      ).resolves.toMatchObject({
+        receipt: {
+          amount: 9500,
+          currency: 'ARS',
+          method: 'account_money',
+          operationId: '189539998660',
+        },
+      });
+    });
+
+    it('sin acreditar no hay comprobante', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        status: 'PENDIENTE',
+        confirmed_at: null,
+        amount: '9500.00',
+        currency: 'ARS',
+        method: null,
+        mercadopago_payment_id: null,
+      });
+
+      await expect(
+        service.readStatus('jwt', PATIENT, APPOINTMENT),
+      ).resolves.toMatchObject({ receipt: null });
+    });
+
     it('el profesional no puede consultarlo', async () => {
       await expect(
         service.readStatus('jwt', PROFESSIONAL, APPOINTMENT),

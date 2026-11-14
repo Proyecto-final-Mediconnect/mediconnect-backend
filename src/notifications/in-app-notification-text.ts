@@ -44,6 +44,14 @@ export function renderInAppNotification(
             title: 'Pago confirmado',
             body: 'Se acreditó el pago y tu turno quedó confirmado.',
           };
+    case 'PAGO_ACREDITADO': {
+      // ENG-199: el aviso al paciente. El monto es opcional por si falta el pago.
+      const amount = formatAmount(p.amount, text(p.currency));
+      return {
+        title: 'Pago acreditado',
+        body: `Se acreditó tu pago${amount ? ` de ${amount}` : ''}. Tu turno${professional ? ` con ${professional}` : ''}${when ? ` del ${when}` : ''} está confirmado.`,
+      };
+    }
     case 'TURNO_CANCELADO':
       return {
         title: 'Turno cancelado',
@@ -134,6 +142,15 @@ function formatWhen(iso?: string): string | undefined {
   const instant = new Date(iso);
   if (Number.isNaN(instant.getTime())) return undefined;
   return `${SHORT_DATE.format(instant)} a las ${toLocalDateTime(instant).startTime}`;
+}
+
+/** `$ 9.500` en pesos; otra moneda va con su código. Nada si no es un número. */
+function formatAmount(value: unknown, currency = 'ARS'): string | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const number = new Intl.NumberFormat('es-AR', {
+    maximumFractionDigits: 2,
+  }).format(value);
+  return currency === 'ARS' ? `$ ${number}` : `${currency} ${number}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
