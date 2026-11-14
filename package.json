@@ -49,6 +49,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "cookie-parser": "^1.4.7",
+    "exceljs": "4.4.0",
     "helmet": "^8.3.0",
     "jose": "^6.2.3",
     "prisma": "^6.19.3",
@@ -109,7 +110,9 @@
       "@nestjs/platform-express>multer": "^2.5.0",
       "express>proxy-addr": "^2.0.8",
       "express>body-parser": "^2.4.0",
-      "@prisma/config>deepmerge-ts": "^8.0.0"
+      "@prisma/config>deepmerge-ts": "^8.0.0",
+      "brace-expansion@<1.1.21": "^1.1.21",
+      "brace-expansion@>=2.0.0 <2.1.7": "^2.1.7"
     }
   }
 }

@@ -9,6 +9,7 @@ import {
   Query,
   Req,
   Res,
+  StreamableFile,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -16,14 +17,17 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { XLSX_CONTENT_TYPE } from '../common/excel/excel';
 import { requireAuth } from '../common/http/require-auth';
 import { CancellationPolicyService } from './cancellation-policy.service';
 import { EarningsQueryDto } from './dto/earnings-query.dto';
 import { StatsQueryDto } from './dto/stats-query.dto';
+import { MyPatientsQueryDto } from './dto/my-patients-query.dto';
 import { UpdateCancellationPolicyDto } from './dto/update-cancellation-policy.dto';
 import { EarningsService } from './earnings.service';
 import { UpdateProfessionalProfileDto } from './dto/update-professional-profile.dto';
 import { ProfessionalStatsService } from './professional-stats.service';
+import { MyPatientsService } from './my-patients.service';
 import { ProfessionalsService } from './professionals.service';
 
 /**
@@ -52,6 +56,7 @@ export class ProfessionalsController {
     private readonly cancellationPolicy: CancellationPolicyService,
     private readonly earnings: EarningsService,
     private readonly stats: ProfessionalStatsService,
+    private readonly myPatients: MyPatientsService,
   ) {}
 
   /**
@@ -89,6 +94,31 @@ export class ProfessionalsController {
   getMyStats(@Req() req: Request, @Query() query: StatsQueryDto) {
     const { userId } = requireAuth(req);
     return this.stats.get(userId, query);
+  }
+
+  /**
+   * "Mis pacientes" (ENG-197): los pacientes cuya historia clínica el
+   * profesional puede abrir, con su última consulta y su próximo turno. Solo
+   * los propios: el id sale del JWT.
+   */
+  @Get('me/patients')
+  getMyPatients(@Req() req: Request, @Query() query: MyPatientsQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.myPatients.list(userId, query);
+  }
+
+  /** Los mismos pacientes que la tabla (filtros y orden incluidos), en Excel. */
+  @Get('me/patients/export')
+  async exportMyPatients(
+    @Req() req: Request,
+    @Query() query: MyPatientsQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { userId } = requireAuth(req);
+    const { filename, xlsx } = await this.myPatients.exportXlsx(userId, query);
+    res.setHeader('Content-Type', XLSX_CONTENT_TYPE);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return new StreamableFile(xlsx);
   }
 
   @Get('me')
