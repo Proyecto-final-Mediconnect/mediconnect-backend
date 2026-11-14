@@ -36,6 +36,9 @@ const COLOR = {
   blanco: 'FFFFFFFF',
 } as const;
 
+/** Una sola familia en todo el libro: sin esto, cada visor elige la suya. */
+const FUENTE = 'Calibri';
+
 const NUM_FMT: Record<ExcelFormat, string | undefined> = {
   texto: undefined,
   fecha: 'dd/mm/yyyy',
@@ -85,17 +88,26 @@ export async function buildXlsx<T>(report: ExcelReport<T>): Promise<Buffer> {
   const ultimaColumna = report.columns.length;
 
   const titulo = hoja.addRow([report.title]);
-  titulo.font = { size: 16, bold: true, color: { argb: COLOR.titulo } };
+  titulo.font = {
+    name: FUENTE,
+    size: 16,
+    bold: true,
+    color: { argb: COLOR.titulo },
+  };
   titulo.height = 24;
   for (const linea of report.details ?? []) {
-    hoja.addRow([linea]).font = { size: 10, color: { argb: COLOR.gris } };
+    hoja.addRow([linea]).font = {
+      name: FUENTE,
+      size: 10,
+      color: { argb: COLOR.gris },
+    };
   }
   hoja.addRow([]);
 
   const encabezado = hoja.addRow(report.columns.map((c) => c.header));
   encabezado.height = 22;
   encabezado.eachCell((celda, i) => {
-    celda.font = { bold: true, color: { argb: COLOR.blanco } };
+    celda.font = { name: FUENTE, bold: true, color: { argb: COLOR.blanco } };
     celda.fill = {
       type: 'pattern',
       pattern: 'solid',
@@ -104,19 +116,23 @@ export async function buildXlsx<T>(report: ExcelReport<T>): Promise<Buffer> {
     celda.alignment = {
       vertical: 'middle',
       horizontal: alineacion(report.columns[i - 1].format),
+      indent: 1,
     };
   });
   const filaEncabezado = encabezado.number;
 
   report.rows.forEach((row, n) => {
     const fila = hoja.addRow(report.columns.map((c) => c.value(row)));
+    fila.height = 18;
     fila.eachCell({ includeEmpty: true }, (celda, i) => {
       const columna = report.columns[i - 1];
       const formato = NUM_FMT[columna.format ?? 'texto'];
       if (formato) celda.numFmt = formato;
+      celda.font = { name: FUENTE, size: 11 };
       celda.alignment = {
         vertical: 'middle',
         horizontal: alineacion(columna.format),
+        indent: 1,
       };
       celda.border = {
         bottom: { style: 'thin', color: { argb: COLOR.linea } },
