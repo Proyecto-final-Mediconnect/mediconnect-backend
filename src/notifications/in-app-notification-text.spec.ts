@@ -42,6 +42,23 @@ describe('renderInAppNotification', () => {
     });
   });
 
+  it('pago acreditado al paciente: monto, profesional y fecha (ENG-199)', () => {
+    expect(
+      renderInAppNotification('PAGO_ACREDITADO', {
+        professional: 'Ana García',
+        scheduledAt: SCHEDULED,
+        amount: 9500,
+        currency: 'ARS',
+      }),
+    ).toEqual({
+      title: 'Pago acreditado',
+      body: 'Se acreditó tu pago de $ 9.500. Tu turno con Ana García del viernes, 23 de octubre a las 10:30 está confirmado.',
+    });
+    expect(renderInAppNotification('PAGO_ACREDITADO', {}).body).toBe(
+      'Se acreditó tu pago. Tu turno está confirmado.',
+    );
+  });
+
   it('turno cancelado: dice que el horario quedó libre', () => {
     expect(
       renderInAppNotification('TURNO_CANCELADO', {

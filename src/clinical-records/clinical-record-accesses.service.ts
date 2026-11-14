@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { Prisma } from '../../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
 
 /** Cuántos accesos por página. Mismo tamaño que el historial del MediPass. */
@@ -48,6 +49,25 @@ export interface ClinicalRecordAccessPage {
  * orden, así que ese tope es barato; se mantiene `pagina` (como el historial
  * del MediPass) en vez de pasar a cursor.
  */
+/**
+ * Qué cuenta como un acceso a la HC del paciente: las lecturas de
+ * profesionales, no las del propio paciente. Lo comparten este historial y el
+ * resumen del paciente (ENG-198), para que los dos cuenten lo mismo.
+ */
+export function professionalReadsOf(
+  patientId: string,
+): Prisma.AuditLogWhereInput {
+  return {
+    action: 'CLINICAL_RECORD_READ',
+    resource_type: 'clinical_record_entries',
+    resource_id: patientId,
+    NOT: { actor_id: patientId },
+    // `recordAccess` escribe `metadata.role`; filtrarlo no depende sólo de
+    // que el actor sea distinto del paciente.
+    metadata: { path: ['role'], equals: 'PROFESIONAL' },
+  };
+}
+
 @Injectable()
 export class ClinicalRecordAccessesService {
   constructor(private readonly prisma: PrismaService) {}
@@ -57,15 +77,7 @@ export class ClinicalRecordAccessesService {
     pagina: number,
   ): Promise<ClinicalRecordAccessPage> {
     const rows = await this.prisma.auditLog.findMany({
-      where: {
-        action: 'CLINICAL_RECORD_READ',
-        resource_type: 'clinical_record_entries',
-        resource_id: patientId,
-        NOT: { actor_id: patientId },
-        // `recordAccess` escribe `metadata.role`; filtrarlo no depende sólo de
-        // que el actor sea distinto del paciente.
-        metadata: { path: ['role'], equals: 'PROFESIONAL' },
-      },
+      where: professionalReadsOf(patientId),
       // `id` desempata filas con el mismo `created_at`: sin él, la paginación
       // por offset puede repetir u omitir accesos entre páginas.
       orderBy: [{ created_at: 'desc' }, { id: 'desc' }],

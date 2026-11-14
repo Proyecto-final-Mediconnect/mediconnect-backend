@@ -343,6 +343,17 @@ export class AppointmentPaymentService {
     appointmentStatus: string;
     /** Cuándo se acreditó, para la historia del turno; `null` si no se acreditó. */
     confirmedAt: string | null;
+    /**
+     * El comprobante, para la confirmación y el detalle (ENG-199): lo cobrado,
+     * el medio que informó MercadoPago (`account_money`, `credit_card`…) y el
+     * número de operación. `null` hasta que el pago se acredita.
+     */
+    receipt: {
+      amount: number;
+      currency: string;
+      method: string | null;
+      operationId: string | null;
+    } | null;
   }> {
     const appointment = await this.readAppointment(accessToken, appointmentId);
 
@@ -352,7 +363,14 @@ export class AppointmentPaymentService {
 
     const payment = await this.prisma.payment.findUnique({
       where: { appointment_id: appointment.id },
-      select: { status: true, confirmed_at: true },
+      select: {
+        status: true,
+        confirmed_at: true,
+        amount: true,
+        currency: true,
+        method: true,
+        mercadopago_payment_id: true,
+      },
     });
 
     return {
@@ -362,6 +380,17 @@ export class AppointmentPaymentService {
       status: payment?.status ?? 'SIN_INICIAR',
       appointmentStatus: appointment.status,
       confirmedAt: payment?.confirmed_at?.toISOString() ?? null,
+      // Un reembolsado también se cobró: el comprobante sigue siendo válido.
+      receipt:
+        payment &&
+        (payment.status === 'APROBADO' || payment.status === 'REEMBOLSADO')
+          ? {
+              amount: Number(payment.amount),
+              currency: payment.currency,
+              method: payment.method,
+              operationId: payment.mercadopago_payment_id,
+            }
+          : null,
     };
   }
 

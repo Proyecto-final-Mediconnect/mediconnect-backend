@@ -93,6 +93,7 @@ enum notification_type {
   TURNO_REPROGRAMADO
   MEDIPASS_ACCESO
   RESENA_PEDIDA
+  PAGO_ACREDITADO
 }
 
 enum notification_channel {
