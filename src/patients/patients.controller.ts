@@ -3,14 +3,17 @@ import {
   Controller,
   Get,
   Put,
+  Query,
   Req,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PeriodQueryDto } from '../common/time/period.dto';
 import { UpdatePatientProfileDto } from './dto/update-patient-profile.dto';
 import { UpdateVitalInfoDto } from './dto/update-vital-info.dto';
+import { PatientSummaryService } from './patient-summary.service';
 import { PatientsService } from './patients.service';
 
 /** JwtAuthGuard garantiza `user` y `accessToken`; este helper lo hace explícito
@@ -25,7 +28,20 @@ function requireAuth(req: Request): { userId: string; accessToken: string } {
 @Controller('patients')
 @UseGuards(JwtAuthGuard)
 export class PatientsController {
-  constructor(private readonly patients: PatientsService) {}
+  constructor(
+    private readonly patients: PatientsService,
+    private readonly summaries: PatientSummaryService,
+  ) {}
+
+  /**
+   * El resumen del inicio (ENG-198): consultas, pagos y accesos a su
+   * información del período. Sin `from`/`to`, los últimos 30 días.
+   */
+  @Get('me/summary')
+  getMySummary(@Req() req: Request, @Query() query: PeriodQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.summaries.summary(userId, query);
+  }
 
   @Get('me')
   getMyProfile(@Req() req: Request) {
