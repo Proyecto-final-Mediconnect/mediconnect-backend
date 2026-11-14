@@ -429,6 +429,11 @@ export class PaymentWebhookService {
         'PAGO_CONFIRMADO',
         now,
       );
+      // ENG-199: el paciente también se entera, no solo por la pantalla.
+      await this.inApp.notifyPatientPaymentApproved(
+        payment.appointment_id,
+        now,
+      );
     }
     return outcome;
   }

@@ -210,6 +210,28 @@ describe('MercadoPagoService', () => {
       expect(bodyOf().auto_return).toBe('approved');
     });
 
+    it('sin auto_return si vuelve a una web http:// (localhost), que MercadoPago rechaza', async () => {
+      await createPreference({
+        backUrls: {
+          success: 'http://localhost:5173/turnos/1/pago?resultado=exito',
+          failure: 'http://localhost:5173/turnos/1/pago?resultado=fallo',
+          pending: 'http://localhost:5173/turnos/1/pago?resultado=pendiente',
+        },
+      });
+      expect(bodyOf()).not.toHaveProperty('auto_return');
+    });
+
+    it('con la vuelta a la app (mediconnect://) mantiene auto_return', async () => {
+      await createPreference({
+        backUrls: {
+          success: 'mediconnect://pago/1?resultado=exito',
+          failure: 'mediconnect://pago/1?resultado=fallo',
+          pending: 'mediconnect://pago/1?resultado=pendiente',
+        },
+      });
+      expect(bodyOf().auto_return).toBe('approved');
+    });
+
     it('manda la clave de idempotencia cuando se le pasa', async () => {
       await createPreference({ idempotencyKey: `turno-${APPOINTMENT_ID}` });
       expect(headersOf()['X-Idempotency-Key']).toBe(`turno-${APPOINTMENT_ID}`);
