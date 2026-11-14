@@ -6,6 +6,7 @@ import {
   Patch,
   Post,
   Put,
+  Query,
   Req,
   UploadedFile,
   UseGuards,
@@ -16,8 +17,10 @@ import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { CancellationPolicyService } from './cancellation-policy.service';
+import { StatsQueryDto } from './dto/stats-query.dto';
 import { UpdateCancellationPolicyDto } from './dto/update-cancellation-policy.dto';
 import { UpdateProfessionalProfileDto } from './dto/update-professional-profile.dto';
+import { ProfessionalStatsService } from './professional-stats.service';
 import { ProfessionalsService } from './professionals.service';
 
 /**
@@ -44,7 +47,20 @@ export class ProfessionalsController {
   constructor(
     private readonly professionals: ProfessionalsService,
     private readonly cancellationPolicy: CancellationPolicyService,
+    private readonly stats: ProfessionalStatsService,
   ) {}
+
+  /**
+   * "Mi actividad" (ENG-196): turnos por cómo terminaron, tasas de cancelación
+   * y ausentismo, consultas por mes, pacientes y reseñas del período. Sin
+   * `from`/`to`, los últimos tres meses. Solo los propios: el id sale del JWT,
+   * y un paciente recibe 403.
+   */
+  @Get('me/stats')
+  getMyStats(@Req() req: Request, @Query() query: StatsQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.stats.get(userId, query);
+  }
 
   @Get('me')
   getMyProfile(@Req() req: Request) {
