@@ -4,6 +4,7 @@ import {
   todayInArgentina,
   toLocalDateTime,
 } from '../common/time/argentina-time';
+import { buildXlsx, excelDate } from '../common/excel/excel';
 import { PrismaService } from '../prisma/prisma.service';
 
 /** Filas por página de la tabla. */
@@ -28,6 +29,10 @@ export interface MyPatientRow {
   patientId: string;
   firstName: string;
   lastName: string;
+  /** Edad en años cumplidos, en Argentina. `null` si no cargó la fecha de nacimiento. */
+  age: number | null;
+  /** La primera consulta COMPLETADA con este profesional: "paciente desde". */
+  firstConsultation: AppointmentMoment | null;
   /** El último turno COMPLETADO con este profesional. */
   lastConsultation: AppointmentMoment | null;
   /** El próximo turno CONFIRMADO o RESERVADO_SIN_PAGAR que todavía no pasó. */
@@ -36,11 +41,41 @@ export interface MyPatientRow {
   consultations: number;
 }
 
+/** Columna por la que se ordena la tabla. */
+export type MyPatientsOrder =
+  | 'ULTIMA_CONSULTA'
+  | 'PROXIMO_TURNO'
+  | 'CONSULTAS'
+  | 'PACIENTE_DESDE'
+  | 'NOMBRE';
+
+/** Si tiene o no un turno por delante. */
+export type NextFilter = 'CON_PROXIMO' | 'SIN_PROXIMO';
+
+/**
+ * Cuándo fue la última consulta. `MAS_DE_6M` sirve para encontrar a quien hace
+ * tiempo no viene; `NUNCA`, a quien reservó pero todavía no se atendió.
+ */
+export type LastFilter = '30D' | '90D' | 'MAS_DE_6M' | 'NUNCA';
+
 export interface MyPatientsQuery {
   /** Parte del nombre o del apellido, sin importar mayúsculas ni tildes. */
   q?: string;
   pagina?: number;
+  orden?: MyPatientsOrder;
+  dir?: 'asc' | 'desc';
+  proximo?: NextFilter;
+  ultima?: LastFilter;
 }
+
+/** Sentido por defecto de cada columna: lo que primero interesa ver. */
+export const DEFAULT_DIR: Record<MyPatientsOrder, 'asc' | 'desc'> = {
+  ULTIMA_CONSULTA: 'desc',
+  PROXIMO_TURNO: 'asc',
+  CONSULTAS: 'desc',
+  PACIENTE_DESDE: 'asc',
+  NOMBRE: 'asc',
+};
 
 export interface MyPatientsView {
   rows: MyPatientRow[];
@@ -74,6 +109,14 @@ export interface MyPatientsView {
  * ninguna consulta van al final, ordenados por su próximo turno: el que viene
  * antes, primero.
  *
+ * ## Ordenar y filtrar
+ *
+ * Cualquier columna de fechas o cantidades ordena en los dos sentidos; las
+ * fechas vacías (nunca vino, sin próximo turno) van siempre al final, sea cual
+ * sea el sentido, para que no tapen a los que sí tienen dato. Los filtros por
+ * próximo turno y por antigüedad de la última consulta se suman a la búsqueda,
+ * y la exportación a Excel respeta todo: baja lo que se ve, ordenado igual.
+ *
  * ## Búsqueda
  *
  * Se filtra en memoria comparando sin mayúsculas ni tildes: "julian" encuentra
@@ -91,7 +134,7 @@ export class MyPatientsService {
     query: MyPatientsQuery,
     now: Date = new Date(),
   ): Promise<MyPatientsView> {
-    const rows = filterPatients(await this.load(professionalId, now), query.q);
+    const rows = applyQuery(await this.load(professionalId, now), query, now);
     const pagina = query.pagina ?? 1;
     const desde = (pagina - 1) * MY_PATIENTS_PAGE_SIZE;
 
@@ -103,16 +146,24 @@ export class MyPatientsService {
     };
   }
 
-  /** Las mismas filas que la tabla, todas, en CSV para Excel. */
-  async exportCsv(
+  /** Las mismas filas que la tabla (filtros y orden incluidos), en Excel. */
+  async exportXlsx(
     professionalId: string,
-    query: Pick<MyPatientsQuery, 'q'>,
+    query: Omit<MyPatientsQuery, 'pagina'>,
     now: Date = new Date(),
-  ): Promise<{ filename: string; csv: string }> {
-    const rows = filterPatients(await this.load(professionalId, now), query.q);
+  ): Promise<{ filename: string; xlsx: Buffer }> {
+    const rows = applyQuery(await this.load(professionalId, now), query, now);
+    const pro = await this.prisma.professional.findUnique({
+      where: { profile_id: professionalId },
+      select: { first_name: true, last_name: true },
+    });
     return {
-      filename: `mis-pacientes-${todayInArgentina(now)}.csv`,
-      csv: toCsv(rows),
+      filename: `mis-pacientes-${todayInArgentina(now)}.xlsx`,
+      xlsx: await toXlsx(rows, {
+        profesional: pro ? `${pro.first_name} ${pro.last_name}`.trim() : '',
+        filtros: describeQuery(query),
+        now,
+      }),
     };
   }
 
@@ -137,14 +188,17 @@ export class MyPatientsService {
         patient_id: true,
         scheduled_at: true,
         status: true,
-        patient: { select: { first_name: true, last_name: true } },
+        patient: {
+          select: { first_name: true, last_name: true, birth_date: true },
+        },
       },
     });
 
     const porPaciente = new Map<
       string,
-      MyPatientRow & { last?: Date; next?: Date }
+      MyPatientRow & { first?: Date; last?: Date; next?: Date }
     >();
+    const hoy = todayInArgentina(now);
     for (const a of appointments) {
       let fila = porPaciente.get(a.patient_id);
       if (!fila) {
@@ -152,6 +206,8 @@ export class MyPatientsService {
           patientId: a.patient_id,
           firstName: a.patient.first_name.trim(),
           lastName: a.patient.last_name.trim(),
+          age: ageOn(a.patient.birth_date, hoy),
+          firstConsultation: null,
           lastConsultation: null,
           nextAppointment: null,
           consultations: 0,
@@ -162,6 +218,8 @@ export class MyPatientsService {
         fila.consultations += 1;
         if (!fila.last || a.scheduled_at > fila.last)
           fila.last = a.scheduled_at;
+        if (!fila.first || a.scheduled_at < fila.first)
+          fila.first = a.scheduled_at;
       } else if (
         (UPCOMING_STATUSES as readonly string[]).includes(a.status) &&
         a.scheduled_at > now &&
@@ -178,8 +236,9 @@ export class MyPatientsService {
           compareAsc(a.next, b.next) ||
           fullName(a).localeCompare(fullName(b), 'es'),
       )
-      .map(({ last, next, ...fila }) => ({
+      .map(({ first, last, next, ...fila }) => ({
         ...fila,
+        firstConsultation: first ? momentOf(first) : null,
         lastConsultation: last ? momentOf(last) : null,
         nextAppointment: next ? momentOf(next) : null,
       }));
@@ -224,31 +283,162 @@ export function filterPatients(
   });
 }
 
-/**
- * CSV para el Excel en español: `;` como separador, CRLF, y BOM UTF-8 para que
- * abra bien los acentos. Las mismas columnas que la tabla, con las fechas en
- * Argentina.
- */
-export function toCsv(rows: MyPatientRow[]): string {
-  const celda = (valor: string) =>
-    /[";\r\n]/.test(valor) ? `"${valor.replace(/"/g, '""')}"` : valor;
-  const momento = (m: AppointmentMoment | null) =>
-    m ? `${m.date} ${m.startTime}` : '';
-  const encabezado = [
-    'Paciente',
-    'Última consulta',
-    'Próximo turno',
-    'Consultas',
-  ];
-  const lineas = rows.map((r) =>
-    [
-      fullName(r),
-      momento(r.lastConsultation),
-      momento(r.nextAppointment),
-      String(r.consultations),
-    ]
-      .map(celda)
-      .join(';'),
+/** Años cumplidos a `hoy` (`YYYY-MM-DD`, Argentina). */
+export function ageOn(birth: Date | null, hoy: string): number | null {
+  if (!birth) return null;
+  const nac = birth.toISOString().slice(0, 10);
+  const [y, m, d] = hoy.split('-').map(Number);
+  const [ny, nm, nd] = nac.split('-').map(Number);
+  return y - ny - (m < nm || (m === nm && d < nd) ? 1 : 0);
+}
+
+const DIAS = 86_400_000;
+
+/** Búsqueda, filtros y orden, en ese orden. */
+export function applyQuery(
+  rows: MyPatientRow[],
+  query: Omit<MyPatientsQuery, 'pagina'>,
+  now: Date = new Date(),
+): MyPatientRow[] {
+  const desde = (dias: number) => now.getTime() - dias * DIAS;
+  const filtradas = filterPatients(rows, query.q).filter((r) => {
+    if (query.proximo === 'CON_PROXIMO' && !r.nextAppointment) return false;
+    if (query.proximo === 'SIN_PROXIMO' && r.nextAppointment) return false;
+    const ultima = r.lastConsultation
+      ? Date.parse(r.lastConsultation.at)
+      : null;
+    switch (query.ultima) {
+      case '30D':
+        return ultima !== null && ultima >= desde(30);
+      case '90D':
+        return ultima !== null && ultima >= desde(90);
+      case 'MAS_DE_6M':
+        return ultima !== null && ultima < desde(182);
+      case 'NUNCA':
+        return ultima === null;
+      default:
+        return true;
+    }
+  });
+  if (!query.orden) return filtradas;
+  return sortPatients(filtradas, query.orden, query.dir);
+}
+
+export function sortPatients(
+  rows: MyPatientRow[],
+  orden: MyPatientsOrder,
+  dir: 'asc' | 'desc' = DEFAULT_DIR[orden],
+): MyPatientRow[] {
+  const signo = dir === 'asc' ? 1 : -1;
+  const fecha = (m: AppointmentMoment | null) => (m ? Date.parse(m.at) : null);
+  const clave = (r: MyPatientRow): number | string | null => {
+    switch (orden) {
+      case 'ULTIMA_CONSULTA':
+        return fecha(r.lastConsultation);
+      case 'PROXIMO_TURNO':
+        return fecha(r.nextAppointment);
+      case 'PACIENTE_DESDE':
+        return fecha(r.firstConsultation);
+      case 'CONSULTAS':
+        return r.consultations;
+      case 'NOMBRE':
+        return normalizar(`${r.lastName} ${r.firstName}`);
+    }
+  };
+  return [...rows].sort((a, b) => {
+    const ka = clave(a);
+    const kb = clave(b);
+    // Sin dato, siempre al final: no importa el sentido.
+    if (ka === null || kb === null) {
+      if (ka === kb) return fullName(a).localeCompare(fullName(b), 'es');
+      return ka === null ? 1 : -1;
+    }
+    const cmp =
+      typeof ka === 'string'
+        ? ka.localeCompare(kb as string, 'es')
+        : ka - (kb as number);
+    return cmp * signo || fullName(a).localeCompare(fullName(b), 'es');
+  });
+}
+
+const ETIQUETAS_ORDEN: Record<MyPatientsOrder, string> = {
+  ULTIMA_CONSULTA: 'última consulta',
+  PROXIMO_TURNO: 'próximo turno',
+  CONSULTAS: 'consultas',
+  PACIENTE_DESDE: 'paciente desde',
+  NOMBRE: 'apellido',
+};
+
+/** Los filtros aplicados, en palabras, para el encabezado del Excel. */
+export function describeQuery(query: Omit<MyPatientsQuery, 'pagina'>): string {
+  const partes: string[] = [];
+  if (query.q?.trim()) partes.push(`búsqueda «${query.q.trim()}»`);
+  if (query.proximo === 'CON_PROXIMO') partes.push('con próximo turno');
+  if (query.proximo === 'SIN_PROXIMO') partes.push('sin próximo turno');
+  const ultima: Record<LastFilter, string> = {
+    '30D': 'última consulta en los últimos 30 días',
+    '90D': 'última consulta en los últimos 3 meses',
+    MAS_DE_6M: 'última consulta hace más de 6 meses',
+    NUNCA: 'todavía sin consultas',
+  };
+  if (query.ultima) partes.push(ultima[query.ultima]);
+  const orden = query.orden ?? 'ULTIMA_CONSULTA';
+  const dir = query.dir ?? DEFAULT_DIR[orden];
+  partes.push(
+    `ordenado por ${ETIQUETAS_ORDEN[orden]} (${dir === 'asc' ? 'ascendente' : 'descendente'})`,
   );
-  return '﻿' + [encabezado.join(';'), ...lineas].join('\r\n') + '\r\n';
+  return partes.join(' · ');
+}
+
+/**
+ * La tabla en Excel: las mismas columnas que la pantalla, con las fechas como
+ * fechas de verdad (se ordenan y filtran en Excel) y en hora de Argentina.
+ */
+export function toXlsx(
+  rows: MyPatientRow[],
+  meta: { profesional: string; filtros: string; now: Date },
+): Promise<Buffer> {
+  const fecha = (m: AppointmentMoment | null) =>
+    m ? excelDate(m.date, m.startTime) : null;
+  const { date, startTime } = toLocalDateTime(meta.now);
+  const [y, mo, d] = date.split('-');
+  return buildXlsx({
+    sheet: 'Mis pacientes',
+    title: 'Mis pacientes',
+    details: [
+      [meta.profesional, `Generado el ${d}/${mo}/${y} a las ${startTime}`]
+        .filter(Boolean)
+        .join(' · '),
+      `${rows.length} ${rows.length === 1 ? 'paciente' : 'pacientes'} · ${meta.filtros}`,
+    ],
+    columns: [
+      { header: 'Paciente', width: 28, value: (r) => fullName(r) },
+      { header: 'Edad', width: 8, format: 'entero', value: (r) => r.age },
+      {
+        header: 'Paciente desde',
+        width: 18,
+        format: 'fecha',
+        value: (r) => fecha(r.firstConsultation),
+      },
+      {
+        header: 'Última consulta',
+        width: 20,
+        format: 'fechaHora',
+        value: (r) => fecha(r.lastConsultation),
+      },
+      {
+        header: 'Próximo turno',
+        width: 20,
+        format: 'fechaHora',
+        value: (r) => fecha(r.nextAppointment),
+      },
+      {
+        header: 'Consultas',
+        width: 12,
+        format: 'entero',
+        value: (r) => r.consultations,
+      },
+    ],
+    rows,
+  });
 }

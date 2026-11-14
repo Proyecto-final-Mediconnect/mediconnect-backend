@@ -1,9 +1,10 @@
 import { ForbiddenException } from '@nestjs/common';
+import ExcelJS from 'exceljs';
 import type { PrismaService } from '../prisma/prisma.service';
 import {
+  ageOn,
   MY_PATIENTS_PAGE_SIZE,
   MyPatientsService,
-  toCsv,
 } from './my-patients.service';
 
 const PRO = '22222222-2222-4222-8222-222222222222';
@@ -60,6 +61,12 @@ describe('MyPatientsService', () => {
       patientId: JULIAN,
       firstName: 'Julián',
       lastName: 'Sosa',
+      age: null,
+      firstConsultation: {
+        at: '2026-10-01T13:00:00.000Z',
+        date: '2026-10-01',
+        startTime: '10:00',
+      },
       lastConsultation: {
         at: '2026-11-12T13:00:00.000Z',
         date: '2026-11-12',
@@ -169,45 +176,126 @@ describe('MyPatientsService', () => {
     await expect(service.list(PRO, {}, NOW)).rejects.toBeInstanceOf(
       ForbiddenException,
     );
-    await expect(service.exportCsv(PRO, {}, NOW)).rejects.toBeInstanceOf(
+    await expect(service.exportXlsx(PRO, {}, NOW)).rejects.toBeInstanceOf(
       ForbiddenException,
     );
     expect(prisma.appointment.findMany).not.toHaveBeenCalled();
   });
 
-  it('exporta las mismas columnas que la tabla, filtradas por q', async () => {
+  describe('ordenar y filtrar', () => {
+    const CAMILA = { first_name: 'Camila', last_name: 'Aguirre' };
+    const CAMI = '55555555-5555-4555-8555-555555555555';
+    beforeEach(() => {
+      prisma.appointment.findMany.mockResolvedValue([
+        // Julián: 2 consultas, la última hace 2 días, con próximo turno.
+        turno(JULIAN, '2026-11-01T13:00:00.000Z', 'COMPLETADO'),
+        turno(JULIAN, '2026-11-12T13:00:00.000Z', 'COMPLETADO'),
+        turno(JULIAN, '2026-11-20T14:00:00.000Z', 'CONFIRMADO'),
+        // Ana: 1 consulta hace 8 meses, sin próximo turno.
+        turno(ANA, '2026-03-10T13:00:00.000Z', 'COMPLETADO', ANA_PEREZ),
+        // Camila: todavía no vino, tiene turno.
+        turno(CAMI, '2026-11-18T13:00:00.000Z', 'CONFIRMADO', CAMILA),
+      ]);
+    });
+    const nombres = (v: { rows: { firstName: string }[] }) =>
+      v.rows.map((r) => r.firstName);
+
+    it('ordena por consultas en los dos sentidos', async () => {
+      const desc = await service.list(PRO, { orden: 'CONSULTAS' }, NOW);
+      const asc = await service.list(
+        PRO,
+        { orden: 'CONSULTAS', dir: 'asc' },
+        NOW,
+      );
+
+      expect(nombres(desc)).toEqual(['Julián', 'Ana', 'Camila']);
+      expect(nombres(asc)).toEqual(['Camila', 'Ana', 'Julián']);
+    });
+
+    it('sin dato va al final en cualquier sentido', async () => {
+      const asc = await service.list(
+        PRO,
+        { orden: 'PROXIMO_TURNO', dir: 'asc' },
+        NOW,
+      );
+      const desc = await service.list(
+        PRO,
+        { orden: 'PROXIMO_TURNO', dir: 'desc' },
+        NOW,
+      );
+
+      expect(nombres(asc)).toEqual(['Camila', 'Julián', 'Ana']);
+      expect(nombres(desc)).toEqual(['Julián', 'Camila', 'Ana']);
+    });
+
+    it('ordena por apellido', async () => {
+      const vista = await service.list(PRO, { orden: 'NOMBRE' }, NOW);
+      expect(nombres(vista)).toEqual(['Camila', 'Ana', 'Julián']);
+    });
+
+    it('filtra por próximo turno y por antigüedad de la última consulta', async () => {
+      const sinProximo = await service.list(
+        PRO,
+        { proximo: 'SIN_PROXIMO' },
+        NOW,
+      );
+      const recientes = await service.list(PRO, { ultima: '30D' }, NOW);
+      const hace6m = await service.list(PRO, { ultima: 'MAS_DE_6M' }, NOW);
+      const nunca = await service.list(PRO, { ultima: 'NUNCA' }, NOW);
+
+      expect(nombres(sinProximo)).toEqual(['Ana']);
+      expect(nombres(recientes)).toEqual(['Julián']);
+      expect(nombres(hace6m)).toEqual(['Ana']);
+      expect(nombres(nunca)).toEqual(['Camila']);
+    });
+  });
+
+  it('calcula la edad en años cumplidos, en Argentina', () => {
+    expect(ageOn(new Date('1994-03-18'), '2026-11-14')).toBe(32);
+    expect(ageOn(new Date('1994-11-15'), '2026-11-14')).toBe(31);
+    expect(ageOn(null, '2026-11-14')).toBeNull();
+  });
+
+  it('exporta a Excel lo que se ve: mismas columnas, filtros y fechas de Argentina', async () => {
+    prisma.professional.findUnique.mockResolvedValue({
+      profile_id: PRO,
+      first_name: 'Ana',
+      last_name: 'García',
+    });
     prisma.appointment.findMany.mockResolvedValue([
       turno(JULIAN, '2026-11-12T13:00:00.000Z', 'COMPLETADO'),
       turno(JULIAN, '2026-11-20T14:00:00.000Z', 'CONFIRMADO'),
       turno(ANA, '2026-11-11T13:00:00.000Z', 'COMPLETADO', ANA_PEREZ),
     ]);
 
-    const { filename, csv } = await service.exportCsv(
+    const { filename, xlsx } = await service.exportXlsx(
       PRO,
       { q: 'julián' },
       NOW,
     );
 
-    expect(filename).toBe('mis-pacientes-2026-11-14.csv');
-    expect(csv).toBe(
-      '﻿' +
-        'Paciente;Última consulta;Próximo turno;Consultas\r\n' +
-        'Julián Sosa;2026-11-12 10:00;2026-11-20 11:00;1\r\n',
-    );
-  });
-
-  it('el CSV escapa celdas con ; o comillas y deja vacío lo que no hay', () => {
-    const csv = toCsv([
-      {
-        patientId: JULIAN,
-        firstName: 'Ana "Anita"',
-        lastName: 'Pérez; Gómez',
-        lastConsultation: null,
-        nextAppointment: null,
-        consultations: 0,
-      },
+    expect(filename).toBe('mis-pacientes-2026-11-14.xlsx');
+    const libro = new ExcelJS.Workbook();
+    await libro.xlsx.load(xlsx as unknown as ArrayBuffer);
+    const hoja = libro.getWorksheet('Mis pacientes')!;
+    const filas = hoja.getSheetValues().filter(Boolean) as unknown[][];
+    expect(filas[0][1]).toBe('Mis pacientes');
+    expect(String(filas[1][1])).toContain('Ana García');
+    expect(String(filas[2][1])).toContain('búsqueda «julián»');
+    const encabezado = filas.findIndex((f) => f[1] === 'Paciente');
+    expect(filas[encabezado].slice(1)).toEqual([
+      'Paciente',
+      'Edad',
+      'Paciente desde',
+      'Última consulta',
+      'Próximo turno',
+      'Consultas',
     ]);
-
-    expect(csv.split('\r\n')[1]).toBe('"Ana ""Anita"" Pérez; Gómez";;;0');
+    const julian = filas[encabezado + 1];
+    expect(julian[1]).toBe('Julián Sosa');
+    // 10:00 en Argentina: la celda guarda la hora local, no la UTC.
+    expect((julian[4] as Date).toISOString()).toBe('2026-11-12T10:00:00.000Z');
+    expect(julian[6]).toBe(1);
+    expect(filas).toHaveLength(encabezado + 2);
   });
 });

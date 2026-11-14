@@ -9,6 +9,7 @@ import {
   Query,
   Req,
   Res,
+  StreamableFile,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -16,6 +17,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { XLSX_CONTENT_TYPE } from '../common/excel/excel';
 import { requireAuth } from '../common/http/require-auth';
 import { CancellationPolicyService } from './cancellation-policy.service';
 import { MyPatientsQueryDto } from './dto/my-patients-query.dto';
@@ -62,18 +64,18 @@ export class ProfessionalsController {
     return this.myPatients.list(userId, query);
   }
 
-  /** Los mismos pacientes que la tabla, todos, en CSV para Excel. */
+  /** Los mismos pacientes que la tabla (filtros y orden incluidos), en Excel. */
   @Get('me/patients/export')
   async exportMyPatients(
     @Req() req: Request,
     @Query() query: MyPatientsQueryDto,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<string> {
+  ): Promise<StreamableFile> {
     const { userId } = requireAuth(req);
-    const { filename, csv } = await this.myPatients.exportCsv(userId, query);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    const { filename, xlsx } = await this.myPatients.exportXlsx(userId, query);
+    res.setHeader('Content-Type', XLSX_CONTENT_TYPE);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return csv;
+    return new StreamableFile(xlsx);
   }
 
   @Get('me')
