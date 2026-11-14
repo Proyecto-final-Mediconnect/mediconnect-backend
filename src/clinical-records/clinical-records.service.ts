@@ -198,7 +198,7 @@ const ATTENDED_STATUSES = [
  * habilita. La asimetría no deja a nadie encerrado, porque `assertCanReadFor`
  * admite además a quien firmó alguna entrada de esa historia.
  */
-const READABLE_APPOINTMENT_STATUSES = [
+export const READABLE_APPOINTMENT_STATUSES = [
   'RESERVADO_SIN_PAGAR',
   'CONFIRMADO',
   'COMPLETADO',

@@ -6,18 +6,22 @@ import {
   Patch,
   Post,
   Put,
+  Query,
   Req,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { CancellationPolicyService } from './cancellation-policy.service';
+import { MyPatientsQueryDto } from './dto/my-patients-query.dto';
 import { UpdateCancellationPolicyDto } from './dto/update-cancellation-policy.dto';
 import { UpdateProfessionalProfileDto } from './dto/update-professional-profile.dto';
+import { MyPatientsService } from './my-patients.service';
 import { ProfessionalsService } from './professionals.service';
 
 /**
@@ -44,7 +48,33 @@ export class ProfessionalsController {
   constructor(
     private readonly professionals: ProfessionalsService,
     private readonly cancellationPolicy: CancellationPolicyService,
+    private readonly myPatients: MyPatientsService,
   ) {}
+
+  /**
+   * "Mis pacientes" (ENG-197): los pacientes cuya historia clínica el
+   * profesional puede abrir, con su última consulta y su próximo turno. Solo
+   * los propios: el id sale del JWT.
+   */
+  @Get('me/patients')
+  getMyPatients(@Req() req: Request, @Query() query: MyPatientsQueryDto) {
+    const { userId } = requireAuth(req);
+    return this.myPatients.list(userId, query);
+  }
+
+  /** Los mismos pacientes que la tabla, todos, en CSV para Excel. */
+  @Get('me/patients/export')
+  async exportMyPatients(
+    @Req() req: Request,
+    @Query() query: MyPatientsQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<string> {
+    const { userId } = requireAuth(req);
+    const { filename, csv } = await this.myPatients.exportCsv(userId, query);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return csv;
+  }
 
   @Get('me')
   getMyProfile(@Req() req: Request) {
