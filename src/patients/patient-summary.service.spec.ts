@@ -4,6 +4,14 @@ import { PatientSummaryService } from './patient-summary.service';
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
 const NOW = new Date('2026-11-20T15:00:00.000Z');
+const pasado = {
+  status: 'COMPLETADO',
+  scheduled_at: new Date('2026-11-10T15:00:00.000Z'),
+};
+const futuro = {
+  status: 'CONFIRMADO',
+  scheduled_at: new Date('2026-11-25T15:00:00.000Z'),
+};
 
 /** ENG-198 — el resumen del inicio del paciente. */
 describe('PatientSummaryService', () => {
@@ -36,9 +44,13 @@ describe('PatientSummaryService', () => {
       { professional_id: 'lucia' },
     ]);
     prisma.payment.findMany.mockResolvedValue([
-      { amount: '18000.00', refunds: [] },
-      { amount: '18000.00', refunds: [{ amount: '9000.00' }] },
-      { amount: '9500.50', refunds: [] },
+      { amount: '18000.00', appointment: pasado, refunds: [] },
+      {
+        amount: '18000.00',
+        appointment: { status: 'CANCELADO', scheduled_at: NOW },
+        refunds: [{ amount: '9000.00' }],
+      },
+      { amount: '9500.50', appointment: futuro, refunds: [] },
     ]);
 
     const resumen = await service.summary(PATIENT, {}, NOW);
@@ -48,6 +60,8 @@ describe('PatientSummaryService', () => {
       pagado: 45500.5,
       reembolsado: 9000,
       neto: 36500.5,
+      turnos: 3,
+      porVenir: 1,
     });
   });
 
@@ -109,7 +123,7 @@ describe('PatientSummaryService', () => {
       to: '2026-11-20',
       currency: 'ARS',
       consultas: { realizadas: 0, profesionales: 0 },
-      pagos: { pagado: 0, reembolsado: 0, neto: 0 },
+      pagos: { pagado: 0, reembolsado: 0, neto: 0, turnos: 0, porVenir: 0 },
       accesos: { medipass: 0, historiaClinica: 0, total: 0 },
     });
   });

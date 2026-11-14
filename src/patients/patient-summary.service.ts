@@ -9,7 +9,18 @@ export interface PatientSummary {
   to: string;
   currency: string;
   consultas: { realizadas: number; profesionales: number };
-  pagos: { pagado: number; reembolsado: number; neto: number };
+  /**
+   * `turnos`: cuántos turnos pagó en el período. `porVenir`: cuántos de esos
+   * todavía no pasaron. Se paga al reservar, así que lo pagado incluye turnos
+   * futuros que todavía no son consultas realizadas.
+   */
+  pagos: {
+    pagado: number;
+    reembolsado: number;
+    neto: number;
+    turnos: number;
+    porVenir: number;
+  };
   accesos: { medipass: number; historiaClinica: number; total: number };
 }
 
@@ -24,7 +35,9 @@ export const SUMMARY_DEFAULT_DAYS = 30;
  *   cuántos profesionales distintos.
  * - **Pagos**: el mismo criterio que "Mis cobros" del profesional (ENG-194),
  *   del otro lado: pagos acreditados en el período, menos los reembolsos ya
- *   procesados de esos pagos.
+ *   procesados de esos pagos. Se paga al reservar, así que incluye turnos que
+ *   todavía no pasaron: por eso se informan aparte (`porVenir`), para que no
+ *   parezca que no cierra con las consultas realizadas.
  * - **Accesos**: sesiones del MediPass abiertas en el período y lecturas de la
  *   HC por profesionales, con el mismo filtro que el historial de accesos
  *   (`professionalReadsOf`): sus propias lecturas no cuentan.
@@ -71,6 +84,7 @@ export class PatientSummaryService {
         },
         select: {
           amount: true,
+          appointment: { select: { status: true, scheduled_at: true } },
           refunds: { where: { status: 'PROCESADO' }, select: { amount: true } },
         },
       }),
@@ -102,6 +116,12 @@ export class PatientSummaryService {
         pagado: pagado / 100,
         reembolsado: reembolsado / 100,
         neto: (pagado - reembolsado) / 100,
+        turnos: pagos.length,
+        porVenir: pagos.filter(
+          (p) =>
+            p.appointment.status === 'CONFIRMADO' &&
+            p.appointment.scheduled_at > now,
+        ).length,
       },
       accesos: { medipass, historiaClinica, total: medipass + historiaClinica },
     };
