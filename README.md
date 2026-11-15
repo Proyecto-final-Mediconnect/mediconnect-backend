@@ -157,6 +157,11 @@ es qué significa "manual", y eso es lo que documenta esta sección.
 > reseñas se publican en el acto, con el filtro de lenguaje de ENG-107 como única
 > barrera. Si en algún momento el volumen lo pide, la moderación entra como historia
 > propia y con su release asignado — no como un agregado de este procedimiento.
+>
+> **Bajar una reseña abusiva.** No hay endpoint para eso: soporte lo hace a mano por
+> SQL (`UPDATE reviews SET status = 'RECHAZADA', moderation_reason = '<motivo>',
+> moderated_at = now() WHERE id = '<id>';`). Las reseñas `RECHAZADA` no se muestran
+> ni cuentan para el rating.
 
 #### Quién valida
 

@@ -303,6 +303,20 @@ describe('ReviewsService', () => {
       expect(prisma.review.create).not.toHaveBeenCalled();
     });
 
+    it.each([
+      'Llamame al 11 5555-1234 y te cuento',
+      'Escribime a paciente@mail.com',
+      'Mirá https://spam.example.com',
+    ])(
+      'un comentario con datos de contacto ("%s") no se guarda: se pide reformularlo',
+      async (comment) => {
+        await expect(
+          service.create(PATIENT, TURNO, { rating: 3, comment }),
+        ).rejects.toBeInstanceOf(UnprocessableEntityException);
+        expect(prisma.review.create).not.toHaveBeenCalled();
+      },
+    );
+
     it('una crítica dura sin insultos se publica como cualquier otra', async () => {
       await service.create(PATIENT, TURNO, {
         rating: 1,

@@ -123,6 +123,13 @@ export class ReviewsService {
         'Tu comentario tiene palabras que no podemos publicar. Reformulalo sin insultos: las críticas son bienvenidas.',
       );
     }
+    // Sin moderación humana, la reseña es pública al crearse: no puede llevar
+    // teléfonos, mails ni links (datos de contacto, PII de terceros, spam).
+    if (dto.comment && containsContactInfo(dto.comment)) {
+      throw new UnprocessableEntityException(
+        'Tu comentario no puede incluir links, mails ni teléfonos. Reformulalo, por favor.',
+      );
+    }
 
     try {
       const row = await this.prisma.review.create({
