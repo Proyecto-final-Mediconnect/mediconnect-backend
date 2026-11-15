@@ -17,7 +17,6 @@ import { SupabaseService } from './../src/supabase/supabase.service';
 const ISSUER = 'https://project-ref.supabase.co/auth/v1';
 const PATIENT = '11111111-1111-4111-8111-111111111111';
 const PRO = '22222222-2222-4222-8222-222222222222';
-const MOD = '33333333-3333-4333-8333-333333333333';
 const TURNO = '44444444-4444-4444-8444-444444444444';
 const RESENA = '55555555-5555-4555-8555-555555555555';
 const CREATED = new Date('2026-11-01T15:00:00.000Z');
@@ -33,9 +32,7 @@ describe('Reseñas (e2e)', () => {
       create: jest.Mock;
       findMany: jest.Mock;
       groupBy: jest.Mock;
-      updateMany: jest.Mock;
       findUnique: jest.Mock;
-      findUniqueOrThrow: jest.Mock;
     };
     profile: { findUnique: jest.Mock };
     reviewResponse: {
@@ -45,7 +42,6 @@ describe('Reseñas (e2e)', () => {
       findFirst: jest.Mock;
     };
     auditLog: { create: jest.Mock };
-    notification: { create: jest.Mock };
     $transaction: jest.Mock;
   };
 
@@ -72,34 +68,16 @@ describe('Reseñas (e2e)', () => {
           professional_id: PRO,
           rating: 5,
           comment: null,
-          status: 'PENDIENTE_MODERACION',
+          status: 'APROBADA',
           moderation_reason: null,
           created_at: CREATED,
         }),
         findMany: jest.fn().mockResolvedValue([]),
         groupBy: jest.fn().mockResolvedValue([]),
-        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         findUnique: jest.fn().mockResolvedValue({ id: RESENA }),
-        findUniqueOrThrow: jest.fn().mockResolvedValue({
-          id: RESENA,
-          rating: 2,
-          comment: 'x',
-          status: 'RECHAZADA',
-          created_at: CREATED,
-          moderation_reason: 'Insultos',
-          moderated_at: CREATED,
-          patient: { first_name: 'Marina', last_name: 'López' },
-          professional: {
-            profile_id: PRO,
-            first_name: 'Ana',
-            last_name: 'García',
-          },
-          appointment_id: TURNO,
-          patient_id: PATIENT,
-        }),
       },
       profile: {
-        findUnique: jest.fn().mockResolvedValue({ role: 'MODERADOR' }),
+        findUnique: jest.fn().mockResolvedValue({ role: 'PACIENTE' }),
       },
       reviewResponse: {
         upsert: jest.fn().mockResolvedValue({
@@ -112,7 +90,6 @@ describe('Reseñas (e2e)', () => {
         findFirst: jest.fn().mockResolvedValue({ content: 'Gracias.' }),
       },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
-      notification: { create: jest.fn().mockResolvedValue({}) },
       $transaction: jest.fn(),
     };
     // respond() y deleteResponse() corren en una transacción interactiva.
@@ -172,13 +149,13 @@ describe('Reseñas (e2e)', () => {
     expect(prisma.review.create).not.toHaveBeenCalled();
   });
 
-  it('deja una reseña y devuelve 201 pendiente de moderación', async () => {
+  it('deja una reseña y devuelve 201 ya publicada', async () => {
     const res = await request(app.getHttpServer())
       .post(`/appointments/${TURNO}/review`)
       .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
       .send({ rating: 5, comment: '  ' })
       .expect(201);
-    expect(res.body).toMatchObject({ status: 'PENDIENTE_MODERACION' });
+    expect(res.body).toMatchObject({ status: 'APROBADA' });
     // Un comentario en blanco no se guarda como "".
     expect(prisma.review.create.mock.calls[0][0].data.comment).toBeNull();
   });
@@ -234,33 +211,16 @@ describe('Reseñas (e2e)', () => {
     });
   });
 
-  it('rechazar sin motivo da 400 y no toca nada', async () => {
-    await request(app.getHttpServer())
-      .patch(`/moderation/reviews/${RESENA}`)
-      .set('Authorization', `Bearer ${await signToken(MOD)}`)
-      .send({ decision: 'RECHAZADA' })
-      .expect(400);
-    expect(prisma.review.updateMany).not.toHaveBeenCalled();
-  });
-
-  it('rechazar con motivo devuelve la reseña moderada', async () => {
-    const res = await request(app.getHttpServer())
-      .patch(`/moderation/reviews/${RESENA}`)
-      .set('Authorization', `Bearer ${await signToken(MOD)}`)
-      .send({ decision: 'RECHAZADA', reason: 'Insultos' })
-      .expect(200);
-    expect(res.body).toMatchObject({
-      status: 'RECHAZADA',
-      moderationReason: 'Insultos',
-    });
-  });
-
-  it('un paciente no ve la cola de moderación', async () => {
-    prisma.profile.findUnique.mockResolvedValue({ role: 'PACIENTE' });
+  it('la moderación ya no existe: sus rutas dan 404', async () => {
     await request(app.getHttpServer())
       .get('/moderation/reviews')
       .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
-      .expect(403);
+      .expect(404);
+    await request(app.getHttpServer())
+      .patch(`/moderation/reviews/${RESENA}`)
+      .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+      .send({ decision: 'APROBADA' })
+      .expect(404);
   });
 
   it('un comentario con insultos da 422 con un mensaje para reformularlo (ENG-107)', async () => {

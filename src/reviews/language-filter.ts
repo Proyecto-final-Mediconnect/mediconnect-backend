@@ -1,11 +1,10 @@
 /**
  * Filtro automático de lenguaje inapropiado (ENG-107).
  *
- * Corre **antes** de la moderación humana (ENG-81), no en su lugar: lo que pasa
- * el filtro igual lo lee un moderador antes de publicarse. Su trabajo es que el
- * moderador no tenga que leer insultos y que el texto ofensivo no llegue ni a la
- * cola. Se aplica a las reseñas de los pacientes y a las respuestas de los
- * profesionales (ENG-106).
+ * Es la única barrera antes de publicar: no hay moderación humana, y lo que
+ * pasa el filtro se ve en el perfil en el acto. Su trabajo es que el texto
+ * ofensivo no llegue a publicarse. Se aplica a las reseñas de los pacientes y a
+ * las respuestas de los profesionales (ENG-106).
  *
  * ## Qué detecta
  *
@@ -36,13 +35,13 @@
  * "pendejo" es "chico" en el habla y "carajo", una interjección. Se bloquean
  * igual: en rioplatense el uso como insulto es por lejos el más común y el
  * costo del falso positivo es bajo (se pide reformular, con "funda" o
- * "cobertor", y nada se publica sin moderación de todos modos).
+ * "cobertor").
  *
  * ## Qué no detecta
  *
  * Una crítica dura sin insultos ("me atendió tarde y fue maleducado") no es
  * lenguaje inapropiado: es justamente lo que una reseña tiene que poder decir,
- * y queda para el moderador. Tampoco intenta entender ironía ni contexto.
+ * y se publica. Tampoco intenta entender ironía ni contexto.
  */
 
 /**

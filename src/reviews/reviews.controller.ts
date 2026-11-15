@@ -7,7 +7,6 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
-  Patch,
   Post,
   Put,
   Query,
@@ -19,12 +18,8 @@ import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { CreateReviewDto } from './dto/create-review.dto';
-import { ModerateReviewDto } from './dto/moderate-review.dto';
 import { ReviewResponseDto } from './dto/review-response.dto';
-import {
-  ModerationQueryDto,
-  ReviewPageQueryDto,
-} from './dto/review-list-query.dto';
+import { ReviewPageQueryDto } from './dto/review-list-query.dto';
 import { ReviewPromptsService } from './review-prompts.service';
 import { ReviewsService } from './reviews.service';
 
@@ -113,24 +108,6 @@ export class ReviewsController {
   ): Promise<void> {
     const { userId } = requireAuth(req);
     await this.reviews.deleteResponse(userId, reviewId);
-  }
-
-  /** La cola de moderación (ENG-81). Solo para el rol MODERADOR. */
-  @Get('moderation/reviews')
-  listForModeration(@Req() req: Request, @Query() query: ModerationQueryDto) {
-    const { userId } = requireAuth(req);
-    return this.reviews.listForModeration(userId, query.status, query.page);
-  }
-
-  /** Aprobar o rechazar (con motivo) una reseña pendiente. */
-  @Patch('moderation/reviews/:reviewId')
-  moderate(
-    @Req() req: Request,
-    @Param('reviewId', new ParseUUIDPipe({ version: '4' })) reviewId: string,
-    @Body() dto: ModerateReviewDto,
-  ) {
-    const { userId } = requireAuth(req);
-    return this.reviews.moderate(userId, reviewId, dto);
   }
 }
 

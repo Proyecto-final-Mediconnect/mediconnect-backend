@@ -151,19 +151,21 @@ El Sprint 0 (criterios de HU-02) decidió que durante el MVP la validación es
 **manual, hecha por el equipo y no automatizada**. Lo que nunca se había definido
 es qué significa "manual", y eso es lo que documenta esta sección.
 
-> **No hay pantalla de moderación, y es deliberado.** El sistema tiene el rol
-> `MODERADOR` en el enum `user_role`, pero construir la pantalla es alcance nuevo:
-> no está en las 48 historias del backlog y contradice la decisión del Sprint 0 de
-> que en el MVP la validación sea manual. Si en algún momento el volumen lo pide, la
-> pantalla entra como historia propia y con su release asignado — no como un agregado
-> de este procedimiento.
+> **No hay rol moderador en la práctica, y es deliberado.** El enum `user_role`
+> conserva `MODERADOR` (sacarlo es una migración destructiva), pero no hay pantallas
+> ni endpoints que lo usen: la validación de matrículas es manual (Sprint 0) y las
+> reseñas se publican en el acto, con el filtro de lenguaje de ENG-107 como única
+> barrera. Si en algún momento el volumen lo pide, la moderación entra como historia
+> propia y con su release asignado — no como un agregado de este procedimiento.
+>
+> **Bajar una reseña abusiva.** No hay endpoint para eso: soporte lo hace a mano por
+> SQL (`UPDATE reviews SET status = 'RECHAZADA', moderation_reason = '<motivo>',
+> moderated_at = now() WHERE id = '<id>';`). Las reseñas `RECHAZADA` no se muestran
+> ni cuentan para el rating.
 
 #### Quién valida
 
-**Responsable: Juan Cruz García Amadey.** Ocupa operativamente el rol `MODERADOR`,
-que hasta ENG-109 existía en el enum sin que nadie lo ejerciera para validar
-matrículas (la web tiene `/moderacion`, pero es el placeholder de la moderación de
-reseñas de ENG-81, no de esto). Es también el
+**Responsable: Juan Cruz García Amadey.** Es también el
 asignado del ticket que definió este procedimiento; el equipo puede reasignarlo en
 una daily, y si lo hace hay que actualizar este párrafo en el mismo PR.
 

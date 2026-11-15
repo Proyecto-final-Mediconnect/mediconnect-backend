@@ -274,12 +274,6 @@ const PACIENTES: PacienteDemo[] = [
   },
 ];
 
-/** El moderador no se crea: el trigger `handle_new_user` solo sabe hacer
- *  PACIENTE y PROFESIONAL, y otro trigger prohíbe cambiar el rol después. Si la
- *  cuenta ya existe se usa; si no, las reseñas quedan sin moderar, que es un
- *  estado legítimo del modelo. */
-const EMAIL_MODERADOR = `mod.demo${DEMO_DOMAIN}`;
-
 // ---------------------------------------------------------------------------
 // Utilidades
 // ---------------------------------------------------------------------------
@@ -600,8 +594,6 @@ async function main(): Promise<void> {
     );
   }
 
-  const idModerador = indice.get(EMAIL_MODERADOR) ?? null;
-
   console.log('→ Limpiando corridas anteriores…');
   // Las claves de los turnos, en un solo lugar: la limpieza necesita saber
   // cuáles son "los de esta corrida" para distinguirlos de los sobrantes.
@@ -633,7 +625,7 @@ async function main(): Promise<void> {
         consultation_price: p.price,
         currency: 'ARS',
         // Sin VALIDADO no aparece en el catálogo: `GET /catalog/professionals`
-        // filtra por status. En producción esto lo decide un moderador.
+        // filtra por status. En producción lo valida el equipo a mano.
         status: 'VALIDADO',
       },
     });
@@ -1136,8 +1128,6 @@ async function main(): Promise<void> {
       rating: 5,
       comment: 'Muy clara para explicar. Me mandó el resumen escrito después de la consulta y no me quedó ninguna duda de cómo tomar la medicación.',
       status: 'APROBADA',
-      moderator_id: idModerador,
-      moderated_at: idModerador ? enDias(ahora, -5) : null,
     },
   })).id;
 
@@ -1162,9 +1152,8 @@ async function main(): Promise<void> {
       appointment_id: T.pasado3.id,
       rating: 4,
       comment: 'Buena atención, aunque la consulta arrancó unos minutos tarde.',
-      // Pendiente a propósito: es lo que la pantalla de moderación tiene que
-      // tener para mostrar algo cuando se construya (ENG-81).
-      status: 'PENDIENTE_MODERACION',
+      // Las reseñas se publican en el acto: no hay moderación.
+      status: 'APROBADA',
     },
   });
 
@@ -1179,8 +1168,6 @@ async function main(): Promise<void> {
       rating: 5,
       comment: 'Revisó los estudios que le mandé antes del turno, así que aprovechamos toda la consulta.',
       status: 'APROBADA',
-      moderator_id: idModerador,
-      moderated_at: idModerador ? enDias(ahora, -8) : null,
     },
   });
 
@@ -1217,7 +1204,6 @@ async function main(): Promise<void> {
       { id: randomUUID(), user_id: julian, type: 'NUEVO_MENSAJE', channel: 'PUSH', payload: { conversationId: conversacion, from: 'Ana García' }, sent_at: enDias(ahora, -1) },
       { id: randomUUID(), user_id: julian, type: 'PAGO_CONFIRMADO', channel: 'IN_APP', payload: { appointmentId: T.futuro.id, amount: 16000 }, sent_at: enDias(ahora, -2), read_at: enDias(ahora, -2) },
       { id: randomUUID(), user_id: ana, type: 'RECORDATORIO_24H', channel: 'IN_APP', payload: { appointmentId: T.otro1.id, patient: 'Marina Quiroga' }, sent_at: enDias(ahora, -1) },
-      { id: randomUUID(), user_id: marina, type: 'RESENA_MODERADA', channel: 'IN_APP', payload: { professional: 'Ana García', status: 'PENDIENTE_MODERACION' }, sent_at: enDias(ahora, -2) },
     ],
   });
 
@@ -1371,9 +1357,6 @@ async function main(): Promise<void> {
   console.log(`   ${PROFESIONALES.length} profesionales validados · ${PACIENTES.length} pacientes con ficha · ${turnos.length} turnos`);
   const hcNota = cadenaJulian.reutilizada ? ' (ya existía, no se reescribió: es append-only)' : '';
   console.log(`   HC: ${cadenaJulian.largo} + ${cadenaMarina.largo} entradas, cadena verificable${hcNota}`);
-  if (!idModerador) {
-    console.log(`   ⚠️  No existe ${EMAIL_MODERADOR}: las reseñas quedaron sin moderador.`);
-  }
   console.log('');
   console.log('   Cuentas:');
   for (const p of [
