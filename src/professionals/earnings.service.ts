@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
+import { buildXlsx, excelDate } from '../common/excel/excel';
 import { toLocalDateTime } from '../common/time/argentina-time';
 import {
   currentMonth,
@@ -40,7 +41,7 @@ export interface EarningRow {
 /** Orden de la tabla. Por defecto, lo último que se acreditó primero. */
 export type EarningsOrder = 'RECIENTES' | 'ANTIGUOS' | 'MAYOR_MONTO';
 
-/** Filtros de la tabla: recortan las filas, los totales y el CSV por igual. */
+/** Filtros de la tabla: recortan las filas, los totales y el Excel por igual. */
 export interface EarningsFilters {
   estado?: EarningState;
   /** Parte del nombre del paciente, sin importar mayúsculas ni tildes. */
@@ -92,7 +93,7 @@ export interface EarningsView {
  * ## Filtros
  *
  * Estado, paciente y orden se aplican sobre las filas del período, y los
- * totales y el CSV salen de las filas filtradas: "cuánto le cobré a Fulano en
+ * totales y el Excel salen de las filas filtradas: "cuánto le cobré a Fulano en
  * octubre" es una pregunta válida. La lista de pacientes no se filtra, para
  * poder cambiar de uno a otro.
  *
@@ -128,17 +129,28 @@ export class EarningsService {
     };
   }
 
-  /** Las mismas filas que la tabla, todas, en CSV para Excel. */
-  async exportCsv(
+  /** Las mismas filas que la tabla, todas, en un `.xlsx` con los totales. */
+  async exportXlsx(
     professionalId: string,
     query: { from?: string; to?: string } & EarningsFilters,
     now: Date = new Date(),
-  ): Promise<{ filename: string; csv: string }> {
+  ): Promise<{ filename: string; xlsx: Buffer }> {
     const period = resolvePeriod(query.from, query.to, currentMonth(now));
     const { rows } = await this.load(professionalId, period);
+    const pro = await this.prisma.professional.findUnique({
+      where: { profile_id: professionalId },
+      select: { first_name: true, last_name: true },
+    });
     return {
-      filename: `cobros-${period.from}-a-${period.to}.csv`,
-      csv: toCsv(filterRows(rows, query)),
+      filename: `mis-cobros-${period.from}-a-${period.to}.xlsx`,
+      xlsx: await toXlsx(filterRows(rows, query), {
+        profesional: [pro?.first_name, pro?.last_name]
+          .filter(Boolean)
+          .join(' '),
+        periodo: period,
+        filtros: describeFilters(query),
+        now,
+      }),
     };
   }
 
@@ -273,38 +285,106 @@ const ESTADOS: Record<EarningState, string> = {
   REEMBOLSO_PENDIENTE: 'Reembolso pendiente',
 };
 
+const ORDENES: Record<EarningsOrder, string> = {
+  RECIENTES: 'lo último cobrado primero',
+  ANTIGUOS: 'lo más antiguo primero',
+  MAYOR_MONTO: 'mayor neto primero',
+};
+
+/** Los filtros en una línea, para que el Excel diga qué recorte es. */
+export function describeFilters({
+  estado,
+  paciente,
+  orden = 'RECIENTES',
+}: EarningsFilters): string {
+  const partes: string[] = [];
+  if (estado) partes.push(`estado «${ESTADOS[estado]}»`);
+  if (paciente?.trim()) partes.push(`paciente «${paciente.trim()}»`);
+  partes.push(`ordenado por ${ORDENES[orden]}`);
+  return partes.join(' · ');
+}
+
+function fechaAR(date: string): string {
+  const [y, m, d] = date.split('-');
+  return `${d}/${m}/${y}`;
+}
+
 /**
- * CSV para el Excel en español: `;` como separador y coma decimal, que es lo
- * que Excel espera con la configuración regional de Argentina, y BOM UTF-8 para
- * que abra bien los acentos.
+ * La tabla en Excel: las mismas columnas que la pantalla, con fechas y montos
+ * de verdad (se ordenan, filtran y suman en Excel), en hora de Argentina, y
+ * los totales al pie.
  */
-export function toCsv(rows: EarningRow[]): string {
-  const celda = (valor: string) =>
-    /[";\n]/.test(valor) ? `"${valor.replace(/"/g, '""')}"` : valor;
-  const monto = (n: number) => n.toFixed(2).replace('.', ',');
-  const encabezado = [
-    'Fecha del cobro',
-    'Turno',
-    'Paciente',
-    'Cobrado',
-    'Reembolsado',
-    'Neto',
-    'Estado',
-  ];
-  const lineas = rows.map((r) =>
-    [
-      toLocalDateTime(new Date(r.paidAt)).date,
-      `${r.date} ${r.startTime}`,
-      r.patient,
-      monto(r.amount),
-      monto(r.refunded),
-      monto(r.net),
-      r.state === 'REEMBOLSO_PARCIAL'
-        ? `Reembolsado ${r.refundPercent} %`
-        : ESTADOS[r.state],
-    ]
-      .map(celda)
-      .join(';'),
-  );
-  return '﻿' + [encabezado.join(';'), ...lineas].join('\r\n') + '\r\n';
+export function toXlsx(
+  rows: EarningRow[],
+  meta: {
+    profesional: string;
+    periodo: { from: string; to: string };
+    filtros: string;
+    now: Date;
+  },
+): Promise<Buffer> {
+  const generado = toLocalDateTime(meta.now);
+  const totales = totalsOf(rows);
+  return buildXlsx({
+    sheet: 'Mis cobros',
+    title: 'Mis cobros',
+    details: [
+      [
+        meta.profesional,
+        `Generado el ${fechaAR(generado.date)} a las ${generado.startTime}`,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      `Cobros del ${fechaAR(meta.periodo.from)} al ${fechaAR(meta.periodo.to)} · ${meta.filtros}`,
+    ],
+    columns: [
+      {
+        header: 'Fecha del cobro',
+        width: 20,
+        format: 'fechaHora',
+        value: (r) => {
+          const { date, startTime } = toLocalDateTime(new Date(r.paidAt));
+          return excelDate(date, startTime);
+        },
+      },
+      {
+        header: 'Turno',
+        width: 20,
+        format: 'fechaHora',
+        value: (r) => excelDate(r.date, r.startTime),
+      },
+      { header: 'Paciente', width: 28, value: (r) => r.patient },
+      {
+        header: 'Cobrado',
+        width: 16,
+        format: 'moneda',
+        value: (r) => r.amount,
+      },
+      {
+        header: 'Reembolsado',
+        width: 16,
+        format: 'moneda',
+        value: (r) => r.refunded,
+      },
+      { header: 'Neto', width: 16, format: 'moneda', value: (r) => r.net },
+      {
+        header: 'Estado',
+        width: 24,
+        value: (r) =>
+          r.state === 'REEMBOLSO_PARCIAL'
+            ? `Reembolsado ${r.refundPercent} %`
+            : ESTADOS[r.state],
+      },
+    ],
+    rows,
+    totals: [
+      'Total',
+      null,
+      `${totales.turnos} ${totales.turnos === 1 ? 'turno' : 'turnos'}`,
+      totales.cobrado,
+      totales.reembolsado,
+      totales.neto,
+      totales.pendiente > 0 ? 'Hay reembolsos pendientes' : null,
+    ],
+  });
 }
