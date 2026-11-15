@@ -1,7 +1,9 @@
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayUnique,
   IsArray,
+  IsInt,
   IsNumber,
   IsOptional,
   IsString,
@@ -9,7 +11,42 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
+  ValidateNested,
 } from 'class-validator';
+
+/** Recorta un texto; lo que no es string pasa para que lo rechace el validador. */
+const recortar = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value;
+
+/** Cuántos títulos se aceptan. Es un perfil público, no un CV completo. */
+export const MAX_EDUCATION = 10;
+
+/** El año más viejo que se acepta para un título. */
+export const MIN_EDUCATION_YEAR = 1950;
+
+/** Un título del profesional: dónde, qué y, si quiere, en qué año (ENG-48). */
+export class EducationItemDto {
+  @Transform(recortar)
+  @IsString()
+  @MinLength(2, { message: 'Cada título tiene que decir la institución' })
+  @MaxLength(150, { message: 'El nombre de la institución es demasiado largo' })
+  institution!: string;
+
+  @Transform(recortar)
+  @IsString()
+  @MinLength(2, { message: 'Cada título tiene que decir qué estudiaste' })
+  @MaxLength(150, { message: 'El nombre del título es demasiado largo' })
+  degree!: string;
+
+  /** El tope (el año actual) lo valida el service: acá sería fijo al arrancar. */
+  @IsOptional()
+  @IsInt({ message: 'El año tiene que ser un número entero' })
+  @Min(MIN_EDUCATION_YEAR, {
+    message: `El año no puede ser anterior a ${MIN_EDUCATION_YEAR}`,
+  })
+  year?: number | null;
+}
 
 /** Actualización parcial del perfil público del profesional (ENG-48). Todos
  *  los campos son opcionales: el profesional puede completar el perfil por
@@ -47,4 +84,18 @@ export class UpdateProfessionalProfileDto {
     message: 'Cada especialidad debe ser un identificador válido',
   })
   specialtyIds?: string[];
+
+  /**
+   * La formación que se muestra en el perfil público. Igual que las
+   * especialidades, es un **reemplazo completo**: omitirla no la toca, y una
+   * lista vacía la borra.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_EDUCATION, {
+    message: `Se pueden cargar hasta ${MAX_EDUCATION} títulos`,
+  })
+  @ValidateNested({ each: true })
+  @Type(() => EducationItemDto)
+  education?: EducationItemDto[];
 }

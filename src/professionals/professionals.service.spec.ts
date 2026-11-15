@@ -3,6 +3,7 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import type { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ProfessionalsService } from './professionals.service';
 
@@ -83,14 +84,38 @@ function makeClient(
   };
 }
 
-function makeService(results: Array<{ data: unknown; error: unknown }>) {
+/** Prisma solo para la formación (ENG-48): lectura, y el reemplazo en transacción. */
+function makePrisma(education: unknown[] = []) {
+  const prisma = {
+    professionalEducation: {
+      findMany: jest.fn().mockResolvedValue(education),
+      deleteMany: jest.fn().mockReturnValue('delete'),
+      createMany: jest.fn().mockReturnValue('create'),
+    },
+    $transaction: jest.fn().mockResolvedValue([]),
+  };
+  return prisma;
+}
+
+function makeService(
+  results: Array<{ data: unknown; error: unknown }>,
+  prisma = makePrisma(),
+) {
   const calls: RecordedCall[] = [];
   const client = makeClient(results, calls);
   const supabaseMock = {
     getClient: () => client,
     getClientForToken: () => client,
   } as unknown as SupabaseService;
-  return { service: new ProfessionalsService(supabaseMock), calls, client };
+  return {
+    service: new ProfessionalsService(
+      supabaseMock,
+      prisma as unknown as PrismaService,
+    ),
+    calls,
+    client,
+    prisma,
+  };
 }
 
 /** Último payload pasado a `.update(...)`. */
@@ -156,6 +181,101 @@ describe('ProfessionalsService', () => {
       const profile = await service.getMyProfile('token', 'user-1');
 
       expect(profile.photoUrl).toBe('https://cdn/x.png');
+    });
+  });
+
+  describe('formación (ENG-48)', () => {
+    const TITULO = {
+      institution: 'Universidad Nacional de Córdoba',
+      degree: 'Medicina',
+      year: 2015,
+    };
+
+    it('el perfil trae la formación, en el orden del perfil público', async () => {
+      const prisma = makePrisma([TITULO]);
+      const { service } = makeService([{ data: PRO_ROW, error: null }], prisma);
+
+      const profile = await service.getMyProfile('token', 'user-1');
+
+      expect(profile.education).toEqual([TITULO]);
+      expect(prisma.professionalEducation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { professional_id: 'user-1' },
+          orderBy: [
+            { year: { sort: 'desc', nulls: 'last' } },
+            { institution: 'asc' },
+          ],
+        }),
+      );
+    });
+
+    it('reemplaza la formación entera en una sola transacción', async () => {
+      const prisma = makePrisma();
+      const { service } = makeService(
+        [PROFILE_EXISTS, { data: PRO_ROW, error: null }],
+        prisma,
+      );
+
+      await service.updateMyProfile('token', 'user-1', {
+        education: [TITULO, { institution: 'Hospital', degree: 'Residencia' }],
+      });
+
+      expect(prisma.professionalEducation.deleteMany).toHaveBeenCalledWith({
+        where: { professional_id: 'user-1' },
+      });
+      expect(prisma.professionalEducation.createMany).toHaveBeenCalledWith({
+        data: [
+          { professional_id: 'user-1', ...TITULO },
+          {
+            professional_id: 'user-1',
+            institution: 'Hospital',
+            degree: 'Residencia',
+            year: null,
+          },
+        ],
+      });
+      expect(prisma.$transaction).toHaveBeenCalledWith(['delete', 'create']);
+    });
+
+    it('sin el campo no toca la formación', async () => {
+      const prisma = makePrisma();
+      const { service } = makeService(
+        [
+          PROFILE_EXISTS,
+          { data: null, error: null },
+          { data: PRO_ROW, error: null },
+        ],
+        prisma,
+      );
+
+      await service.updateMyProfile('token', 'user-1', { bio: 'Hola' });
+
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('rechaza un título de un año que todavía no llegó, sin escribir nada', async () => {
+      const prisma = makePrisma();
+      const { service, calls } = makeService([PROFILE_EXISTS], prisma);
+      const next = new Date().getFullYear() + 1;
+
+      await expect(
+        service.updateMyProfile('token', 'user-1', {
+          bio: 'Hola',
+          education: [{ ...TITULO, year: next }],
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(calls.some((c) => c.method === 'update')).toBe(false);
+    });
+
+    it('si falla la transacción, dice que no se pudo actualizar la formación', async () => {
+      const prisma = makePrisma();
+      prisma.$transaction.mockRejectedValue(new Error('db'));
+      const { service } = makeService([PROFILE_EXISTS], prisma);
+
+      await expect(
+        service.updateMyProfile('token', 'user-1', { education: [TITULO] }),
+      ).rejects.toThrow(/formación/);
     });
   });
 
