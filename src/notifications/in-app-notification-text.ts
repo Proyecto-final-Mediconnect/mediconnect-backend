@@ -105,7 +105,8 @@ export function renderInAppNotification(
       };
     }
     case 'RESENA_MODERADA': {
-      // ENG-81: el aviso dice qué se decidió y, si se rechazó, por qué.
+      // ENG-81: el aviso dice qué se decidió y, si se rechazó, por qué. Ya no
+      // se generan (no hay moderación), pero quedan los viejos en la bandeja.
       const sobre = professional ? ` sobre ${professional}` : '';
       if (p.decision === 'APROBADA') {
         return {

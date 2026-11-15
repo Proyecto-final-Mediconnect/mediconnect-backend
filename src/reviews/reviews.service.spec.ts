@@ -7,11 +7,11 @@ import {
 import type { PrismaService } from '../prisma/prisma.service';
 import { ReviewsService, shortName } from './reviews.service';
 
-/** ENG-80, ENG-81 y ENG-82: dejar, moderar y mostrar reseñas. */
+/** ENG-80 y ENG-82: dejar reseñas, que se publican en el acto, y mostrarlas. */
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
 const PRO = '22222222-2222-4222-8222-222222222222';
-const MOD = '33333333-3333-4333-8333-333333333333';
+const OTRO_PRO = '33333333-3333-4333-8333-333333333333';
 const TURNO = '44444444-4444-4444-8444-444444444444';
 const RESENA = '55555555-5555-4555-8555-555555555555';
 const CREATED = new Date('2026-11-01T15:00:00.000Z');
@@ -22,23 +22,9 @@ const FILA_PROPIA = {
   professional_id: PRO,
   rating: 5,
   comment: 'Muy clara.',
-  status: 'PENDIENTE_MODERACION' as const,
-  moderation_reason: null,
-  created_at: CREATED,
-};
-
-const FILA_MODERACION = {
-  id: RESENA,
-  rating: 4,
-  comment: 'Buena atención.',
   status: 'APROBADA' as const,
-  created_at: CREATED,
   moderation_reason: null,
-  moderated_at: new Date('2026-11-02T15:00:00.000Z'),
-  patient: { first_name: 'Marina', last_name: 'López' },
-  professional: { profile_id: PRO, first_name: 'Ana', last_name: 'García' },
-  appointment_id: TURNO,
-  patient_id: PATIENT,
+  created_at: CREATED,
 };
 
 describe('ReviewsService', () => {
@@ -49,9 +35,7 @@ describe('ReviewsService', () => {
       create: jest.Mock;
       findMany: jest.Mock;
       groupBy: jest.Mock;
-      updateMany: jest.Mock;
       findUnique: jest.Mock;
-      findUniqueOrThrow: jest.Mock;
     };
     profile: { findUnique: jest.Mock };
     reviewResponse: {
@@ -62,7 +46,6 @@ describe('ReviewsService', () => {
     };
     $transaction: jest.Mock;
     auditLog: { create: jest.Mock };
-    notification: { create: jest.Mock };
   };
 
   beforeEach(() => {
@@ -79,12 +62,10 @@ describe('ReviewsService', () => {
         create: jest.fn().mockResolvedValue(FILA_PROPIA),
         findMany: jest.fn().mockResolvedValue([]),
         groupBy: jest.fn().mockResolvedValue([]),
-        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         findUnique: jest.fn().mockResolvedValue({ id: RESENA }),
-        findUniqueOrThrow: jest.fn().mockResolvedValue(FILA_MODERACION),
       },
       profile: {
-        findUnique: jest.fn().mockResolvedValue({ role: 'MODERADOR' }),
+        findUnique: jest.fn().mockResolvedValue({ role: 'PROFESIONAL' }),
       },
       reviewResponse: {
         upsert: jest.fn().mockResolvedValue({
@@ -98,7 +79,6 @@ describe('ReviewsService', () => {
       },
       $transaction: jest.fn(),
       auditLog: { create: jest.fn().mockResolvedValue({}) },
-      notification: { create: jest.fn().mockResolvedValue({}) },
     };
     prisma.$transaction.mockImplementation((cb: (tx: unknown) => unknown) =>
       cb(prisma),
@@ -107,7 +87,7 @@ describe('ReviewsService', () => {
   });
 
   describe('create (ENG-80)', () => {
-    it('deja la reseña de una consulta propia y terminada, pendiente de moderación', async () => {
+    it('deja la reseña de una consulta propia y terminada, ya publicada', async () => {
       const view = await service.create(PATIENT, TURNO, {
         rating: 5,
         comment: 'Muy clara.',
@@ -121,10 +101,11 @@ describe('ReviewsService', () => {
             appointment_id: TURNO,
             rating: 5,
             comment: 'Muy clara.',
+            status: 'APROBADA',
           },
         }),
       );
-      expect(view).toMatchObject({ status: 'PENDIENTE_MODERACION', rating: 5 });
+      expect(view).toMatchObject({ status: 'APROBADA', rating: 5 });
     });
 
     it('un turno ajeno da 404, igual que uno inexistente', async () => {
@@ -311,103 +292,8 @@ describe('ReviewsService', () => {
     });
   });
 
-  describe('moderación (ENG-81)', () => {
-    it('solo un moderador ve la cola', async () => {
-      prisma.profile.findUnique.mockResolvedValue({ role: 'PACIENTE' });
-      await expect(
-        service.listForModeration(PATIENT, 'PENDIENTE_MODERACION', 1),
-      ).rejects.toBeInstanceOf(ForbiddenException);
-      expect(prisma.review.findMany).not.toHaveBeenCalled();
-    });
-
-    it('la cola de pendientes arranca por la más vieja', async () => {
-      await service.listForModeration(MOD, 'PENDIENTE_MODERACION', 1);
-      expect(prisma.review.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { status: 'PENDIENTE_MODERACION' },
-          orderBy: [{ created_at: 'asc' }, { id: 'asc' }],
-        }),
-      );
-    });
-
-    it('aprobar escribe la decisión solo si sigue pendiente, la audita y avisa al paciente', async () => {
-      const now = new Date('2026-11-02T15:00:00.000Z');
-      const view = await service.moderate(
-        MOD,
-        RESENA,
-        { decision: 'APROBADA' },
-        now,
-      );
-
-      expect(prisma.review.updateMany).toHaveBeenCalledWith({
-        where: { id: RESENA, status: 'PENDIENTE_MODERACION' },
-        data: {
-          status: 'APROBADA',
-          moderator_id: MOD,
-          moderation_reason: null,
-          moderated_at: now,
-        },
-      });
-      expect(prisma.auditLog.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          actor_id: MOD,
-          action: 'REVIEW_MODERATED',
-          resource_id: RESENA,
-        }),
-      });
-      expect(prisma.notification.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          user_id: PATIENT,
-          type: 'RESENA_MODERADA',
-          payload: {
-            professional: 'Ana García',
-            decision: 'APROBADA',
-            reason: null,
-          },
-        }),
-      });
-      expect(view).toMatchObject({
-        professional: { id: PRO, name: 'Ana García' },
-      });
-    });
-
-    it('una reseña ya moderada da 409', async () => {
-      prisma.review.updateMany.mockResolvedValue({ count: 0 });
-      await expect(
-        service.moderate(MOD, RESENA, {
-          decision: 'RECHAZADA',
-          reason: 'Insultos',
-        }),
-      ).rejects.toBeInstanceOf(ConflictException);
-      expect(prisma.auditLog.create).not.toHaveBeenCalled();
-    });
-
-    it('una reseña inexistente da 404', async () => {
-      prisma.review.updateMany.mockResolvedValue({ count: 0 });
-      prisma.review.findUnique.mockResolvedValue(null);
-      await expect(
-        service.moderate(MOD, RESENA, { decision: 'APROBADA' }),
-      ).rejects.toBeInstanceOf(NotFoundException);
-    });
-
-    it('si el aviso falla, la moderación igual queda hecha', async () => {
-      prisma.notification.create.mockRejectedValue(new Error('db'));
-      await expect(
-        service.moderate(MOD, RESENA, { decision: 'APROBADA' }),
-      ).resolves.toMatchObject({ id: RESENA });
-    });
-
-    it('un paciente no puede moderar', async () => {
-      prisma.profile.findUnique.mockResolvedValue({ role: 'PACIENTE' });
-      await expect(
-        service.moderate(PATIENT, RESENA, { decision: 'APROBADA' }),
-      ).rejects.toBeInstanceOf(ForbiddenException);
-      expect(prisma.review.updateMany).not.toHaveBeenCalled();
-    });
-  });
-
   describe('filtro de lenguaje (ENG-107)', () => {
-    it('un comentario con insultos no se guarda ni llega a la cola: se pide reformularlo', async () => {
+    it('un comentario con insultos no se guarda ni se publica: se pide reformularlo', async () => {
       await expect(
         service.create(PATIENT, TURNO, {
           rating: 1,
@@ -417,7 +303,7 @@ describe('ReviewsService', () => {
       expect(prisma.review.create).not.toHaveBeenCalled();
     });
 
-    it('una crítica dura sin insultos pasa a la moderación como cualquier otra', async () => {
+    it('una crítica dura sin insultos se publica como cualquier otra', async () => {
       await service.create(PATIENT, TURNO, {
         rating: 1,
         comment: 'Llegó tarde y fue maleducado. No lo recomiendo.',
@@ -484,7 +370,7 @@ describe('ReviewsService', () => {
 
     it('una reseña de otro profesional da 404, sin decir que existe', async () => {
       prisma.review.findUnique.mockResolvedValue({
-        professional_id: MOD,
+        professional_id: OTRO_PRO,
         status: 'APROBADA',
       });
 
