@@ -34,6 +34,9 @@ describe('Perfil profesional (e2e)', () => {
 
   /** Cola de respuestas que devuelve el cliente mock, en orden. */
   let results: Array<{ data: unknown; error: unknown }>;
+  /** Lo que devuelve la lectura de la formación, y lo último que se escribió. */
+  let education: unknown[] = [];
+  let savedEducation: unknown[] | null = null;
   /** Payloads pasados a `.update(...)`, para afirmar qué se escribe. */
   let updates: Record<string, unknown>[];
 
@@ -97,6 +100,8 @@ describe('Perfil profesional (e2e)', () => {
   beforeEach(async () => {
     results = [];
     updates = [];
+    education = [];
+    savedEducation = null;
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
@@ -105,6 +110,20 @@ describe('Perfil profesional (e2e)', () => {
       .overrideProvider(PrismaService)
       .useValue({
         profile: { findUnique: jest.fn() },
+        // La formación (ENG-48) va por Prisma.
+        professionalEducation: {
+          findMany: jest
+            .fn()
+            .mockImplementation(() => Promise.resolve(education)),
+          deleteMany: jest.fn().mockReturnValue('delete'),
+          createMany: jest
+            .fn()
+            .mockImplementation((args: { data: unknown[] }) => {
+              savedEducation = args.data;
+              return 'create';
+            }),
+        },
+        $transaction: jest.fn().mockResolvedValue([]),
         ...legalAcceptedPrismaMock(),
       })
       .compile();
@@ -187,6 +206,20 @@ describe('Perfil profesional (e2e)', () => {
           ]);
         });
     });
+
+    it('trae la formación cargada (ENG-48)', async () => {
+      results = [{ data: PRO_ROW, error: null }];
+      education = [{ institution: 'UNC', degree: 'Medicina', year: 2015 }];
+      const token = await signToken();
+
+      await request(app.getHttpServer())
+        .get('/professionals/me')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200)
+        .expect((res) => {
+          expect(res.body.education).toEqual(education);
+        });
+    });
   });
 
   describe('PATCH /professionals/me', () => {
@@ -241,6 +274,98 @@ describe('Perfil profesional (e2e)', () => {
         });
 
       expect(updates.at(-1)).toMatchObject({ consultation_price: null });
+    });
+
+    describe('formación (ENG-48)', () => {
+      it('guarda la lista recortada y la devuelve', async () => {
+        results = [
+          { data: { profile_id: SUB }, error: null }, // sonda de perfil
+          { data: PRO_ROW, error: null }, // relectura
+        ];
+        const token = await signToken();
+
+        await request(app.getHttpServer())
+          .patch('/professionals/me')
+          .set('Authorization', `Bearer ${token}`)
+          .send({
+            education: [
+              {
+                institution: '  Universidad   Nacional de Córdoba ',
+                degree: 'Medicina',
+                year: 2015,
+              },
+              {
+                institution: 'Hospital de Niños',
+                degree: 'Residencia en Pediatría',
+              },
+            ],
+          })
+          .expect(200);
+
+        expect(savedEducation).toEqual([
+          {
+            professional_id: SUB,
+            institution: 'Universidad Nacional de Córdoba',
+            degree: 'Medicina',
+            year: 2015,
+          },
+          {
+            professional_id: SUB,
+            institution: 'Hospital de Niños',
+            degree: 'Residencia en Pediatría',
+            year: null,
+          },
+        ]);
+      });
+
+      it('rechaza un título sin institución', async () => {
+        const token = await signToken();
+
+        await request(app.getHttpServer())
+          .patch('/professionals/me')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ education: [{ institution: ' ', degree: 'Medicina' }] })
+          .expect(400)
+          .expect((res) => {
+            expect(String(res.body.message)).toMatch(/institución/);
+          });
+      });
+
+      it('rechaza más de 10 títulos', async () => {
+        const token = await signToken();
+        const uno = { institution: 'UNC', degree: 'Curso' };
+
+        await request(app.getHttpServer())
+          .patch('/professionals/me')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ education: Array.from({ length: 11 }, () => uno) })
+          .expect(400)
+          .expect((res) => {
+            expect(String(res.body.message)).toMatch(/hasta 10 títulos/);
+          });
+      });
+
+      it('rechaza un año que no es entero o un campo de más', async () => {
+        const token = await signToken();
+
+        await request(app.getHttpServer())
+          .patch('/professionals/me')
+          .set('Authorization', `Bearer ${token}`)
+          .send({
+            education: [
+              { institution: 'UNC', degree: 'Medicina', year: 'dos mil' },
+            ],
+          })
+          .expect(400);
+
+        await request(app.getHttpServer())
+          .patch('/professionals/me')
+          .set('Authorization', `Bearer ${token}`)
+          .send({
+            education: [{ institution: 'UNC', degree: 'Medicina', id: 'x' }],
+          })
+          .expect(400);
+      });
     });
 
     it('un fallo de escritura no dice "no pudimos cargar tu perfil"', async () => {

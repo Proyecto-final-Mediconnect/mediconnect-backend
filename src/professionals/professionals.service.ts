@@ -2,10 +2,15 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
-import { UpdateProfessionalProfileDto } from './dto/update-professional-profile.dto';
+import {
+  EducationItemDto,
+  UpdateProfessionalProfileDto,
+} from './dto/update-professional-profile.dto';
 
 /** Bucket de Supabase Storage donde viven las fotos de perfil de profesionales.
  *  Su creación y políticas RLS se versionan en
@@ -52,6 +57,13 @@ interface ProfessionalRow {
 }
 
 /** Perfil profesional expuesto por la API (camelCase, precio normalizado). */
+/** Un título de la formación, como lo muestra el perfil público. */
+export interface EducationView {
+  institution: string;
+  degree: string;
+  year: number | null;
+}
+
 export interface ProfessionalProfile {
   profileId: string;
   firstName: string;
@@ -63,6 +75,7 @@ export interface ProfessionalProfile {
   currency: string;
   status: string;
   specialties: SpecialtyRow[];
+  education: EducationView[];
 }
 
 const PROFILE_SELECT =
@@ -96,7 +109,12 @@ function withPhotoVersion(photoUrl: string, updatedAt: string): string {
 
 @Injectable()
 export class ProfessionalsService {
-  constructor(private readonly supabase: SupabaseService) {}
+  private readonly logger = new Logger(ProfessionalsService.name);
+
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   /** Catálogo curado de especialidades (público, para el selector del perfil
    *  y el filtro del catálogo — fuente única, ver ENG-48/ENG-89). */
@@ -126,6 +144,12 @@ export class ProfessionalsService {
     return this.readProfile(client, userId);
   }
 
+  /**
+   * Los pasos 1 y 2 (escalares y especialidades) van por Supabase y el 3
+   * (formación) por Prisma, así que no comparten transacción: si la formación
+   * falla, `bio`/especialidades ya quedaron guardadas aunque la respuesta sea 500.
+   * El reintento es idempotente. A futuro, unificar todo en una transacción Prisma.
+   */
   async updateMyProfile(
     accessToken: string,
     userId: string,
@@ -144,6 +168,9 @@ export class ProfessionalsService {
 
     if (dto.specialtyIds) {
       await this.assertSpecialtiesExist(dto.specialtyIds);
+    }
+    if (dto.education) {
+      assertEducationYears(dto.education);
     }
 
     // 1) Campos escalares del perfil (solo los que vengan definidos).
@@ -174,6 +201,12 @@ export class ProfessionalsService {
     //    fallara, el profesional reintenta guardando de nuevo.
     if (dto.specialtyIds) {
       await this.replaceSpecialties(client, userId, dto.specialtyIds);
+    }
+
+    // 3) Formación: reemplazo completo, en una transacción. Si el insert fallara,
+    //    no queda el perfil sin los títulos que tenía.
+    if (dto.education) {
+      await this.replaceEducation(userId, dto.education);
     }
 
     return this.readProfile(client, userId, PROFILE_REREAD_ERROR);
@@ -264,7 +297,10 @@ export class ProfessionalsService {
       throw new NotFoundException('No se encontró tu perfil profesional.');
     }
 
-    return this.toProfile(row);
+    return {
+      ...this.toProfile(row),
+      education: await this.readEducation(userId, onReadError),
+    };
   }
 
   /** Confirma que el usuario tenga perfil profesional antes de escribir. Si la
@@ -313,6 +349,63 @@ export class ProfessionalsService {
     }
   }
 
+  /**
+   * La formación, en el mismo orden que el perfil público: la más reciente
+   * primero y los títulos sin año al final. Va por Prisma y filtrada por el id
+   * del JWT, como el resto de las tablas que solo toca el backend.
+   */
+  private async readEducation(
+    userId: string,
+    onError: string,
+  ): Promise<EducationView[]> {
+    try {
+      return await this.prisma.professionalEducation.findMany({
+        where: { professional_id: userId },
+        select: { institution: true, degree: true, year: true },
+        orderBy: [
+          { year: { sort: 'desc', nulls: 'last' } },
+          { institution: 'asc' },
+        ],
+      });
+    } catch (error) {
+      this.logger.error(
+        `No se pudo leer la formación de ${userId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException(onError);
+    }
+  }
+
+  /** Borra la formación del profesional y escribe la nueva, todo o nada. */
+  private async replaceEducation(
+    userId: string,
+    education: EducationItemDto[],
+  ): Promise<void> {
+    try {
+      await this.prisma.$transaction([
+        this.prisma.professionalEducation.deleteMany({
+          where: { professional_id: userId },
+        }),
+        this.prisma.professionalEducation.createMany({
+          data: education.map((item) => ({
+            professional_id: userId,
+            institution: item.institution,
+            degree: item.degree,
+            year: item.year ?? null,
+          })),
+        }),
+      ]);
+    } catch (error) {
+      this.logger.error(
+        `No se pudo reemplazar la formación de ${userId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw new InternalServerErrorException(
+        'No pudimos actualizar tu formación. Probá de nuevo en unos minutos.',
+      );
+    }
+  }
+
   private async replaceSpecialties(
     client: UserClient,
     userId: string,
@@ -347,7 +440,9 @@ export class ProfessionalsService {
     }
   }
 
-  private toProfile(row: ProfessionalRow): ProfessionalProfile {
+  private toProfile(
+    row: ProfessionalRow,
+  ): Omit<ProfessionalProfile, 'education'> {
     const specialties = (row.professional_specialties ?? [])
       .map((link) => link.specialty)
       .filter((s): s is SpecialtyRow => s !== null);
@@ -367,5 +462,21 @@ export class ProfessionalsService {
       status: row.status,
       specialties,
     };
+  }
+}
+
+/**
+ * Ningún título puede ser de un año que todavía no llegó. Va acá y no en el
+ * DTO porque el decorador fijaría el año en que arrancó el proceso.
+ */
+function assertEducationYears(
+  education: EducationItemDto[],
+  now: Date = new Date(),
+): void {
+  const current = now.getFullYear();
+  if (education.some((item) => item.year != null && item.year > current)) {
+    throw new BadRequestException(
+      `El año de un título no puede ser posterior a ${current}.`,
+    );
   }
 }
