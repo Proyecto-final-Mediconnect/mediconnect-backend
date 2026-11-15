@@ -70,18 +70,18 @@ export class ProfessionalsController {
     return this.earnings.list(userId, query);
   }
 
-  /** Las mismas filas que la tabla, todas, en CSV para Excel. */
+  /** Las mismas filas que la tabla, todas, en Excel con los totales. */
   @Get('me/earnings/export')
   async exportMyEarnings(
     @Req() req: Request,
     @Query() query: EarningsQueryDto,
     @Res({ passthrough: true }) res: Response,
-  ): Promise<string> {
+  ): Promise<StreamableFile> {
     const { userId } = requireAuth(req);
-    const { filename, csv } = await this.earnings.exportCsv(userId, query);
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    const { filename, xlsx } = await this.earnings.exportXlsx(userId, query);
+    res.setHeader('Content-Type', XLSX_CONTENT_TYPE);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return csv;
+    return new StreamableFile(xlsx);
   }
 
   /**

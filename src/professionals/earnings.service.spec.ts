@@ -1,6 +1,19 @@
 import { ForbiddenException } from '@nestjs/common';
+import ExcelJS from 'exceljs';
 import type { PrismaService } from '../prisma/prisma.service';
-import { EARNINGS_PAGE_SIZE, EarningsService, toCsv } from './earnings.service';
+import {
+  describeFilters,
+  EARNINGS_PAGE_SIZE,
+  EarningsService,
+} from './earnings.service';
+
+/** Las filas de la hoja como arrays (índice 1 = columna A), sin las vacías. */
+async function leerHoja(xlsx: Buffer): Promise<unknown[][]> {
+  const libro = new ExcelJS.Workbook();
+  await libro.xlsx.load(xlsx as unknown as ArrayBuffer);
+  const hoja = libro.getWorksheet('Mis cobros')!;
+  return hoja.getSheetValues().filter(Boolean) as unknown[][];
+}
 
 const PRO = '22222222-2222-4222-8222-222222222222';
 const NOW = new Date('2026-11-20T15:00:00.000Z');
@@ -195,16 +208,27 @@ describe('EarningsService', () => {
       ]);
     });
 
-    it('el CSV respeta los mismos filtros', async () => {
-      const { csv } = await service.exportCsv(PRO, { paciente: 'marina' }, NOW);
+    it('el Excel respeta los mismos filtros', async () => {
+      const { xlsx } = await service.exportXlsx(
+        PRO,
+        { paciente: 'marina' },
+        NOW,
+      );
+      const filas = await leerHoja(xlsx);
+      const encabezado = filas.findIndex((f) => f[1] === 'Fecha del cobro');
 
-      expect(csv.trim().split('\r\n')).toHaveLength(2);
-      expect(csv).toContain('Marina Quiroga');
+      expect(String(filas[2][1])).toContain('paciente «marina»');
+      expect(filas[encabezado + 1][3]).toBe('Marina Quiroga');
+      // Una fila de datos y el total.
+      expect(filas).toHaveLength(encabezado + 3);
     });
   });
 
-  describe('CSV', () => {
-    it('tiene las mismas filas que la tabla, con ; y coma decimal para Excel', async () => {
+  describe('Excel', () => {
+    it('tiene las mismas filas que la tabla, con fechas y montos de verdad y los totales al pie', async () => {
+      prisma.professional.findUnique
+        .mockResolvedValueOnce({ currency: 'ARS' })
+        .mockResolvedValueOnce({ first_name: 'Ana', last_name: 'García' });
       prisma.payment.findMany.mockResolvedValue([
         pago('t1', '18000.00', [{ amount: '9000.00', status: 'PROCESADO' }], {
           first_name: 'María José',
@@ -213,35 +237,61 @@ describe('EarningsService', () => {
         pago('t2', '9500.50'),
       ]);
 
-      const { filename, csv } = await service.exportCsv(PRO, {}, NOW);
-      const lineas = csv.replace('﻿', '').trim().split('\r\n');
+      const { filename, xlsx } = await service.exportXlsx(PRO, {}, NOW);
+      const filas = await leerHoja(xlsx);
 
-      expect(filename).toBe('cobros-2026-11-01-a-2026-11-20.csv');
-      expect(csv.startsWith('﻿')).toBe(true);
-      expect(lineas).toEqual([
-        'Fecha del cobro;Turno;Paciente;Cobrado;Reembolsado;Neto;Estado',
-        '2026-11-10;2026-11-12 10:00;María José Núñez;18000,00;9000,00;9000,00;Reembolsado 50 %',
-        '2026-11-10;2026-11-12 10:00;Julián Sosa;9500,50;0,00;9500,50;Cobrado',
+      expect(filename).toBe('mis-cobros-2026-11-01-a-2026-11-20.xlsx');
+      expect(filas[0][1]).toBe('Mis cobros');
+      expect(String(filas[1][1])).toContain('Ana García');
+      expect(String(filas[2][1])).toContain(
+        'Cobros del 01/11/2026 al 20/11/2026',
+      );
+      const encabezado = filas.findIndex((f) => f[1] === 'Fecha del cobro');
+      expect(filas[encabezado].slice(1)).toEqual([
+        'Fecha del cobro',
+        'Turno',
+        'Paciente',
+        'Cobrado',
+        'Reembolsado',
+        'Neto',
+        'Estado',
       ]);
+      const maria = filas[encabezado + 1];
+      // Hora de Argentina: la celda guarda la hora local, no la UTC.
+      expect((maria[1] as Date).toISOString()).toBe('2026-11-10T10:00:00.000Z');
+      expect((maria[2] as Date).toISOString()).toBe('2026-11-12T10:00:00.000Z');
+      expect(maria.slice(3)).toEqual([
+        'María José Núñez',
+        18000,
+        9000,
+        9000,
+        'Reembolsado 50 %',
+      ]);
+      expect(filas[encabezado + 2].slice(3)).toEqual([
+        'Julián Sosa',
+        9500.5,
+        0,
+        9500.5,
+        'Cobrado',
+      ]);
+      const total = filas[filas.length - 1];
+      expect(total[1]).toBe('Total');
+      expect(total.slice(3, 7)).toEqual(['2 turnos', 27500.5, 9000, 18500.5]);
     });
 
-    it('escapa un nombre con ; o comillas', () => {
-      const csv = toCsv([
-        {
-          appointmentId: 't1',
-          paidAt: '2026-11-10T13:00:00.000Z',
-          date: '2026-11-12',
-          startTime: '10:00',
-          patient: 'Ana "Anita"; Pérez',
-          amount: 1,
-          refunded: 0,
-          refundPending: 0,
-          net: 1,
-          state: 'COBRADO',
-          refundPercent: null,
-        },
-      ]);
-      expect(csv).toContain('"Ana ""Anita""; Pérez"');
+    it('describe los filtros en una línea', () => {
+      expect(
+        describeFilters({
+          estado: 'REEMBOLSADO',
+          paciente: ' julián ',
+          orden: 'MAYOR_MONTO',
+        }),
+      ).toBe(
+        'estado «Reembolsado» · paciente «julián» · ordenado por mayor neto primero',
+      );
+      expect(describeFilters({})).toBe(
+        'ordenado por lo último cobrado primero',
+      );
     });
   });
 });

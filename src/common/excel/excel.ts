@@ -24,6 +24,11 @@ export interface ExcelReport<T> {
   details?: string[];
   columns: ExcelColumn<T>[];
   rows: T[];
+  /**
+   * Fila de totales al pie, en negrita, una celda por columna (`null` deja la
+   * celda vacía). Toma el formato de cada columna: un monto sale como moneda.
+   */
+  totals?: (string | number | null)[];
 }
 
 /** Los colores de MediConnect, en ARGB. */
@@ -146,6 +151,29 @@ export async function buildXlsx<T>(report: ExcelReport<T>): Promise<Buffer> {
       }
     });
   });
+
+  if (report.totals) {
+    // La fila vacía la separa del bloque de datos: sin ella, el filtro y el
+    // orden de Excel la tomarían como una fila más.
+    hoja.addRow([]);
+    const pie = hoja.addRow(report.totals);
+    pie.height = 20;
+    pie.eachCell({ includeEmpty: true }, (celda, i) => {
+      const columna = report.columns[i - 1];
+      if (!columna) return;
+      const formato = NUM_FMT[columna.format ?? 'texto'];
+      if (formato) celda.numFmt = formato;
+      celda.font = { name: FUENTE, size: 11, bold: true };
+      celda.alignment = {
+        vertical: 'middle',
+        // "Total" va a la izquierda aunque caiga en una columna de fechas.
+        horizontal:
+          typeof celda.value === 'string' ? 'left' : alineacion(columna.format),
+        indent: 1,
+      };
+      celda.border = { top: { style: 'thin', color: { argb: COLOR.marca } } };
+    });
+  }
 
   hoja.views = [{ state: 'frozen', ySplit: filaEncabezado }];
   hoja.autoFilter = {
