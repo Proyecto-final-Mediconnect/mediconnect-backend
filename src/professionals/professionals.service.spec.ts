@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import type { PrismaService } from '../prisma/prisma.service';
@@ -276,6 +277,24 @@ describe('ProfessionalsService', () => {
       await expect(
         service.updateMyProfile('token', 'user-1', { education: [TITULO] }),
       ).rejects.toThrow(/formación/);
+    });
+
+    it('loguea el error original cuando falla la transacción', async () => {
+      const prisma = makePrisma();
+      prisma.$transaction.mockRejectedValue(new Error('db caída'));
+      const { service } = makeService([PROFILE_EXISTS], prisma);
+      const logSpy = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+
+      await expect(
+        service.updateMyProfile('token', 'user-1', { education: [TITULO] }),
+      ).rejects.toThrow(/formación/);
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('user-1'),
+        expect.stringContaining('db caída'),
+      );
+      logSpy.mockRestore();
     });
   });
 

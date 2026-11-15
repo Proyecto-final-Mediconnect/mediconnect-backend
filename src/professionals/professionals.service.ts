@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
@@ -108,6 +109,8 @@ function withPhotoVersion(photoUrl: string, updatedAt: string): string {
 
 @Injectable()
 export class ProfessionalsService {
+  private readonly logger = new Logger(ProfessionalsService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly prisma: PrismaService,
@@ -141,6 +144,12 @@ export class ProfessionalsService {
     return this.readProfile(client, userId);
   }
 
+  /**
+   * Los pasos 1 y 2 (escalares y especialidades) van por Supabase y el 3
+   * (formación) por Prisma, así que no comparten transacción: si la formación
+   * falla, `bio`/especialidades ya quedaron guardadas aunque la respuesta sea 500.
+   * El reintento es idempotente. A futuro, unificar todo en una transacción Prisma.
+   */
   async updateMyProfile(
     accessToken: string,
     userId: string,
@@ -358,7 +367,11 @@ export class ProfessionalsService {
           { institution: 'asc' },
         ],
       });
-    } catch {
+    } catch (error) {
+      this.logger.error(
+        `No se pudo leer la formación de ${userId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
       throw new InternalServerErrorException(onError);
     }
   }
@@ -382,7 +395,11 @@ export class ProfessionalsService {
           })),
         }),
       ]);
-    } catch {
+    } catch (error) {
+      this.logger.error(
+        `No se pudo reemplazar la formación de ${userId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
       throw new InternalServerErrorException(
         'No pudimos actualizar tu formación. Probá de nuevo en unos minutos.',
       );
