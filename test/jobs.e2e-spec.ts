@@ -39,6 +39,12 @@ describe('Jobs internos (e2e)', () => {
       .useValue({
         ...legalAcceptedPrismaMock(),
         $executeRaw: executeRaw,
+        // Bitácora de corridas (ENG-228).
+        jobRun: {
+          updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+          create: jest.fn().mockResolvedValue({ id: 'run-1' }),
+          update: jest.fn().mockResolvedValue({}),
+        },
         $transaction: (cb: (tx: unknown) => unknown) =>
           cb({ $queryRaw: queryRaw }),
       })
@@ -87,6 +93,11 @@ describe('Jobs internos (e2e)', () => {
       .set('Authorization', `Bearer ${SECRET}`)
       .expect(200);
     expect(res.body).toEqual({ closed: 2 });
+  });
+
+  it('ENG-228: el estado de los jobs también exige el secreto', async () => {
+    await levantar(SECRET);
+    await request(app.getHttpServer()).get('/internal/jobs/status').expect(401);
   });
 
   it('ENG-189: el cierre de turnos también exige el secreto', async () => {

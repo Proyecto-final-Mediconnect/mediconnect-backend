@@ -873,6 +873,28 @@ model IntegrityCheck {
   @@map("integrity_checks")
 }
 
+/// Bitácora de las tareas periódicas (ENG-228): una fila por corrida.
+///
+/// Prueba que los jobs corren a horario, deja registrado el error de una corrida
+/// que falla y evita que dos corridas del mismo job se pisen. El índice único
+/// parcial `job_runs_one_running_per_job` (fuera de Prisma) admite una sola fila
+/// `RUNNING` por job.
+model JobRun {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  job         String
+  /// `RUNNING` · `OK` · `ERROR` (CHECK en la migración).
+  status      String
+  started_at  DateTime  @default(now()) @db.Timestamptz(6)
+  finished_at DateTime? @db.Timestamptz(6)
+  duration_ms Int?
+  /// Lo que devolvió el job (cantidades), nunca datos personales.
+  result      Json?     @db.JsonB
+  error       String?
+
+  @@index([job, started_at(sort: Desc)])
+  @@map("job_runs")
+}
+
 /// Cabeza de la cadena de HC de cada paciente al cierre de la última corrida sana
 /// del job de ENG-85.
 ///

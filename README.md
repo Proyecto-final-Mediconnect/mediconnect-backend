@@ -261,6 +261,34 @@ ENG-49 — un parche puntual, sin verificar ninguna matrícula contra ningún re
 sin procedimiento detrás. Esta sección es lo que faltaba para que el próximo que se
 registre no dependa de que alguien se acuerde.
 
+## Tareas periódicas (ENG-228)
+
+Las tareas periódicas (liberar turnos sin pagar, recordatorios, cierre de accesos
+al MediPass, cierre de turnos y pedidos de reseña) son endpoints
+`POST /internal/jobs/<job>` protegidos con `JOBS_SECRET`. Los nombres y la
+frecuencia de cada uno están en `src/jobs/jobs.config.ts`.
+
+| Pieza | Qué hace |
+| --- | --- |
+| **pg_cron + pg_net** en Supabase (`scripts/scheduler/pg-cron.sql`) | Scheduler principal: dispara cada job cada 1 o 5 minutos. El secreto vive en Supabase Vault. |
+| `.github/workflows/scheduled-jobs.yml` | Respaldo cada 30 minutos. El cron de GitHub no es confiable por sí solo (el 17/11 corrió 3 veces en el día). |
+| `public.job_runs` | Una fila por corrida: estado, duración, resultado y error. Una sola corrida en curso por job. |
+| `GET /internal/jobs/status` | Último OK de cada job; 503 si alguno está atrasado. |
+| Sentry | Cada job que falla manda una excepción con el tag `job`. El monitor de Sentry Crons `mediconnect-scheduler` alerta si los recordatorios dejan de correr, que es la señal de que se cayó el scheduler entero. |
+| `GET /health` | 200 solo si la base responde un `SELECT 1` en menos de 3 s; si no, 503. |
+
+**El sueño de Render.** Render Free duerme el backend tras 15 minutos sin
+requests y el primer request tarda 30-50 s en despertarlo. Como pg_cron llama al
+backend cada minuto, el servicio no se duerme y no hay arranques en frío en pagos
+ni webhooks. Encendido todo el mes usa como máximo 744 h, dentro de las 750 h
+gratis del workspace (la web es un sitio estático y no consume horas). Si se
+suma otro web service gratis al workspace, deja de alcanzar: ahí conviene el plan
+pago de Render para el backend.
+
+**Puesta en marcha en un entorno nuevo:** crear los dos secretos en Vault y
+correr `scripts/scheduler/pg-cron.sql` en el SQL Editor de Supabase (las
+instrucciones y las consultas de verificación están en el mismo archivo).
+
 ## Tests de integración (PostgreSQL 15 via Docker)
 
 La suite de integración corre contra un PostgreSQL 15 real (base **separada** de la
