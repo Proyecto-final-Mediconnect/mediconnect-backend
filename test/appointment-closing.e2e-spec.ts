@@ -196,4 +196,59 @@ describe('Cierre del turno (e2e)', () => {
       .expect(409);
     expect(appointmentUpdate).not.toHaveBeenCalled();
   });
+
+  describe('PATCH /appointments/:id/technical-failure (ENG-237)', () => {
+    const failure = `/appointments/${APPOINTMENT}/technical-failure`;
+    const MOTIVO = 'Se cortó la videollamada a los dos minutos.';
+
+    it('el profesional informa la falla de una consulta completada: queda a reprogramar', async () => {
+      appointmentRow = { ...appointmentRow, status: 'COMPLETADO' };
+      const res = await request(app.getHttpServer())
+        .patch(failure)
+        .set('Authorization', `Bearer ${await signToken(PROFESSIONAL)}`)
+        .send({ reason: `  ${MOTIVO}  ` })
+        .expect(200);
+
+      expect(res.body).toMatchObject({
+        id: APPOINTMENT,
+        status: 'A_REPROGRAMAR',
+      });
+      // El motivo llega recortado.
+      expect(appointmentUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ cancellation_reason: MOTIVO }),
+        }),
+      );
+    });
+
+    it('sin motivo, o uno demasiado corto, da 400 y no escribe', async () => {
+      appointmentRow = { ...appointmentRow, status: 'COMPLETADO' };
+      const token = await signToken(PROFESSIONAL);
+      for (const body of [{}, { reason: 'corto' }]) {
+        await request(app.getHttpServer())
+          .patch(failure)
+          .set('Authorization', `Bearer ${token}`)
+          .send(body)
+          .expect(400);
+      }
+      expect(appointmentUpdate).not.toHaveBeenCalled();
+    });
+
+    it('el paciente recibe 403', async () => {
+      appointmentRow = { ...appointmentRow, status: 'COMPLETADO' };
+      await request(app.getHttpServer())
+        .patch(failure)
+        .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+        .send({ reason: MOTIVO })
+        .expect(403);
+    });
+
+    it('una consulta que no está completada da 409', async () => {
+      await request(app.getHttpServer())
+        .patch(failure)
+        .set('Authorization', `Bearer ${await signToken(PROFESSIONAL)}`)
+        .send({ reason: MOTIVO })
+        .expect(409);
+    });
+  });
 });

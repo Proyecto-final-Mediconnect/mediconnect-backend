@@ -58,6 +58,8 @@ describe('ProfessionalCancellationService', () => {
   let service: ProfessionalCancellationService;
   let tx: {
     appointment: { update: jest.Mock };
+    consultation: { updateMany: jest.Mock };
+    videoSession: { updateMany: jest.Mock };
     auditLog: { create: jest.Mock; createMany: jest.Mock };
     $queryRaw: jest.Mock;
   };
@@ -84,6 +86,8 @@ describe('ProfessionalCancellationService', () => {
 
     tx = {
       appointment: { update: jest.fn().mockResolvedValue({}) },
+      consultation: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      videoSession: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       auditLog: {
         create: jest.fn().mockResolvedValue({}),
         createMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -152,9 +156,17 @@ describe('ProfessionalCancellationService', () => {
           cancellation_reason: REASON,
           cancelled_at: NOW,
           reprogram_deadline: deadline,
+          reprogram_cause: null,
           updated_at: NOW,
         },
       });
+      // ENG-237: si alguien ya había entrado a la sala, el horario nuevo
+      // arranca sin esas marcas.
+      expect(tx.consultation.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { appointment_id: { in: [APPOINTMENT] } },
+        }),
+      );
       expect(tx.auditLog.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           actor_id: PROFESSIONAL,

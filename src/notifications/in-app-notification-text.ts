@@ -86,6 +86,14 @@ export function renderInAppNotification(
         body: `${patient ?? 'Un paciente'} movió su turno${before ? ` del ${before}` : ''}${when ? ` al ${when}` : ''}.`,
       };
     }
+    case 'TURNO_NO_REALIZADO': {
+      // ENG-237 (casos 3 y 4): el profesional no entró a la sala.
+      const quien = patient ?? 'el paciente';
+      return {
+        title: 'No te conectaste a una consulta',
+        body: `No entraste a la consulta con ${quien}${when ? ` del ${when}` : ''}. El turno quedó a reprogramar: ${quien} puede elegir otro horario sin volver a pagar o pedir el reembolso del 100 %. Queda registrado en tu actividad.`,
+      };
+    }
     case 'TURNO_REEMBOLSADO': {
       // ENG-208: al profesional, cómo terminó un turno que canceló.
       const quien = patient ?? 'El paciente';

@@ -18,6 +18,7 @@ import {
 } from '../payments/cancellation-refund.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import { resetAttendance } from './attendance-reset';
 
 /**
  * Cuánto tiene el paciente para elegir después de que el profesional cancela
@@ -43,6 +44,14 @@ const PRISMA_RECORD_NOT_FOUND = 'P2025';
 export function reprogramDeadlineFor(scheduledAt: Date, now: Date): Date {
   const window = new Date(now.getTime() + REPROGRAM_WINDOW_HOURS * 3_600_000);
   return scheduledAt < window ? scheduledAt : window;
+}
+
+/**
+ * Plazo para elegir de un turno que ya pasó y no se realizó (ENG-237, casos 3,
+ * 4 y 13): 48 h desde el aviso. La hora original ya pasó, así que no acota.
+ */
+export function reprogramDeadlineAfterMissed(now: Date): Date {
+  return new Date(now.getTime() + REPROGRAM_WINDOW_HOURS * 3_600_000);
 }
 
 /** Resultado de la cancelación del profesional. */
@@ -243,9 +252,15 @@ export class ProfessionalCancellationService {
         cancellation_reason: reason,
         cancelled_at: now,
         reprogram_deadline: deadline,
+        // ENG-237: es una cancelación a mano, aunque antes hubiera sido una
+        // ausencia o una falla (caso 12).
+        reprogram_cause: null,
         updated_at: now,
       },
     });
+    // ENG-237: la sala abre unos minutos antes del turno; si alguien ya había
+    // entrado, el horario nuevo arranca sin esas marcas.
+    if (next === 'A_REPROGRAMAR') await resetAttendance(tx, [row.id]);
     await tx.auditLog.create({
       data: {
         actor_id: actorId,
