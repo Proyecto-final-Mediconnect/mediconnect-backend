@@ -31,6 +31,7 @@ export async function resetAttendance(
     data: {
       daily_room_name: null,
       daily_room_url: null,
+      daily_room_expires_at: null,
       status: 'CREADA',
       ended_at: null,
     },

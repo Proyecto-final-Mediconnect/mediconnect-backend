@@ -7,6 +7,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { resetAttendance } from './attendance-reset';
 import { AppointmentPaymentService } from '../payments/appointment-payment.service';
 import {
   CancellationRefund,
@@ -775,44 +776,52 @@ export class AppointmentsService {
 
     let updated;
     try {
-      updated = await this.prisma.appointment.update({
-        // Las mismas condiciones que se validaron, revalidadas en el `where`:
-        // entre la lectura y la escritura el turno pudo cambiar (lo cancelaron,
-        // el job lo liberó, otro click ya lo reprogramó). El estado se revalida
-        // exacto, no "cualquier activo": si el webhook de MercadoPago lo pasó a
-        // CONFIRMADO en el medio, se salteó la regla de devolución y el aviso al
-        // profesional, y tiene que volver a evaluarse (P2025 -> 409).
-        where: fromProfessionalCancellation
-          ? {
-              id: appointmentId,
-              patient_id: userId,
-              status: 'A_REPROGRAMAR',
-              scheduled_at: currentStart,
-              reprogram_deadline: { gt: now },
-            }
-          : {
-              id: appointmentId,
-              patient_id: userId,
-              status: row.status as (typeof ACTIVE_STATUSES)[number],
-              scheduled_at: currentStart,
-              rescheduled_at: null,
-            },
-        data: fromProfessionalCancellation
-          ? {
-              scheduled_at: newStart,
-              duration_minutes: slot.durationMinutes,
-              // Vuelve a ser un turno vigente. `cancelled_by` y el motivo se
-              // conservan: son la historia de que el profesional lo canceló.
-              status: 'CONFIRMADO',
-              reprogram_deadline: null,
-              updated_at: now,
-            }
-          : {
-              scheduled_at: newStart,
-              duration_minutes: slot.durationMinutes,
-              rescheduled_at: now,
-              updated_at: now,
-            },
+      // ENG-227: el horario nuevo es otra consulta. En la misma transacción se
+      // borran la sala y las marcas de asistencia del horario viejo: si no, se
+      // reusaría una sala creada para la ventana anterior (con su vencimiento)
+      // y el cierre automático vería entradas que no son de esta consulta.
+      updated = await this.prisma.$transaction(async (tx) => {
+        const moved = await tx.appointment.update({
+          // Las mismas condiciones que se validaron, revalidadas en el `where`:
+          // entre la lectura y la escritura el turno pudo cambiar (lo cancelaron,
+          // el job lo liberó, otro click ya lo reprogramó). El estado se revalida
+          // exacto, no "cualquier activo": si el webhook de MercadoPago lo pasó a
+          // CONFIRMADO en el medio, se salteó la regla de devolución y el aviso al
+          // profesional, y tiene que volver a evaluarse (P2025 -> 409).
+          where: fromProfessionalCancellation
+            ? {
+                id: appointmentId,
+                patient_id: userId,
+                status: 'A_REPROGRAMAR',
+                scheduled_at: currentStart,
+                reprogram_deadline: { gt: now },
+              }
+            : {
+                id: appointmentId,
+                patient_id: userId,
+                status: row.status as (typeof ACTIVE_STATUSES)[number],
+                scheduled_at: currentStart,
+                rescheduled_at: null,
+              },
+          data: fromProfessionalCancellation
+            ? {
+                scheduled_at: newStart,
+                duration_minutes: slot.durationMinutes,
+                // Vuelve a ser un turno vigente. `cancelled_by` y el motivo se
+                // conservan: son la historia de que el profesional lo canceló.
+                status: 'CONFIRMADO',
+                reprogram_deadline: null,
+                updated_at: now,
+              }
+            : {
+                scheduled_at: newStart,
+                duration_minutes: slot.durationMinutes,
+                rescheduled_at: now,
+                updated_at: now,
+              },
+        });
+        await resetAttendance(tx, [appointmentId]);
+        return moved;
       });
     } catch (err) {
       const code = (err as { code?: string }).code;

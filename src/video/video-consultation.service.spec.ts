@@ -320,6 +320,8 @@ describe('VideoConsultationService', () => {
         id: 'vs-1',
         daily_room_name: 'consulta-yaexiste',
         daily_room_url: 'https://mediconnect.daily.co/consulta-yaexiste',
+        // Vale hasta el cierre de la ventana: 15:45 UTC.
+        daily_room_expires_at: new Date('2026-08-27T15:45:00.000Z'),
       });
 
       const access = await service.join(
@@ -333,6 +335,65 @@ describe('VideoConsultationService', () => {
       expect(access.roomUrl).toBe(
         'https://mediconnect.daily.co/consulta-yaexiste?t=tok',
       );
+    });
+
+    describe('no reusa una sala vencida (ENG-227)', () => {
+      it('si la sala vence antes del cierre de la ventana actual, crea otra y borra la vieja', async () => {
+        // La sala se creó para el horario anterior del turno: vence 15:30, pero
+        // la ventana de ahora cierra 15:45.
+        prisma.videoSession.upsert.mockResolvedValue({
+          id: 'vs-1',
+          daily_room_name: 'consulta-vieja',
+          daily_room_url: 'https://mediconnect.daily.co/consulta-vieja',
+          daily_room_expires_at: new Date('2026-08-27T15:30:00.000Z'),
+        });
+
+        const access = await service.join(
+          'jwt',
+          PATIENT,
+          APPOINTMENT,
+          DENTRO_DE_LA_VENTANA,
+        );
+
+        expect(daily.createConsultationRoom).toHaveBeenCalledTimes(1);
+        // Reemplaza solo la sala que leyó: si el otro ya la cambió, no la pisa.
+        expect(prisma.videoSession.updateMany).toHaveBeenCalledWith({
+          where: { id: 'vs-1', daily_room_name: 'consulta-vieja' },
+          data: {
+            daily_room_name: 'consulta-abc123',
+            daily_room_url: expect.any(String),
+            daily_room_expires_at: new Date('2026-08-27T15:45:00.000Z'),
+          },
+        });
+        expect(access.roomUrl).toContain('consulta-abc123');
+        expect(daily.deleteRoom).toHaveBeenCalledWith('consulta-vieja');
+      });
+
+      it('una sala sin vencimiento guardado (anterior a ENG-227) se reemplaza', async () => {
+        prisma.videoSession.upsert.mockResolvedValue({
+          id: 'vs-1',
+          daily_room_name: 'consulta-sinfecha',
+          daily_room_url: 'https://mediconnect.daily.co/consulta-sinfecha',
+          daily_room_expires_at: null,
+        });
+
+        await service.join('jwt', PATIENT, APPOINTMENT, DENTRO_DE_LA_VENTANA);
+
+        expect(daily.createConsultationRoom).toHaveBeenCalledTimes(1);
+        expect(daily.deleteRoom).toHaveBeenCalledWith('consulta-sinfecha');
+      });
+
+      it('guarda el vencimiento de la sala nueva', async () => {
+        await service.join('jwt', PATIENT, APPOINTMENT, DENTRO_DE_LA_VENTANA);
+
+        expect(prisma.videoSession.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              daily_room_expires_at: new Date('2026-08-27T15:45:00.000Z'),
+            }),
+          }),
+        );
+      });
     });
 
     it('si pierde la carrera usa la sala del otro y borra la suya', async () => {
