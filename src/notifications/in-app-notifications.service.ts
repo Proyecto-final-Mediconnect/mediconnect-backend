@@ -80,6 +80,14 @@ export class InAppNotificationsService {
     now: Date = new Date(),
     /** Datos propios del aviso: para la reprogramación, de qué horario venía. */
     extra: Record<string, string> = {},
+    /**
+     * `replace`: si ya hay un aviso igual de este turno, lo reemplaza y lo
+     * vuelve a dejar sin leer. Para avisos que pueden repetirse de verdad (un
+     * turno que el profesional cancela y el paciente reprograma más de una vez,
+     * ADR-018 caso 12). Por defecto un duplicado se ignora, que es lo que
+     * corresponde a un webhook repetido.
+     */
+    options: { replace?: boolean } = {},
   ): Promise<void> {
     try {
       const appointment = await this.prisma.appointment.findUnique({
@@ -92,24 +100,38 @@ export class InAppNotificationsService {
       });
       if (!appointment) return;
 
-      await this.prisma.notification.create({
-        data: {
-          user_id: appointment.professional_id,
-          appointment_id: appointmentId,
-          type,
-          channel: 'IN_APP',
-          // El nombre se congela en el aviso: si el paciente lo cambia después,
-          // el aviso cuenta lo que pasó con el nombre de ese momento.
-          payload: {
-            appointmentId,
-            patient:
-              `${appointment.patient.first_name} ${appointment.patient.last_name}`.trim(),
-            scheduledAt: appointment.scheduled_at.toISOString(),
-            ...extra,
+      // El nombre se congela en el aviso: si el paciente lo cambia después,
+      // el aviso cuenta lo que pasó con el nombre de ese momento.
+      const payload = {
+        appointmentId,
+        patient:
+          `${appointment.patient.first_name} ${appointment.patient.last_name}`.trim(),
+        scheduledAt: appointment.scheduled_at.toISOString(),
+        ...extra,
+      };
+      const data = {
+        user_id: appointment.professional_id,
+        appointment_id: appointmentId,
+        type,
+        channel: 'IN_APP' as const,
+        payload,
+        sent_at: now,
+      };
+      if (options.replace) {
+        await this.prisma.notification.upsert({
+          where: {
+            appointment_id_type_channel: {
+              appointment_id: appointmentId,
+              type,
+              channel: 'IN_APP',
+            },
           },
-          sent_at: now,
-        },
-      });
+          create: data,
+          update: { payload, sent_at: now, read_at: null, created_at: now },
+        });
+      } else {
+        await this.prisma.notification.create({ data });
+      }
     } catch (err) {
       if ((err as { code?: string }).code === PRISMA_UNIQUE_VIOLATION) return;
       this.logger.error(
