@@ -58,10 +58,21 @@ describe('CancellationRefundService', () => {
   let service: CancellationRefundService;
   let prisma: {
     appointment: { findUnique: jest.Mock };
-    refund: { create: jest.Mock; update: jest.Mock; findFirst: jest.Mock };
+    refund: {
+      create: jest.Mock;
+      update: jest.Mock;
+      findFirst: jest.Mock;
+      findMany: jest.Mock;
+      findUnique: jest.Mock;
+      aggregate: jest.Mock;
+    };
     payment: { update: jest.Mock };
   };
-  let mercadoPago: { refundPayment: jest.Mock };
+  let mercadoPago: {
+    refundPayment: jest.Mock;
+    listRefunds: jest.Mock;
+    getRefund: jest.Mock;
+  };
   let loggerError: jest.SpyInstance;
 
   beforeEach(() => {
@@ -71,6 +82,9 @@ describe('CancellationRefundService', () => {
         create: jest.fn().mockResolvedValue({ id: 'ref-1' }),
         update: jest.fn().mockResolvedValue({}),
         findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
+        aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }),
       },
       payment: { update: jest.fn().mockResolvedValue({}) },
     };
@@ -78,6 +92,8 @@ describe('CancellationRefundService', () => {
       refundPayment: jest
         .fn()
         .mockResolvedValue({ id: '9001', status: 'approved', amount: 15000 }),
+      listRefunds: jest.fn().mockResolvedValue([]),
+      getRefund: jest.fn(),
     };
     service = new CancellationRefundService(
       prisma as unknown as PrismaService,
@@ -108,6 +124,10 @@ describe('CancellationRefundService', () => {
           status: 'PROCESADO',
           mercadopago_refund_id: '9001',
           processed_at: NOW,
+          // ENG-205: cada pedido a MercadoPago queda contado.
+          attempts: { increment: 1 },
+          last_attempt_at: NOW,
+          last_error: null,
         },
       });
       expect(prisma.payment.update).toHaveBeenCalledWith({
@@ -171,14 +191,27 @@ describe('CancellationRefundService', () => {
     });
 
     it('usa la política congelada en el turno, no el default', async () => {
-      // El profesional tenía 72 h → 100 %, 48 h → 20 % cuando se reservó.
+      // El profesional tenía 20 h → 100 %, 12 h → 40 % cuando se reservó. El
+      // default (24 h → 100 %, 6 h → 50 %) daría 50 %.
       prisma.appointment.findUnique.mockResolvedValue(
-        appointment({ scheduled_at: inHours(50), policy: [72, 48, 20] }),
+        appointment({ scheduled_at: inHours(15), policy: [20, 12, 40] }),
       );
 
       await expect(
         service.refundCancellation(APPOINTMENT_ID, NOW),
-      ).resolves.toMatchObject({ percent: 20, amount: 3000 });
+      ).resolves.toMatchObject({ percent: 40, amount: 6000 });
+    });
+
+    it('una política congelada fuera de los límites de plataforma se evalúa con el límite (ENG-205)', async () => {
+      // Reservado antes de ENG-205 con 72 h → 100 %, 48 h → 20 %. A 30 h del
+      // turno, el límite (100 % desde 24 h) le devuelve todo.
+      prisma.appointment.findUnique.mockResolvedValue(
+        appointment({ scheduled_at: inHours(30), policy: [72, 48, 20] }),
+      );
+
+      await expect(
+        service.refundCancellation(APPOINTMENT_ID, NOW),
+      ).resolves.toMatchObject({ percent: 100, amount: 15000 });
     });
 
     it('con poca antelación no devuelve nada ni llama a MercadoPago', async () => {
@@ -210,9 +243,17 @@ describe('CancellationRefundService', () => {
       await expect(
         service.refundCancellation(APPOINTMENT_ID, NOW),
       ).resolves.toEqual({ percent: 100, amount: 15000, status: 'PENDIENTE' });
-      // La fila se creó antes de llamar: el reembolso queda con rastro.
+      // La fila se creó antes de llamar: el reembolso queda con rastro, y con
+      // el intento y el error para que el job lo retome (ENG-205).
       expect(prisma.refund.create).toHaveBeenCalled();
-      expect(prisma.refund.update).not.toHaveBeenCalled();
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-1' },
+        data: {
+          attempts: { increment: 1 },
+          last_attempt_at: NOW,
+          last_error: 'timeout',
+        },
+      });
       expect(prisma.payment.update).not.toHaveBeenCalled();
     });
 
@@ -249,18 +290,206 @@ describe('CancellationRefundService', () => {
       ).resolves.toMatchObject({ status: 'PENDIENTE' });
     });
 
-    it('un pago aprobado sin id de MercadoPago queda PENDIENTE y registrado', async () => {
+    it('un pago aprobado sin id de MercadoPago queda RECHAZADO con motivo y avisa (ENG-205)', async () => {
+      // Antes quedaba PENDIENTE para siempre, en silencio (hallazgo de ENG-223).
       prisma.appointment.findUnique.mockResolvedValue(
         appointment({ payment: { mercadopago_payment_id: null } }),
       );
+      prisma.refund.findUnique = jest
+        .fn()
+        .mockResolvedValue({ reason: 'CANCELACION_PACIENTE' });
 
       await expect(
         service.refundCancellation(APPOINTMENT_ID, NOW),
-      ).resolves.toEqual({ percent: 100, amount: 15000, status: 'PENDIENTE' });
+      ).resolves.toEqual({ percent: 100, amount: 15000, status: 'RECHAZADO' });
       expect(prisma.refund.create).toHaveBeenCalled();
       expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
-      expect(loggerError).toHaveBeenCalledWith(
-        expect.stringContaining('REFUND_LOST'),
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-1' },
+        data: expect.objectContaining({
+          status: 'RECHAZADO',
+          reason: expect.stringMatching(
+            /^CANCELACION_PACIENTE \| .*ID de MercadoPago/,
+          ),
+        }),
+      });
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+        'Reembolso rechazado: requiere gestión manual',
+        expect.objectContaining({ level: 'error' }),
+      );
+    });
+  });
+
+  describe('retryPending (ENG-205)', () => {
+    /** Un reembolso pendiente creado hace `horas` horas. */
+    function pendiente(horas: number, extra: Record<string, unknown> = {}) {
+      return {
+        id: 'ref-9',
+        amount: new Prisma.Decimal('15000.00'),
+        reason: 'CANCELACION_PACIENTE',
+        attempts: 1,
+        last_attempt_at: new Date(NOW.getTime() - 60 * 60_000),
+        created_at: new Date(NOW.getTime() - horas * 3_600_000),
+        mercadopago_refund_id: null,
+        payment: {
+          id: 'pay-1',
+          amount: new Prisma.Decimal('15000.00'),
+          mercadopago_payment_id: 'mp-123',
+        },
+        ...extra,
+      };
+    }
+
+    beforeEach(() => {
+      Object.assign(prisma.refund, {
+        findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ reason: 'CANCELACION_PACIENTE' }),
+        aggregate: jest.fn().mockResolvedValue({
+          _sum: { amount: new Prisma.Decimal('15000.00') },
+        }),
+      });
+      Object.assign(mercadoPago, {
+        listRefunds: jest.fn().mockResolvedValue([]),
+        getRefund: jest.fn(),
+      });
+    });
+
+    it('reintenta con la misma clave y, si se aprueba, lo procesa y marca el pago', async () => {
+      prisma.refund.findMany
+        .mockResolvedValueOnce([pendiente(2)])
+        .mockResolvedValue([]);
+
+      const summary = await service.retryPending(NOW);
+
+      expect(summary).toEqual({ revisados: 1, procesados: 1, rechazados: 0 });
+      expect(mercadoPago.refundPayment).toHaveBeenCalledWith(
+        'mp-123',
+        15000,
+        'refund-ref-9',
+      );
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-9' },
+        data: expect.objectContaining({
+          status: 'PROCESADO',
+          mercadopago_refund_id: '9001',
+          attempts: { increment: 1 },
+        }),
+      });
+      expect(prisma.payment.update).toHaveBeenCalledWith({
+        where: { id: 'pay-1' },
+        data: { status: 'REEMBOLSADO' },
+      });
+    });
+
+    it('si MercadoPago ya lo tenía, lo asocia y no lo pide de nuevo', async () => {
+      prisma.refund.findMany
+        .mockResolvedValueOnce([pendiente(30)])
+        .mockResolvedValue([]);
+      (
+        mercadoPago as unknown as { listRefunds: jest.Mock }
+      ).listRefunds.mockResolvedValue([
+        { id: '777', status: 'approved', amount: 15000 },
+      ]);
+
+      await service.retryPending(NOW);
+
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-9' },
+        data: expect.objectContaining({
+          status: 'PROCESADO',
+          mercadopago_refund_id: '777',
+        }),
+      });
+    });
+
+    it('uno ya pedido que quedó en proceso se consulta, no se vuelve a pedir', async () => {
+      prisma.refund.findMany.mockResolvedValueOnce([
+        pendiente(3, { mercadopago_refund_id: '555' }),
+      ]);
+      (
+        mercadoPago as unknown as { getRefund: jest.Mock }
+      ).getRefund.mockResolvedValue({
+        id: '555',
+        status: 'in_process',
+        amount: 15000,
+      });
+
+      const summary = await service.retryPending(NOW);
+
+      expect(summary).toEqual({ revisados: 1, procesados: 0, rechazados: 0 });
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-9' },
+        data: expect.objectContaining({
+          status: 'PENDIENTE',
+          processed_at: null,
+        }),
+      });
+    });
+
+    it('respeta la espera entre intentos', async () => {
+      prisma.refund.findMany.mockResolvedValueOnce([
+        // 3 intentos → espera de 1 h; el último fue hace 10 minutos.
+        pendiente(2, {
+          attempts: 3,
+          last_attempt_at: new Date(NOW.getTime() - 10 * 60_000),
+        }),
+      ]);
+
+      const summary = await service.retryPending(NOW);
+
+      expect(summary.revisados).toBe(0);
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+    });
+
+    it('pasadas 48 h sin confirmar, queda RECHAZADO con motivo y avisa', async () => {
+      prisma.refund.findMany.mockResolvedValueOnce([pendiente(49)]);
+
+      const summary = await service.retryPending(NOW);
+
+      expect(summary).toEqual({ revisados: 1, procesados: 0, rechazados: 1 });
+      // Pasado el plazo no se pide otro: podría devolver dos veces.
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-9' },
+        data: expect.objectContaining({ status: 'RECHAZADO' }),
+      });
+      expect(Sentry.captureMessage).toHaveBeenCalled();
+    });
+
+    it('si MercadoPago falla, guarda el error y sigue pendiente', async () => {
+      prisma.refund.findMany.mockResolvedValueOnce([pendiente(2)]);
+      mercadoPago.refundPayment.mockRejectedValue(
+        new Error('503 de MercadoPago'),
+      );
+
+      const summary = await service.retryPending(NOW);
+
+      expect(summary).toEqual({ revisados: 1, procesados: 0, rechazados: 0 });
+      expect(prisma.refund.update).toHaveBeenCalledWith({
+        where: { id: 'ref-9' },
+        data: {
+          attempts: { increment: 1 },
+          last_attempt_at: NOW,
+          last_error: '503 de MercadoPago',
+        },
+      });
+    });
+
+    it('un reembolso de un pago sobre turno inactivo reintenta con su clave original', async () => {
+      prisma.refund.findMany.mockResolvedValueOnce([
+        pendiente(2, { reason: 'PAGO_SOBRE_TURNO_INACTIVO:mp-123' }),
+      ]);
+
+      await service.retryPending(NOW);
+
+      expect(mercadoPago.refundPayment).toHaveBeenCalledWith(
+        'mp-123',
+        15000,
+        'unapplied-mp-123',
       );
     });
   });

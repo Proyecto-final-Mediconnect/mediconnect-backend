@@ -22,6 +22,8 @@ name: Scheduled Jobs (respaldo)
 #   después de que cierra la sala.
 # - resolve-reprogram-deadlines (ENG-204): los turnos que el profesional
 #   canceló y cuyo plazo para elegir venció se reembolsan al 100 %.
+# - retry-pending-refunds (ENG-205): reintenta los reembolsos pendientes y da
+#   por perdidos, con aviso, los que pasaron 48 h.
 #
 # Secrets que necesita (Settings → Secrets and variables → Actions):
 #   - RENDER_BACKEND_URL  el mismo que usa keepalive.yml.
@@ -121,6 +123,19 @@ jobs:
           curl -fsS --max-time 60 --retry 3 --retry-all-errors
           -X POST -H "Authorization: Bearer $JOBS_SECRET"
           "$RENDER_BACKEND_URL/internal/jobs/resolve-reprogram-deadlines"
+        env:
+          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
+          JOBS_SECRET: ${{ secrets.JOBS_SECRET }}
+
+  retry-pending-refunds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reintentar reembolsos pendientes
+        run: >-
+          curl -fsS --max-time 60 --retry 3 --retry-all-errors
+          -X POST -H "Authorization: Bearer $JOBS_SECRET"
+          "$RENDER_BACKEND_URL/internal/jobs/retry-pending-refunds"
         env:
           RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
           JOBS_SECRET: ${{ secrets.JOBS_SECRET }}

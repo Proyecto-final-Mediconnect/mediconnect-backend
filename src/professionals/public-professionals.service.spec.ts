@@ -30,7 +30,7 @@ describe('PublicProfessionalsService', () => {
     // ENG-67: la política viaja en el perfil público porque es lo que el
     // paciente necesita saber ANTES de reservar.
     cancellation_policy: {
-      hours_full_refund: 48,
+      hours_full_refund: 20,
       hours_partial_refund: 12,
       partial_refund_percent: 30,
     },
@@ -67,7 +67,7 @@ describe('PublicProfessionalsService', () => {
         { id: 's2', name: 'Clínica médica' },
       ],
       cancellationPolicy: {
-        hoursFullRefund: 48,
+        hoursFullRefund: 20,
         hoursPartialRefund: 12,
         partialRefundPercent: 30,
       },
@@ -133,7 +133,7 @@ describe('PublicProfessionalsService', () => {
       findFirst.mockResolvedValue({
         ...validatedRow,
         cancellation_policy: {
-          hours_full_refund: 48,
+          hours_full_refund: 20,
           hours_partial_refund: null,
           partial_refund_percent: 30,
         },

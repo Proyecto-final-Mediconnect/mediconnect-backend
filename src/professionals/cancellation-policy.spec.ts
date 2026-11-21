@@ -125,17 +125,31 @@ describe('resolvePolicy', () => {
   it('con los tres valores devuelve la política del profesional', () => {
     expect(
       resolvePolicy({
-        hours_full_refund: 48,
+        hours_full_refund: 20,
         hours_partial_refund: 12,
         partial_refund_percent: 30,
       }),
     ).toEqual({
       policy: {
-        hoursFullRefund: 48,
+        hoursFullRefund: 20,
         hoursPartialRefund: 12,
         partialRefundPercent: 30,
       },
       configured: true,
+    });
+  });
+
+  it('lleva una política fuera de los límites de plataforma al límite, a favor del paciente (ENG-205)', () => {
+    expect(
+      resolvePolicy({
+        hours_full_refund: 72,
+        hours_partial_refund: 48,
+        partial_refund_percent: 10,
+      }).policy,
+    ).toEqual({
+      hoursFullRefund: 24,
+      hoursPartialRefund: 24,
+      partialRefundPercent: 30,
     });
   });
 
@@ -170,7 +184,9 @@ describe('resolvePolicy', () => {
     });
 
     expect(resuelto.configured).toBe(true);
-    expect(resuelto.policy.partialRefundPercent).toBe(0);
+    expect(resuelto.policy.hoursFullRefund).toBe(0);
+    // El porcentaje sí sube al mínimo de plataforma (ENG-205).
+    expect(resuelto.policy.partialRefundPercent).toBe(30);
   });
 });
 
@@ -220,5 +236,37 @@ describe('el default', () => {
 
   it('es una política válida', () => {
     expect(validatePolicy(DEFAULT_CANCELLATION_POLICY)).toBeNull();
+  });
+});
+
+describe('límites de plataforma (ENG-205)', () => {
+  it('rechaza un reembolso total que exige más de 24 h de anticipación', () => {
+    expect(
+      validatePolicy({
+        hoursFullRefund: 48,
+        hoursPartialRefund: 12,
+        partialRefundPercent: 50,
+      }),
+    ).toMatch(/al menos desde 24 horas/);
+  });
+
+  it('rechaza un parcial menor al 30 %', () => {
+    expect(
+      validatePolicy({
+        hoursFullRefund: 24,
+        hoursPartialRefund: 6,
+        partialRefundPercent: 20,
+      }),
+    ).toMatch(/al menos el 30 %/);
+  });
+
+  it('acepta los límites exactos', () => {
+    expect(
+      validatePolicy({
+        hoursFullRefund: 24,
+        hoursPartialRefund: 6,
+        partialRefundPercent: 30,
+      }),
+    ).toBeNull();
   });
 });

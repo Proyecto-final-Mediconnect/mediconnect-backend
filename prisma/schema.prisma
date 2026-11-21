@@ -543,6 +543,11 @@ model Refund {
   mercadopago_refund_id String?
   processed_at          DateTime?     @db.Timestamptz(6)
   created_at            DateTime      @default(now()) @db.Timestamptz(6)
+  /// Cuántas veces se le pidió a MercadoPago (ENG-205). El job reintenta los PENDIENTE.
+  attempts              Int           @default(0)
+  last_attempt_at       DateTime?     @db.Timestamptz(6)
+  /// El último error de MercadoPago, para soporte. Nunca datos del paciente.
+  last_error            String?
 
   payment Payment @relation(fields: [payment_id], references: [id])
 

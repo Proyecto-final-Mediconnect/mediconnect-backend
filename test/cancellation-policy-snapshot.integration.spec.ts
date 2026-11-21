@@ -87,9 +87,9 @@ describe('Política de cancelación congelada en el turno (integration)', () => 
     await prisma.cancellationPolicy.create({
       data: {
         professional_id: withPolicy,
-        hours_full_refund: 72,
-        hours_partial_refund: 48,
-        partial_refund_percent: 20,
+        hours_full_refund: 20,
+        hours_partial_refund: 12,
+        partial_refund_percent: 40,
       },
     });
   });
@@ -131,9 +131,9 @@ describe('Política de cancelación congelada en el turno (integration)', () => 
         },
       }),
     ).resolves.toEqual({
-      policy_hours_full_refund: 72,
-      policy_hours_partial_refund: 48,
-      policy_partial_refund_percent: 20,
+      policy_hours_full_refund: 20,
+      policy_hours_partial_refund: 12,
+      policy_partial_refund_percent: 40,
     });
   });
 
@@ -161,7 +161,7 @@ describe('Política de cancelación congelada en el turno (integration)', () => 
 
     await prisma.cancellationPolicy.update({
       where: { professional_id: withPolicy },
-      data: { partial_refund_percent: 0 },
+      data: { partial_refund_percent: 90 },
     });
 
     await expect(
@@ -169,6 +169,6 @@ describe('Política de cancelación congelada en el turno (integration)', () => 
         where: { id },
         select: { policy_partial_refund_percent: true },
       }),
-    ).resolves.toEqual({ policy_partial_refund_percent: 20 });
+    ).resolves.toEqual({ policy_partial_refund_percent: 40 });
   });
 });

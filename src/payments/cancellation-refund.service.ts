@@ -17,6 +17,32 @@ export type RefundOutcome =
   /** MercadoPago lo rechazó: hay que resolverlo a mano. */
   | 'RECHAZADO';
 
+/**
+ * Cuánto se insiste con un reembolso que MercadoPago no confirmó (ENG-205,
+ * ADR-018 caso 16). Pasado este plazo se marca RECHAZADO con motivo y se avisa
+ * al equipo: nunca queda PENDIENTE en silencio.
+ */
+export const REFUND_RETRY_WINDOW_HOURS = 48;
+
+/** Espera entre reintentos: 15 min, 30, 1 h, 2 h... hasta 6 h. */
+const RETRY_BASE_MS = 15 * 60_000;
+const RETRY_MAX_MS = 6 * 3_600_000;
+
+/** Cuántos reembolsos toma una corrida del job. */
+const RETRY_BATCH = 25;
+
+/** Tope del error que se guarda: alcanza para soporte y no crece sin control. */
+const MAX_ERROR_LENGTH = 500;
+
+/** Lo que hizo una corrida del job de reintentos. */
+export interface RefundRetrySummary {
+  /** Reembolsos que se volvieron a intentar o a consultar. */
+  revisados: number;
+  procesados: number;
+  /** Los que se dieron por perdidos: RECHAZADO con motivo, para soporte. */
+  rechazados: number;
+}
+
 /** Cuánto le corresponde al paciente si cancela, y qué pasó con eso. */
 export interface CancellationRefund {
   /** Porcentaje de la política congelada en el turno, 0 a 100. */
@@ -394,12 +420,15 @@ export class CancellationRefundService {
     }
 
     // Pago aprobado sin id de MercadoPago: no hay a quién pedirle la
-    // devolución. Queda la fila `PENDIENTE` para resolverlo a mano.
+    // devolución. Antes quedaba PENDIENTE para siempre (ENG-223); ahora queda
+    // RECHAZADO con el motivo, visible, y con aviso al equipo (ENG-205).
     if (!payment.mercadopago_payment_id) {
-      this.logger.error(
-        `REFUND_LOST: el pago ${payment.id} del turno ${appointmentId} está aprobado pero sin mercadopago_payment_id (refund ${refund.id}): devolverlo a mano.`,
+      await this.giveUp(
+        refund.id,
+        'El pago no tiene ID de MercadoPago: devolverlo a mano.',
+        now,
       );
-      return { percent, amount: amount.toNumber(), status: 'PENDIENTE' };
+      return { percent, amount: amount.toNumber(), status: 'RECHAZADO' };
     }
 
     let status: RefundOutcome = 'PENDIENTE';
@@ -424,6 +453,9 @@ export class CancellationRefundService {
           status,
           mercadopago_refund_id: mp.id,
           processed_at: status === 'PENDIENTE' ? null : now,
+          attempts: { increment: 1 },
+          last_attempt_at: now,
+          last_error: null,
         },
       });
 
@@ -439,6 +471,8 @@ export class CancellationRefundService {
       this.logger.error(
         `REFUND_FAILED: no se pudo reembolsar el turno ${appointmentId} (refund ${refund.id}): ${String(err)}`,
       );
+      // Queda PENDIENTE con el error: lo retoma `retryPending` (ENG-205).
+      await this.recordFailedAttempt(refund.id, err, now);
     }
 
     if (status !== 'PROCESADO') {
@@ -448,6 +482,258 @@ export class CancellationRefundService {
     }
 
     return { percent, amount: amount.toNumber(), status };
+  }
+
+  /**
+   * Job (ENG-205, ADR-018 caso 16): retoma los reembolsos PENDIENTE.
+   *
+   * - **Ya pedido** (`mercadopago_refund_id`): MercadoPago lo dejó en proceso;
+   *   se consulta su estado, no se vuelve a pedir.
+   * - **Sin respuesta**: antes de volver a pedirlo se mira si MercadoPago ya lo
+   *   tiene (`listRefunds`). Así un reintento nunca devuelve dos veces, aunque la
+   *   clave de idempotencia haya vencido.
+   * - **Espera creciente** entre intentos: 15 min, 30, 1 h... hasta 6 h.
+   * - **Pasadas 48 h**, o si el pago no tiene ID de MercadoPago, queda RECHAZADO
+   *   con el motivo, el paciente lo ve en su turno y el equipo recibe el aviso.
+   *
+   * Nunca tira por un reembolso: un error se guarda en la fila y sigue con el
+   * siguiente.
+   */
+  async retryPending(now: Date = new Date()): Promise<RefundRetrySummary> {
+    const pending = await this.prisma.refund.findMany({
+      where: { status: 'PENDIENTE' },
+      select: {
+        id: true,
+        amount: true,
+        reason: true,
+        attempts: true,
+        last_attempt_at: true,
+        created_at: true,
+        mercadopago_refund_id: true,
+        payment: {
+          select: { id: true, amount: true, mercadopago_payment_id: true },
+        },
+      },
+      orderBy: { created_at: 'asc' },
+      take: RETRY_BATCH * 4,
+    });
+
+    const due = pending
+      .filter((r) => isDue(r.attempts, r.last_attempt_at, now))
+      .slice(0, RETRY_BATCH);
+
+    const summary: RefundRetrySummary = {
+      revisados: 0,
+      procesados: 0,
+      rechazados: 0,
+    };
+    for (const row of due) {
+      summary.revisados += 1;
+      const outcome = await this.retryOne(row, now);
+      if (outcome === 'PROCESADO') summary.procesados += 1;
+      if (outcome === 'RECHAZADO') summary.rechazados += 1;
+    }
+    return summary;
+  }
+
+  private async retryOne(
+    row: {
+      id: string;
+      amount: Prisma.Decimal;
+      reason: string | null;
+      created_at: Date;
+      mercadopago_refund_id: string | null;
+      payment: {
+        id: string;
+        amount: Prisma.Decimal;
+        mercadopago_payment_id: string | null;
+      };
+    },
+    now: Date,
+  ): Promise<RefundOutcome> {
+    const mpPaymentId = row.payment.mercadopago_payment_id;
+    if (!mpPaymentId) {
+      await this.giveUp(
+        row.id,
+        'El pago no tiene ID de MercadoPago: devolverlo a mano.',
+        now,
+      );
+      return 'RECHAZADO';
+    }
+
+    const windowEnd =
+      row.created_at.getTime() + REFUND_RETRY_WINDOW_HOURS * 3_600_000;
+
+    try {
+      let mp: { id: string; status: string } | null = null;
+      if (row.mercadopago_refund_id) {
+        mp = await this.mercadoPago.getRefund(
+          mpPaymentId,
+          row.mercadopago_refund_id,
+        );
+      } else {
+        mp = await this.findExistingRefund(mpPaymentId, row);
+        if (!mp && now.getTime() < windowEnd) {
+          mp = await this.mercadoPago.refundPayment(
+            mpPaymentId,
+            row.amount.toNumber(),
+            idempotencyKeyFor(row, mpPaymentId),
+          );
+        }
+      }
+
+      const status = mp ? toOutcome(mp.status) : 'PENDIENTE';
+      if (status === 'PENDIENTE' && now.getTime() >= windowEnd) {
+        await this.giveUp(
+          row.id,
+          `MercadoPago no lo confirmó en ${REFUND_RETRY_WINDOW_HOURS} h: lo resuelve soporte.`,
+          now,
+        );
+        return 'RECHAZADO';
+      }
+
+      await this.prisma.refund.update({
+        where: { id: row.id },
+        data: {
+          status,
+          mercadopago_refund_id: mp?.id ?? row.mercadopago_refund_id,
+          processed_at: status === 'PENDIENTE' ? null : now,
+          attempts: { increment: 1 },
+          last_attempt_at: now,
+          last_error: null,
+        },
+      });
+      if (status === 'PROCESADO')
+        await this.markPaymentIfFullyRefunded(row.payment, now);
+      if (status === 'RECHAZADO')
+        this.alertRejected(row.id, 'MercadoPago lo rechazó');
+      return status;
+    } catch (err) {
+      this.logger.error(
+        `REFUND_RETRY_FAILED: refund ${row.id}: ${String(err)}`,
+      );
+      await this.recordFailedAttempt(row.id, err, now);
+      if (now.getTime() >= windowEnd) {
+        await this.giveUp(
+          row.id,
+          `No se pudo procesar en ${REFUND_RETRY_WINDOW_HOURS} h: lo resuelve soporte.`,
+          now,
+        );
+        return 'RECHAZADO';
+      }
+      return 'PENDIENTE';
+    }
+  }
+
+  /**
+   * Un reembolso de MercadoPago para este pago, del mismo monto, que todavía no
+   * esté asociado a ninguna fila nuestra. Es el que se pidió y cuya respuesta se
+   * perdió.
+   */
+  private async findExistingRefund(
+    mpPaymentId: string,
+    row: { id: string; amount: Prisma.Decimal },
+  ): Promise<{ id: string; status: string } | null> {
+    const remote = await this.mercadoPago.listRefunds(mpPaymentId);
+    const candidates = remote.filter((r) =>
+      new Prisma.Decimal(r.amount).equals(row.amount),
+    );
+    if (candidates.length === 0) return null;
+    const linked = await this.prisma.refund.findMany({
+      where: {
+        mercadopago_refund_id: { in: candidates.map((r) => r.id) },
+        id: { not: row.id },
+      },
+      select: { mercadopago_refund_id: true },
+    });
+    const taken = new Set(linked.map((r) => r.mercadopago_refund_id));
+    return candidates.find((r) => !taken.has(r.id)) ?? null;
+  }
+
+  /** El pago pasa a REEMBOLSADO cuando lo procesado cubre el total. */
+  private async markPaymentIfFullyRefunded(
+    payment: { id: string; amount: Prisma.Decimal },
+    now: Date,
+  ): Promise<void> {
+    const processed = await this.prisma.refund.aggregate({
+      where: { payment_id: payment.id, status: 'PROCESADO' },
+      _sum: { amount: true },
+    });
+    if ((processed._sum.amount ?? new Prisma.Decimal(0)).gte(payment.amount)) {
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: { status: 'REEMBOLSADO' },
+      });
+      this.logger.log(
+        `Pago ${payment.id} reembolsado entero (${now.toISOString()}).`,
+      );
+    }
+  }
+
+  /** Deja el intento fallido registrado. Nunca tira. */
+  private async recordFailedAttempt(
+    refundId: string,
+    err: unknown,
+    now: Date,
+  ): Promise<void> {
+    try {
+      await this.prisma.refund.update({
+        where: { id: refundId },
+        data: {
+          attempts: { increment: 1 },
+          last_attempt_at: now,
+          last_error: (err instanceof Error ? err.message : String(err)).slice(
+            0,
+            MAX_ERROR_LENGTH,
+          ),
+        },
+      });
+    } catch (writeError) {
+      this.logger.error(
+        `No se pudo registrar el intento del refund ${refundId}: ${String(writeError)}`,
+      );
+    }
+  }
+
+  /**
+   * Se deja de insistir: RECHAZADO con el motivo, visible para el paciente en su
+   * turno ("Hubo un problema con el reembolso. Escribinos…") y con aviso al
+   * equipo por Sentry. Nunca tira.
+   */
+  private async giveUp(
+    refundId: string,
+    motivo: string,
+    now: Date,
+  ): Promise<void> {
+    try {
+      const current = await this.prisma.refund.findUnique({
+        where: { id: refundId },
+        select: { reason: true },
+      });
+      await this.prisma.refund.update({
+        where: { id: refundId },
+        data: {
+          status: 'RECHAZADO',
+          processed_at: now,
+          last_error: motivo,
+          reason: current?.reason ? `${current.reason} | ${motivo}` : motivo,
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `No se pudo marcar RECHAZADO el refund ${refundId}: ${String(err)}`,
+      );
+    }
+    this.alertRejected(refundId, motivo);
+  }
+
+  private alertRejected(refundId: string, motivo: string): void {
+    this.logger.error(`REFUND_REJECTED: refund ${refundId}: ${motivo}`);
+    Sentry.captureMessage('Reembolso rechazado: requiere gestión manual', {
+      level: 'error',
+      tags: { feature: 'eng205', refundId },
+      extra: { motivo },
+    });
   }
 
   /**
@@ -522,4 +808,38 @@ export class CancellationRefundService {
       amount: payment.amount.mul(percent).div(100).toDecimalPlaces(2),
     };
   }
+}
+
+/** Si toca reintentar: espera creciente desde el último intento. */
+function isDue(
+  attempts: number,
+  lastAttemptAt: Date | null,
+  now: Date,
+): boolean {
+  if (!lastAttemptAt) return true;
+  const wait = Math.min(
+    RETRY_BASE_MS * 2 ** Math.max(attempts - 1, 0),
+    RETRY_MAX_MS,
+  );
+  return now.getTime() - lastAttemptAt.getTime() >= wait;
+}
+
+/** El estado de MercadoPago traducido al nuestro. */
+function toOutcome(mpStatus: string): RefundOutcome {
+  if (mpStatus === 'approved') return 'PROCESADO';
+  if (mpStatus === 'rejected' || mpStatus === 'cancelled') return 'RECHAZADO';
+  return 'PENDIENTE';
+}
+
+/**
+ * La misma clave con la que se pidió la primera vez: dentro de las 24 h,
+ * MercadoPago devuelve el reembolso original en vez de crear otro.
+ */
+function idempotencyKeyFor(
+  row: { id: string; reason: string | null },
+  mpPaymentId: string,
+): string {
+  return row.reason?.startsWith('PAGO_')
+    ? `unapplied-${mpPaymentId}`
+    : `refund-${row.id}`;
 }

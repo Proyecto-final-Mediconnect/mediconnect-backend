@@ -104,9 +104,9 @@ describe('GET /professionals/:id — perfil público (e2e)', () => {
     findFirst.mockResolvedValue({
       ...validatedRow,
       cancellation_policy: {
-        hours_full_refund: 72,
-        hours_partial_refund: 24,
-        partial_refund_percent: 25,
+        hours_full_refund: 20,
+        hours_partial_refund: 8,
+        partial_refund_percent: 40,
       },
     });
 
@@ -115,9 +115,9 @@ describe('GET /professionals/:id — perfil público (e2e)', () => {
       .expect(200)
       .expect((res) => {
         expect(res.body.cancellationPolicy).toEqual({
-          hoursFullRefund: 72,
-          hoursPartialRefund: 24,
-          partialRefundPercent: 25,
+          hoursFullRefund: 20,
+          hoursPartialRefund: 8,
+          partialRefundPercent: 40,
         });
         // `configured` es para la pantalla del profesional, no para el paciente.
         expect(res.body.cancellationPolicy.configured).toBeUndefined();
