@@ -8,6 +8,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AppointmentClosingService } from '../appointments/appointment-closing.service';
+import {
+  ProfessionalCancellationService,
+  type ReprogramSweepSummary,
+} from '../appointments/professional-cancellation.service';
 import { UnpaidReleaseService } from '../appointments/unpaid-release.service';
 import { MediPassService } from '../medipass/medipass.service';
 import {
@@ -42,6 +46,7 @@ export class JobsController {
     private readonly medipass: MediPassService,
     private readonly closing: AppointmentClosingService,
     private readonly runner: JobRunnerService,
+    private readonly professionalCancellation: ProfessionalCancellationService,
   ) {}
 
   /**
@@ -97,6 +102,19 @@ export class JobsController {
   sendReviewRequests(): Promise<SendSummary | SkippedRun> {
     return this.runner.run('send-review-requests', () =>
       this.notifications.sendReviewRequests(),
+    );
+  }
+
+  /**
+   * ENG-204 (ADR-018, caso 2): los turnos a reprogramar cuyo plazo venció se
+   * reembolsan al 100 %, y se retoman los reembolsos totales que quedaron a
+   * medias. Idempotente: un turno ya resuelto no vuelve a entrar.
+   */
+  @Post('resolve-reprogram-deadlines')
+  @HttpCode(HttpStatus.OK)
+  resolveReprogramDeadlines(): Promise<ReprogramSweepSummary | SkippedRun> {
+    return this.runner.run('resolve-reprogram-deadlines', () =>
+      this.professionalCancellation.resolveReprogramDeadlines(),
     );
   }
 

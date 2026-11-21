@@ -11,7 +11,14 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 
 /** Turnos que todavía pueden pasar: con uno de estos no se da de baja. */
-const PENDIENTES = ['RESERVADO_SIN_PAGAR', 'CONFIRMADO'] as const;
+// `A_REPROGRAMAR` (ENG-204) también: es un turno pagado sin resolver. El paciente
+// tiene que elegir otro horario o el reembolso antes de irse, y el profesional no
+// puede darse de baja con pacientes esperando esa elección.
+const PENDIENTES = [
+  'RESERVADO_SIN_PAGAR',
+  'CONFIRMADO',
+  'A_REPROGRAMAR',
+] as const;
 
 /** El email que queda en la cuenta dada de baja. `.invalid` es reservado (RFC 2606). */
 export function emailDeBaja(userId: string): string {

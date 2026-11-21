@@ -107,7 +107,8 @@ describe('AccountDeletionService', () => {
     expect(prisma.appointment.count).toHaveBeenCalledWith({
       where: {
         OR: [{ patient_id: USER }, { professional_id: USER }],
-        status: { in: ['RESERVADO_SIN_PAGAR', 'CONFIRMADO'] },
+        // Un turno a reprogramar (ENG-204) también está pendiente: pagado y sin resolver.
+        status: { in: ['RESERVADO_SIN_PAGAR', 'CONFIRMADO', 'A_REPROGRAMAR'] },
         scheduled_at: { gt: NOW },
       },
     });

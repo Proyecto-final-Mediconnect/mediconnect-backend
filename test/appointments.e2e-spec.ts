@@ -477,4 +477,147 @@ describe('Turnos (e2e)', () => {
         .expect(409);
     });
   });
+
+  /**
+   * ENG-204 (ADR-018): el profesional cancela y el paciente elige el reembolso.
+   * Las reglas de cada camino están en `professional-cancellation.service.spec`;
+   * acá se verifica el borde HTTP: autenticación, validación y quién puede.
+   */
+  describe('PATCH /appointments/:id/cancel-by-professional', () => {
+    const URL = `/appointments/${APPOINTMENT_ROW.id}/cancel-by-professional`;
+    const REASON = 'Tengo un congreso ese día y no voy a estar.';
+    let tx: {
+      appointment: { update: jest.Mock };
+      auditLog: { create: jest.Mock };
+    };
+
+    beforeEach(() => {
+      tx = {
+        appointment: { update: jest.fn().mockResolvedValue({}) },
+        auditLog: { create: jest.fn().mockResolvedValue({}) },
+      };
+      Object.assign(prisma, {
+        $transaction: jest.fn((cb: (t: typeof tx) => unknown) => cb(tx)),
+      });
+      // Los avisos al paciente leen el turno por Prisma; sin fila no mandan nada.
+      Object.assign(prisma.appointment, {
+        findUnique: jest.fn().mockResolvedValue(null),
+      });
+    });
+
+    it('sin token devuelve 401 y no toca nada', async () => {
+      await request(app.getHttpServer())
+        .patch(URL)
+        .send({ reason: REASON })
+        .expect(401);
+      expect(tx.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('rechaza un id que no es UUID', async () => {
+      await request(app.getHttpServer())
+        .patch('/appointments/no-es-uuid/cancel-by-professional')
+        .set('Authorization', `Bearer ${await signToken(PRO_ID)}`)
+        .send({ reason: REASON })
+        .expect(400);
+    });
+
+    it.each([
+      ['sin motivo', {}],
+      ['con un motivo muy corto', { reason: 'no puedo' }],
+      ['con campos de más', { reason: REASON, status: 'CANCELADO' }],
+    ])('400 %s', async (_caso, body) => {
+      await request(app.getHttpServer())
+        .patch(URL)
+        .set('Authorization', `Bearer ${await signToken(PRO_ID)}`)
+        .send(body)
+        .expect(400);
+      expect(tx.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('el profesional cancela un turno pagado: queda A_REPROGRAMAR con plazo', async () => {
+      results = [
+        { data: { ...APPOINTMENT_ROW, status: 'CONFIRMADO' }, error: null },
+      ];
+
+      const res = await request(app.getHttpServer())
+        .patch(URL)
+        .set('Authorization', `Bearer ${await signToken(PRO_ID)}`)
+        .send({ reason: `  ${REASON}  ` })
+        .expect(200);
+
+      expect(res.body).toEqual({
+        id: APPOINTMENT_ROW.id,
+        status: 'A_REPROGRAMAR',
+        cancelledBy: 'PROFESIONAL',
+        // El turno es en 2 h: el plazo es la hora del turno, no 48 h.
+        reprogramDeadline: APPOINTMENT_ROW.scheduled_at,
+      });
+      expect(tx.appointment.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ cancellation_reason: REASON }),
+        }),
+      );
+    });
+
+    it('el paciente del turno recibe 403', async () => {
+      results = [
+        { data: { ...APPOINTMENT_ROW, status: 'CONFIRMADO' }, error: null },
+      ];
+
+      await request(app.getHttpServer())
+        .patch(URL)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({ reason: REASON })
+        .expect(403);
+      expect(tx.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('un turno que no es del usuario da 404', async () => {
+      results = [{ data: null, error: null }];
+
+      await request(app.getHttpServer())
+        .patch(URL)
+        .set('Authorization', `Bearer ${await signToken(PRO_ID)}`)
+        .send({ reason: REASON })
+        .expect(404);
+    });
+  });
+
+  describe('PATCH /appointments/:id/full-refund', () => {
+    const URL = `/appointments/${APPOINTMENT_ROW.id}/full-refund`;
+
+    it('sin token devuelve 401', async () => {
+      await request(app.getHttpServer()).patch(URL).expect(401);
+    });
+
+    it('rechaza un id que no es UUID', async () => {
+      await request(app.getHttpServer())
+        .patch('/appointments/no-es-uuid/full-refund')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(400);
+    });
+
+    it('un turno que no está a reprogramar da 409 y no reembolsa', async () => {
+      results = [
+        { data: { ...APPOINTMENT_ROW, status: 'CONFIRMADO' }, error: null },
+      ];
+
+      await request(app.getHttpServer())
+        .patch(URL)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(409);
+      expect(prisma.refund.findMany).not.toHaveBeenCalled();
+    });
+
+    it('el profesional no puede pedir el reembolso del paciente', async () => {
+      results = [
+        { data: { ...APPOINTMENT_ROW, status: 'A_REPROGRAMAR' }, error: null },
+      ];
+
+      await request(app.getHttpServer())
+        .patch(URL)
+        .set('Authorization', `Bearer ${await signToken(PRO_ID)}`)
+        .expect(403);
+    });
+  });
 });

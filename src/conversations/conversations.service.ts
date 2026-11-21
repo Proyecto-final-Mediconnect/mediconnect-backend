@@ -22,6 +22,9 @@ export const CHAT_ENABLING_STATUSES: appointment_status[] = [
   'CONFIRMADO',
   'COMPLETADO',
   'NO_ASISTIO',
+  // ENG-204: el paciente pagó y el profesional canceló. Es justo cuando más
+  // sirve poder escribirse para acordar el horario nuevo.
+  'A_REPROGRAMAR',
 ];
 
 type ChatRole = 'PACIENTE' | 'PROFESIONAL';

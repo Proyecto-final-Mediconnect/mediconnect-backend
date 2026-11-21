@@ -967,6 +967,8 @@ describe('AppointmentsService', () => {
         },
         data: {
           status: 'CANCELADO',
+          // ADR-018, caso 10: queda quién canceló.
+          cancelled_by: 'PACIENTE',
           cancelled_at: NOW,
           updated_at: NOW,
         },

@@ -41,6 +41,16 @@ enum appointment_status {
   COMPLETADO
   NO_ASISTIO
   LIBERADO
+  /// Turno pagado que el profesional canceló (ADR-018, caso 1): el horario
+  /// quedó libre y el paciente elige otro o el reembolso del 100 %.
+  A_REPROGRAMAR
+}
+
+/// Quién canceló el turno (ADR-018, caso 10).
+enum appointment_cancelled_by {
+  PACIENTE
+  PROFESIONAL
+  SISTEMA
 }
 
 enum video_session_status {
@@ -94,6 +104,8 @@ enum notification_type {
   MEDIPASS_ACCESO
   RESENA_PEDIDA
   PAGO_ACREDITADO
+  TURNO_CANCELADO_PROFESIONAL
+  REEMBOLSO_TOTAL
 }
 
 enum notification_channel {
@@ -402,24 +414,29 @@ model CancellationPolicy {
 /// esa cláusula NO es equivalente — impediría revender un turno cancelado — así
 /// que el índice vive solo en el SQL de la migración.
 model Appointment {
-  id                            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  patient_id                    String             @db.Uuid
-  professional_id               String             @db.Uuid
-  scheduled_at                  DateTime           @db.Timestamptz(6)
-  duration_minutes              Int                @db.SmallInt
-  price                         Decimal            @db.Decimal(10, 2)
-  status                        appointment_status @default(RESERVADO_SIN_PAGAR)
+  id                            String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  patient_id                    String                    @db.Uuid
+  professional_id               String                    @db.Uuid
+  scheduled_at                  DateTime                  @db.Timestamptz(6)
+  duration_minutes              Int                       @db.SmallInt
+  price                         Decimal                   @db.Decimal(10, 2)
+  status                        appointment_status        @default(RESERVADO_SIN_PAGAR)
   cancellation_reason           String?
-  cancelled_at                  DateTime?          @db.Timestamptz(6)
+  cancelled_at                  DateTime?                 @db.Timestamptz(6)
   /// Copia de la política de cancelación al reservar (ENG-65). La escribe un
   /// trigger; NULL = el profesional no tenía política y aplica el default.
-  policy_hours_full_refund      Int?               @db.SmallInt
-  policy_hours_partial_refund   Int?               @db.SmallInt
-  policy_partial_refund_percent Int?               @db.SmallInt
+  policy_hours_full_refund      Int?                      @db.SmallInt
+  policy_hours_partial_refund   Int?                      @db.SmallInt
+  policy_partial_refund_percent Int?                      @db.SmallInt
   /// Cuándo se movió de horario (ENG-66). Un turno se reprograma una sola vez.
-  rescheduled_at                DateTime?          @db.Timestamptz(6)
-  created_at                    DateTime           @default(now()) @db.Timestamptz(6)
-  updated_at                    DateTime           @default(now()) @db.Timestamptz(6)
+  rescheduled_at                DateTime?                 @db.Timestamptz(6)
+  /// Quién canceló (ADR-018, caso 10). `null` en un turno que nadie canceló.
+  cancelled_by                  appointment_cancelled_by?
+  /// Hasta cuándo el paciente puede elegir en `A_REPROGRAMAR` (ADR-018, caso 2):
+  /// la hora original del turno o 48 h desde el aviso, lo que llegue primero.
+  reprogram_deadline            DateTime?                 @db.Timestamptz(6)
+  created_at                    DateTime                  @default(now()) @db.Timestamptz(6)
+  updated_at                    DateTime                  @default(now()) @db.Timestamptz(6)
 
   patient                 Patient                @relation(fields: [patient_id], references: [profile_id])
   professional            Professional           @relation(fields: [professional_id], references: [profile_id])

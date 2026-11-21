@@ -1,7 +1,10 @@
 import { Logger } from '@nestjs/common';
 import * as Sentry from '@sentry/nestjs';
 
-jest.mock('@sentry/nestjs', () => ({ captureMessage: jest.fn() }));
+jest.mock('@sentry/nestjs', () => ({
+  captureMessage: jest.fn(),
+  captureException: jest.fn(),
+}));
 import { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CancellationRefundService } from './cancellation-refund.service';
@@ -259,6 +262,107 @@ describe('CancellationRefundService', () => {
       expect(loggerError).toHaveBeenCalledWith(
         expect.stringContaining('REFUND_LOST'),
       );
+    });
+  });
+
+  describe('refundInFull (ENG-204)', () => {
+    it('devuelve el 100 % aunque la política diera menos, con el motivo del profesional', async () => {
+      // A 2 h del turno la política default no devuelve nada.
+      prisma.appointment.findUnique.mockResolvedValue(
+        appointment({ scheduled_at: inHours(2) }),
+      );
+
+      const result = await service.refundInFull(
+        APPOINTMENT_ID,
+        NOW,
+        'CANCELACION_PROFESIONAL',
+      );
+
+      expect(result).toEqual({
+        percent: 100,
+        amount: 15000,
+        status: 'PROCESADO',
+      });
+      expect(prisma.refund.create).toHaveBeenCalledWith({
+        data: {
+          payment_id: 'pay-1',
+          amount: new Prisma.Decimal('15000'),
+          reason: 'CANCELACION_PROFESIONAL',
+        },
+      });
+      expect(mercadoPago.refundPayment).toHaveBeenCalledWith(
+        'mp-123',
+        15000,
+        'refund-ref-1',
+      );
+      expect(prisma.payment.update).toHaveBeenCalledWith({
+        where: { id: 'pay-1' },
+        data: { status: 'REEMBOLSADO' },
+      });
+    });
+
+    it('usa el motivo de vencimiento cuando lo pide el job', async () => {
+      await service.refundInFull(
+        APPOINTMENT_ID,
+        NOW,
+        'VENCIMIENTO_REPROGRAMACION',
+      );
+
+      expect(prisma.refund.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ reason: 'VENCIMIENTO_REPROGRAMACION' }),
+      });
+    });
+
+    it('sin pago aprobado no devuelve nada', async () => {
+      prisma.appointment.findUnique.mockResolvedValue(
+        appointment({ payment: { status: 'PENDIENTE' } }),
+      );
+
+      const result = await service.refundInFull(
+        APPOINTMENT_ID,
+        NOW,
+        'CANCELACION_PROFESIONAL',
+      );
+
+      expect(result).toEqual({ percent: 100, amount: 0, status: null });
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+    });
+
+    it('si otro camino ya registró el reembolso total, informa ese y no pide otro', async () => {
+      prisma.refund.create.mockRejectedValue(
+        Object.assign(new Error('unique'), { code: 'P2002' }),
+      );
+      prisma.refund.findFirst.mockResolvedValue({
+        amount: new Prisma.Decimal('15000'),
+        status: 'PROCESADO',
+      });
+
+      const result = await service.refundInFull(
+        APPOINTMENT_ID,
+        NOW,
+        'VENCIMIENTO_REPROGRAMACION',
+      );
+
+      expect(result).toEqual({
+        percent: 100,
+        amount: 15000,
+        status: 'PROCESADO',
+      });
+      expect(mercadoPago.refundPayment).not.toHaveBeenCalled();
+      expect(loggerError).not.toHaveBeenCalled();
+    });
+
+    it('nunca tira: si la lectura falla, queda PENDIENTE y va a Sentry', async () => {
+      prisma.appointment.findUnique.mockRejectedValue(new Error('db caída'));
+
+      const result = await service.refundInFull(
+        APPOINTMENT_ID,
+        NOW,
+        'CANCELACION_PROFESIONAL',
+      );
+
+      expect(result).toEqual({ percent: 100, amount: 0, status: 'PENDIENTE' });
+      expect(Sentry.captureException).toHaveBeenCalled();
     });
   });
 

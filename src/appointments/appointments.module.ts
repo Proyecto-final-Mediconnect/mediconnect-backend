@@ -7,6 +7,7 @@ import { AppointmentClosingService } from './appointment-closing.service';
 import { AppointmentsController } from './appointments.controller';
 import { AppointmentsService } from './appointments.service';
 import { AvailabilityController } from './availability.controller';
+import { ProfessionalCancellationService } from './professional-cancellation.service';
 import { UnpaidReleaseService } from './unpaid-release.service';
 
 @Module({
@@ -25,6 +26,7 @@ import { UnpaidReleaseService } from './unpaid-release.service';
     AppointmentsService,
     UnpaidReleaseService,
     AppointmentClosingService,
+    ProfessionalCancellationService,
   ],
   // ENG-56 (videoconsulta) y ENG-55 (ver mis turnos) van a necesitar leer turnos;
   // se exporta para que no reimplementen el acceso.
@@ -34,6 +36,7 @@ import { UnpaidReleaseService } from './unpaid-release.service';
     AppointmentsService,
     UnpaidReleaseService,
     AppointmentClosingService,
+    ProfessionalCancellationService,
   ],
 })
 export class AppointmentsModule {}

@@ -77,8 +77,24 @@ const PRISMA_UNIQUE_VIOLATION = 'P2002';
 /** MercadoPago vence la `X-Idempotency-Key` a las 24 h. */
 const IDEMPOTENCY_KEY_TTL_MS = 24 * 3_600_000;
 
-/** Motivo que queda en `refunds.reason`. */
+/** Motivo que queda en `refunds.reason` cuando cancela el paciente. */
 const CANCELLATION_REASON = 'CANCELACION_PACIENTE';
+
+/**
+ * Por qué se devuelve el 100 % de un turno pagado que no se dio por causa del
+ * profesional (ADR-018). Va en `refunds.reason`; ninguno empieza con `PAGO_`,
+ * así que no entra en el índice único de ENG-144.
+ */
+export type FullRefundReason =
+  /** El profesional canceló y el paciente eligió el reembolso (caso 1). */
+  | 'CANCELACION_PROFESIONAL'
+  /** El profesional canceló y venció el plazo para elegir (caso 2). */
+  | 'VENCIMIENTO_REPROGRAMACION';
+
+const FULL_REFUND_REASONS: readonly FullRefundReason[] = [
+  'CANCELACION_PROFESIONAL',
+  'VENCIMIENTO_REPROGRAMACION',
+];
 
 /**
  * Por qué se devuelve un pago que no se pudo aplicar a un turno (ENG-144). Va en
@@ -149,6 +165,36 @@ export class CancellationRefundService {
         `REFUND_LOST: no se pudo calcular el reembolso del turno ${appointmentId}: ${String(err)}`,
       );
       return { percent: 0, amount: 0, status: 'PENDIENTE' };
+    }
+  }
+
+  /**
+   * Devuelve el **100 %** del pago de un turno que no se dio por causa del
+   * profesional (ADR-018, casos 1 y 2), sin mirar la política de cancelación:
+   * las penalidades son solo para las decisiones del paciente.
+   *
+   * La llama `ProfessionalCancellationService` después de pasar el turno de
+   * `A_REPROGRAMAR` a `CANCELADO`. Ese UPDATE es condicional sobre el estado,
+   * así que gana una sola de las dos salidas posibles (el paciente pide el
+   * reembolso o vence el plazo) y este método corre una vez por turno.
+   *
+   * **Nunca tira**, por lo mismo que `refundCancellation`.
+   */
+  async refundInFull(
+    appointmentId: string,
+    now: Date,
+    reason: FullRefundReason,
+  ): Promise<CancellationRefund> {
+    try {
+      return await this.refund(appointmentId, now, { percent: 100, reason });
+    } catch (err) {
+      this.logger.error(
+        `REFUND_LOST: no se pudo calcular el reembolso total del turno ${appointmentId}: ${String(err)}`,
+      );
+      Sentry.captureException(err, {
+        tags: { feature: 'eng204', operation: 'refund_in_full' },
+      });
+      return { percent: 100, amount: 0, status: 'PENDIENTE' };
     }
   }
 
@@ -295,13 +341,15 @@ export class CancellationRefundService {
   private async refund(
     appointmentId: string,
     now: Date,
+    /** Sin esto, el porcentaje lo da la política congelada (cancela el paciente). */
+    full?: { percent: 100; reason: FullRefundReason },
   ): Promise<CancellationRefund> {
     const appointment = await this.read(appointmentId);
 
     const unapplied = this.unappliedRefundOf(appointment?.payment);
     if (unapplied) return unapplied;
 
-    const { percent, amount } = this.compute(appointment, now);
+    const { percent, amount } = this.compute(appointment, now, full?.percent);
     const payment = appointment?.payment;
 
     // Sin pago aprobado `compute` da monto 0; con la política en 0 % también.
@@ -317,10 +365,28 @@ export class CancellationRefundService {
         data: {
           payment_id: payment.id,
           amount,
-          reason: CANCELLATION_REASON,
+          reason: full?.reason ?? CANCELLATION_REASON,
         },
       });
     } catch (err) {
+      // Reembolso total ya registrado por otro camino (ADR-018): el índice
+      // `refunds_payment_full_refund_uq` frenó el segundo. Se informa el que hay.
+      if (full && (err as { code?: string }).code === 'P2002') {
+        const existing = await this.prisma.refund.findFirst({
+          where: {
+            payment_id: payment.id,
+            reason: { in: [...FULL_REFUND_REASONS] },
+          },
+          select: { amount: true, status: true },
+        });
+        if (existing) {
+          return {
+            percent,
+            amount: existing.amount.toNumber(),
+            status: existing.status,
+          };
+        }
+      }
       this.logger.error(
         `REFUND_LOST: no se pudo registrar el reembolso del turno ${appointmentId} (pago ${payment.id}, ${amount.toString()}): ${String(err)}`,
       );
@@ -423,13 +489,19 @@ export class CancellationRefundService {
     });
   }
 
-  /** Porcentaje y monto. Sin pago aprobado no hay nada que devolver. */
+  /**
+   * Porcentaje y monto. Sin pago aprobado no hay nada que devolver.
+   *
+   * `fixedPercent` saltea la política: es el 100 % de un turno que no se dio
+   * por causa del profesional.
+   */
   private compute(
     appointment: RefundableAppointment | null,
     now: Date,
+    fixedPercent?: number,
   ): { percent: number; amount: Prisma.Decimal } {
     if (!appointment) {
-      return { percent: 0, amount: new Prisma.Decimal(0) };
+      return { percent: fixedPercent ?? 0, amount: new Prisma.Decimal(0) };
     }
 
     const { policy } = resolvePolicy({
@@ -437,7 +509,8 @@ export class CancellationRefundService {
       hours_partial_refund: appointment.policy_hours_partial_refund,
       partial_refund_percent: appointment.policy_partial_refund_percent,
     });
-    const percent = refundPercentFor(policy, appointment.scheduled_at, now);
+    const percent =
+      fixedPercent ?? refundPercentFor(policy, appointment.scheduled_at, now);
 
     const payment = appointment.payment;
     if (payment?.status !== 'APROBADO') {
