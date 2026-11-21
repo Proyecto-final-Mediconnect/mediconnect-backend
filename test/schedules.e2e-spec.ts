@@ -74,19 +74,42 @@ describe('Agenda del profesional (e2e)', () => {
     ({ publicKey, privateKey } = await generateKeyPair('ES256'));
   });
 
+  /** Prisma: el bloqueo se escribe en una transacción con los turnos (ENG-206). */
+  let prisma: {
+    appointment: { findMany: jest.Mock };
+    scheduleBlock: { findMany: jest.Mock; create: jest.Mock };
+    $transaction: jest.Mock;
+    [key: string]: unknown;
+  };
+
   beforeEach(async () => {
     results = [];
     inserts = [];
+    prisma = {
+      profile: { findUnique: jest.fn() },
+      ...legalAcceptedPrismaMock(),
+      appointment: { findMany: jest.fn().mockResolvedValue([]) },
+      scheduleBlock: {
+        findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn(({ data }: { data: Record<string, unknown> }) =>
+          Promise.resolve({
+            id: '33333333-3333-4333-8333-333333333333',
+            ...data,
+          }),
+        ),
+      },
+      $transaction: jest.fn(),
+    };
+    prisma.$transaction.mockImplementation((cb: (tx: unknown) => unknown) =>
+      cb(prisma),
+    );
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
       .overrideProvider(SupabaseService)
       .useValue(makeSupabaseMock())
       .overrideProvider(PrismaService)
-      .useValue({
-        profile: { findUnique: jest.fn() },
-        ...legalAcceptedPrismaMock(),
-      })
+      .useValue(prisma)
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -257,29 +280,35 @@ describe('Agenda del profesional (e2e)', () => {
   });
 
   describe('POST /professionals/me/schedule/blocks', () => {
+    /** Turno pagado de Julián el 02/09 a las 10:00 (Argentina), en el futuro. */
+    const TURNO = {
+      id: '44444444-4444-4444-8444-444444444444',
+      professional_id: SUB,
+      status: 'CONFIRMADO',
+      scheduled_at: new Date('2099-09-02T13:00:00.000Z'),
+      duration_minutes: 30,
+      patient: { first_name: 'Julián', last_name: 'Paciente' },
+    };
+
     it('sin horas crea un bloqueo de día completo y responde 201', async () => {
-      results = [
-        PROFILE_EXISTS,
-        {
-          data: {
-            id: '33333333-3333-4333-8333-333333333333',
-            block_date: '2026-09-02',
-            start_time: null,
-            end_time: null,
-            reason: null,
-          },
-          error: null,
-        },
-      ];
+      results = [PROFILE_EXISTS];
 
       const res = await request(app.getHttpServer())
         .post('/professionals/me/schedule/blocks')
         .set('Authorization', `Bearer ${await signToken()}`)
-        .send({ blockDate: '2026-09-02' })
+        .send({ blockDate: '2099-09-02' })
         .expect(201);
 
-      expect(inserts[0]).toMatchObject({ start_time: null, end_time: null });
-      expect(res.body.startTime).toBeNull();
+      expect(prisma.scheduleBlock.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ start_time: null, end_time: null }),
+        }),
+      );
+      expect(res.body).toMatchObject({
+        startTime: null,
+        endTime: null,
+        cancelledAppointments: [],
+      });
     });
 
     it('con una sola de las dos horas devuelve 400 y lo explica', async () => {
@@ -301,13 +330,82 @@ describe('Agenda del profesional (e2e)', () => {
     });
 
     it('traduce el unique violation de la base a 409', async () => {
-      results = [PROFILE_EXISTS, { data: null, error: { code: '23505' } }];
+      results = [PROFILE_EXISTS];
+      prisma.scheduleBlock.create.mockRejectedValue(
+        Object.assign(new Error('dup'), { code: 'P2002' }),
+      );
 
       await request(app.getHttpServer())
         .post('/professionals/me/schedule/blocks')
         .set('Authorization', `Bearer ${await signToken()}`)
-        .send({ blockDate: '2026-09-02' })
+        .send({ blockDate: '2099-09-02' })
         .expect(409);
+    });
+
+    it('ENG-206: con un turno tomado y sin confirmar, 409 con la lista', async () => {
+      results = [PROFILE_EXISTS];
+      prisma.appointment.findMany.mockResolvedValue([TURNO]);
+
+      const res = await request(app.getHttpServer())
+        .post('/professionals/me/schedule/blocks')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({ blockDate: '2099-09-02' })
+        .expect(409);
+
+      expect(res.body).toMatchObject({
+        code: 'BLOCK_HAS_APPOINTMENTS',
+        affected: [{ id: TURNO.id, startTime: '10:00', paid: true }],
+      });
+      expect(prisma.scheduleBlock.create).not.toHaveBeenCalled();
+    });
+
+    it('ENG-206: un motivo para pacientes demasiado corto es 400', async () => {
+      await request(app.getHttpServer())
+        .post('/professionals/me/schedule/blocks')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({
+          blockDate: '2099-09-02',
+          cancelAffected: true,
+          cancellationReason: 'no',
+        })
+        .expect(400);
+    });
+  });
+
+  describe('POST /professionals/me/schedule/blocks/preview (ENG-206)', () => {
+    it('devuelve los turnos que pisaría, sin crear nada', async () => {
+      results = [PROFILE_EXISTS];
+      prisma.appointment.findMany.mockResolvedValue([
+        {
+          id: '44444444-4444-4444-8444-444444444444',
+          professional_id: SUB,
+          status: 'RESERVADO_SIN_PAGAR',
+          scheduled_at: new Date('2099-09-02T13:00:00.000Z'),
+          duration_minutes: 30,
+          patient: { first_name: 'Julián', last_name: 'Paciente' },
+        },
+      ]);
+
+      const res = await request(app.getHttpServer())
+        .post('/professionals/me/schedule/blocks/preview')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({ blockDate: '2099-09-02' })
+        .expect(200);
+
+      expect(res.body.affected).toEqual([
+        expect.objectContaining({
+          paid: false,
+          patient: { firstName: 'Julián', lastName: 'Paciente' },
+        }),
+      ]);
+      expect(prisma.scheduleBlock.create).not.toHaveBeenCalled();
+    });
+
+    it('sin token devuelve 401', async () => {
+      await request(app.getHttpServer())
+        .post('/professionals/me/schedule/blocks/preview')
+        .send({ blockDate: '2099-09-02' })
+        .expect(401);
     });
   });
 

@@ -47,6 +47,17 @@ export class SchedulesController {
     return this.schedules.saveMyRules(accessToken, userId, dto);
   }
 
+  /**
+   * Qué turnos pisaría un bloqueo, sin crearlo (ENG-206). Es lo que la pantalla
+   * le muestra al profesional antes de confirmar.
+   */
+  @Post('blocks/preview')
+  @HttpCode(HttpStatus.OK)
+  previewBlock(@Req() req: Request, @Body() dto: CreateScheduleBlockDto) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.schedules.previewBlock(accessToken, userId, dto);
+  }
+
   @Post('blocks')
   @HttpCode(HttpStatus.CREATED)
   createBlock(@Req() req: Request, @Body() dto: CreateScheduleBlockDto) {
