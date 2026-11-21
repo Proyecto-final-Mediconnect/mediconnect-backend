@@ -74,6 +74,7 @@ se saca el override.
 | `express>proxy-addr` `^2.0.8` | GHSA-jqcg-44mw-7w3h (critical, spoofing de IP con IPv4 mapeado) |
 | `express>body-parser` `^2.4.0` | GHSA-27r3-jxmh-p828 (DoS, high) |
 | `@prisma/config>deepmerge-ts` `^8.0.0` | GHSA-ggr8-5vv4-36mx (agotamiento de pila, high). Sube de major (7 a 8); lo usa solo la CLI de Prisma para mergear la config, y `prisma validate`, `prisma generate` y el build siguen andando |
+| `@prisma/config>effect` `^3.22.1` | GHSA-7589-6fvf-x4pw (ReDoS en `Schema.TemplateLiteral`, high). Misma major; lo usa solo la CLI de Prisma para leer la config |
 
 ## Notas sobre Supabase (producción)
 
