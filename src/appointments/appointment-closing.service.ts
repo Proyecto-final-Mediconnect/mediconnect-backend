@@ -9,6 +9,10 @@ import {
 import type { appointment_status } from '../../generated/prisma';
 import { Prisma } from '../../generated/prisma/client';
 import { APPOINTMENT_SELECT, type AppointmentRow } from './appointment-row';
+import { resetAttendance } from './attendance-reset';
+import { reprogramDeadlineAfterMissed } from './professional-cancellation.service';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
+import { PatientNoticesService } from '../notifications/patient-notices.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { DailyService } from '../video/daily.service';
@@ -25,13 +29,20 @@ import {
  * la seed, así que un paciente real nunca podía reseñar (ENG-80 exige
  * `COMPLETADO`) y el turno quedaba `CONFIRMADO` para siempre.
  *
- * Tres caminos, los tres auditados:
+ * Cuatro caminos, todos auditados:
  *
  * - **El profesional finaliza** la consulta (`complete`).
  * - **El profesional marca que el paciente no se presentó** (`markNoShow`).
  * - **El job** cierra lo que nadie cerró, según quién entró a la sala
- *   (`closeFinished`).
+ *   (`closeFinished`). Si el profesional no entró, el turno no se hizo y queda
+ *   a reprogramar (ENG-237, casos 3 y 4).
+ * - **El profesional informa una falla técnica** de una consulta completada
+ *   (`reportTechnicalFailure`, ENG-237, caso 13).
  */
+
+/** Motivo que ve el paciente cuando el profesional no se conectó (casos 3 y 4). */
+export const PROFESSIONAL_NO_SHOW_REASON =
+  'El profesional no se conectó a la consulta.';
 
 /** Cuánto después del final del turno el profesional todavía puede cerrarlo a
  *  mano. Pasado eso, el turno lo cerró el job o queda como está. */
@@ -41,7 +52,16 @@ export type ClosedStatus = 'COMPLETADO' | 'NO_ASISTIO';
 
 export interface ClosedAppointment {
   id: string;
-  status: ClosedStatus;
+  /** `A_REPROGRAMAR`: no entró el profesional (ENG-237, casos 3 y 4). */
+  status: ClosedStatus | 'A_REPROGRAMAR';
+}
+
+/** Resultado de informar una falla técnica (ENG-237, caso 13). */
+export interface TechnicalFailureResult {
+  id: string;
+  status: 'A_REPROGRAMAR';
+  /** ISO-8601: hasta cuándo el paciente elige otro horario o el reembolso. */
+  reprogramDeadline: string;
 }
 
 const AUDIT_ACTION: Record<ClosedStatus, string> = {
@@ -57,6 +77,8 @@ export class AppointmentClosingService {
     private readonly prisma: PrismaService,
     private readonly supabase: SupabaseService,
     private readonly daily: DailyService,
+    private readonly notices: PatientNoticesService,
+    private readonly inApp: InAppNotificationsService,
   ) {}
 
   /**
@@ -161,8 +183,18 @@ export class AppointmentClosingService {
    * dejaría una ventana para que el profesional cierre a mano el mismo turno.
    */
   async closeFinished(now: Date = new Date()): Promise<ClosedAppointment[]> {
+    const closed = await this.closeAttended(now);
+    const missed = await this.resolveMissed(now);
+    return [
+      ...closed,
+      ...missed.map((id) => ({ id, status: 'A_REPROGRAMAR' as const })),
+    ];
+  }
+
+  /** Los turnos a los que entró el profesional: completados o no asistió. */
+  private closeAttended(now: Date): Promise<ClosedAppointment[]> {
     return this.prisma.$transaction(async (tx) => {
-      const closed = await tx.$queryRaw<ClosedAppointment[]>`
+      const closed = await tx.$queryRaw<{ id: string; status: ClosedStatus }[]>`
         update public.appointments a
            set status = (case when c.patient_joined_at is not null
                               then 'COMPLETADO' else 'NO_ASISTIO' end)::appointment_status,
@@ -193,6 +225,171 @@ export class AppointmentClosingService {
       this.logger.log(`Cerré ${closed.length} turno(s) vencido(s).`);
       return closed;
     });
+  }
+
+  /**
+   * ENG-237 (ADR-018, casos 3 y 4): un turno `CONFIRMADO` cuya sala ya cerró y
+   * al que **no entró el profesional** —haya entrado o no el paciente— no se
+   * realizó. Pasa a `A_REPROGRAMAR` como si el profesional lo hubiera
+   * cancelado: el paciente elige otro horario sin volver a pagar o el 100 %,
+   * con 48 h desde el aviso.
+   *
+   * Decide y escribe en un solo `UPDATE … RETURNING`, como el cierre de arriba:
+   * el `where` exige `CONFIRMADO`, así que una corrida repetida no lo toca dos
+   * veces. Los avisos salen después del commit y nunca tiran.
+   */
+  private async resolveMissed(now: Date): Promise<string[]> {
+    const deadline = reprogramDeadlineAfterMissed(now);
+    const missed = await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<
+        { id: string; patient_joined: boolean }[]
+      >`
+        update public.appointments a
+           set status = 'A_REPROGRAMAR'::appointment_status,
+               cancelled_by = 'PROFESIONAL'::appointment_cancelled_by,
+               reprogram_cause = 'AUSENCIA_PROFESIONAL'::appointment_reprogram_cause,
+               cancellation_reason = ${PROFESSIONAL_NO_SHOW_REASON},
+               cancelled_at = ${now},
+               reprogram_deadline = ${deadline},
+               updated_at = ${now}
+          from public.appointments m
+          left join public.consultations c on c.appointment_id = m.id
+         where a.id = m.id
+           and a.status = 'CONFIRMADO'::appointment_status
+           and c.professional_joined_at is null
+           and a.scheduled_at
+               + make_interval(mins => a.duration_minutes + ${JOIN_GRACE_MINUTES_AFTER}::int)
+               < ${now}
+        returning a.id, (c.patient_joined_at is not null) as patient_joined`;
+      if (rows.length === 0) return rows;
+
+      await resetAttendance(
+        tx,
+        rows.map((r) => r.id),
+      );
+      await tx.auditLog.createMany({
+        data: rows.map((r) => ({
+          actor_id: null,
+          action: 'APPOINTMENT_PROFESSIONAL_NO_SHOW',
+          resource_type: 'appointments',
+          resource_id: r.id,
+          metadata: {
+            previousStatus: 'CONFIRMADO',
+            newStatus: 'A_REPROGRAMAR',
+            patientJoined: r.patient_joined,
+            reprogramDeadline: deadline.toISOString(),
+            origin: 'JOB',
+          },
+        })),
+      });
+      return rows;
+    });
+
+    for (const { id } of missed) {
+      await this.notices.professionalCancelled(id, 'A_REPROGRAMAR', now);
+      await this.inApp.notifyProfessional(id, 'TURNO_NO_REALIZADO', now, {
+        cause: 'AUSENCIA_PROFESIONAL',
+      });
+    }
+    if (missed.length > 0) {
+      this.logger.warn(
+        `${missed.length} turno(s) sin el profesional: quedaron a reprogramar.`,
+      );
+    }
+    return missed.map((r) => r.id);
+  }
+
+  /**
+   * ENG-237 (ADR-018, caso 13): el profesional informa que una consulta
+   * completada no se pudo hacer por una falla técnica. El turno pasa a
+   * `A_REPROGRAMAR` como en el caso 1: el paciente elige otro horario sin
+   * volver a pagar o el 100 %, con 48 h desde el aviso.
+   *
+   * Solo el profesional del turno, solo desde `COMPLETADO` y hasta
+   * {@link MANUAL_CLOSE_HOURS_AFTER} horas después del final. El `where`
+   * revalida estado y profesional: si algo cambió en el medio, 409.
+   */
+  async reportTechnicalFailure(
+    accessToken: string,
+    userId: string,
+    appointmentId: string,
+    reason: string,
+    now: Date = new Date(),
+  ): Promise<TechnicalFailureResult> {
+    const row = await this.readOwnAppointment(
+      accessToken,
+      userId,
+      appointmentId,
+    );
+    if (row.status !== 'COMPLETADO') {
+      throw new ConflictException(
+        'Solo se puede informar una falla técnica de una consulta completada.',
+      );
+    }
+    const end =
+      new Date(row.scheduled_at).getTime() + row.duration_minutes * 60_000;
+    if (now.getTime() > end + MANUAL_CLOSE_HOURS_AFTER * 3_600_000) {
+      throw new ConflictException(
+        `Pasaron más de ${MANUAL_CLOSE_HOURS_AFTER} horas desde la consulta: ya no se puede informar una falla técnica.`,
+      );
+    }
+
+    const deadline = reprogramDeadlineAfterMissed(now);
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.appointment.update({
+          where: {
+            id: row.id,
+            professional_id: userId,
+            status: 'COMPLETADO',
+          },
+          data: {
+            status: 'A_REPROGRAMAR',
+            cancelled_by: 'PROFESIONAL',
+            reprogram_cause: 'FALLA_TECNICA',
+            cancellation_reason: reason,
+            cancelled_at: now,
+            reprogram_deadline: deadline,
+            updated_at: now,
+          },
+        });
+        await resetAttendance(tx, [row.id]);
+        await tx.auditLog.create({
+          data: {
+            actor_id: userId,
+            action: 'APPOINTMENT_TECHNICAL_FAILURE',
+            resource_type: 'appointments',
+            resource_id: row.id,
+            metadata: {
+              previousStatus: 'COMPLETADO',
+              newStatus: 'A_REPROGRAMAR',
+              reason,
+              reprogramDeadline: deadline.toISOString(),
+              origin: 'PROFESIONAL',
+            },
+          },
+        });
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code === 'P2025') {
+        throw new ConflictException(
+          'El turno cambió de estado mientras lo informabas. Actualizá la pantalla.',
+        );
+      }
+      this.logger.error(
+        `No se pudo informar la falla técnica del turno ${row.id}: ${String(err)}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos informar la falla técnica. Probá de nuevo en unos minutos.',
+      );
+    }
+
+    await this.notices.professionalCancelled(row.id, 'A_REPROGRAMAR', now);
+    return {
+      id: row.id,
+      status: 'A_REPROGRAMAR',
+      reprogramDeadline: deadline.toISOString(),
+    };
   }
 
   /**

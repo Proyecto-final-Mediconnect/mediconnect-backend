@@ -6,6 +6,8 @@ import {
 import type { PrismaService } from '../prisma/prisma.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { DailyService } from '../video/daily.service';
+import type { InAppNotificationsService } from '../notifications/in-app-notifications.service';
+import type { PatientNoticesService } from '../notifications/patient-notices.service';
 import { AppointmentClosingService } from './appointment-closing.service';
 
 const APPOINTMENT = '44444444-4444-4444-8444-444444444444';
@@ -41,6 +43,8 @@ describe('AppointmentClosingService', () => {
   };
   /** Quién entró a la sala. Por defecto los dos: la consulta se hizo. */
   let deleteRoom: jest.Mock;
+  let notices: { professionalCancelled: jest.Mock };
+  let inApp: { notifyProfessional: jest.Mock };
   let joined: {
     patient_joined_at: Date | null;
     professional_joined_at: Date | null;
@@ -73,9 +77,15 @@ describe('AppointmentClosingService', () => {
     } as unknown as PrismaService;
     deleteRoom = jest.fn().mockResolvedValue(undefined);
 
-    service = new AppointmentClosingService(prisma, supabase, {
-      deleteRoom,
-    } as unknown as DailyService);
+    notices = { professionalCancelled: jest.fn().mockResolvedValue(undefined) };
+    inApp = { notifyProfessional: jest.fn().mockResolvedValue(undefined) };
+    service = new AppointmentClosingService(
+      prisma,
+      supabase,
+      { deleteRoom } as unknown as DailyService,
+      notices as unknown as PatientNoticesService,
+      inApp as unknown as InAppNotificationsService,
+    );
   }
 
   beforeEach(() => {
@@ -294,7 +304,7 @@ describe('AppointmentClosingService', () => {
     });
 
     it('cierra la sesión de los turnos cerrados y audita cada uno como JOB', async () => {
-      tx.$queryRaw.mockResolvedValue([
+      tx.$queryRaw.mockResolvedValueOnce([
         { id: 'a-1', status: 'COMPLETADO' },
         { id: 'a-2', status: 'NO_ASISTIO' },
       ]);
@@ -321,6 +331,184 @@ describe('AppointmentClosingService', () => {
           }),
         ],
       });
+    });
+
+    it('sin el profesional, el turno queda a reprogramar: reinicia la sala, audita y avisa (ENG-237)', async () => {
+      const now = at(60);
+      tx.$queryRaw
+        .mockResolvedValueOnce([]) // cierre de los que entró el profesional
+        .mockResolvedValueOnce([
+          { id: 'a-3', patient_joined: true },
+          { id: 'a-4', patient_joined: false },
+        ]);
+
+      const closed = await service.closeFinished(now);
+
+      expect(closed).toEqual([
+        { id: 'a-3', status: 'A_REPROGRAMAR' },
+        { id: 'a-4', status: 'A_REPROGRAMAR' },
+      ]);
+      // La consulta que no se hizo queda sin marcas de asistencia ni sala.
+      expect(tx.consultation.updateMany).toHaveBeenCalledWith({
+        where: { appointment_id: { in: ['a-3', 'a-4'] } },
+        data: {
+          patient_joined_at: null,
+          professional_joined_at: null,
+          ended_at: null,
+        },
+      });
+      expect(tx.auditLog.createMany).toHaveBeenCalledWith({
+        data: [
+          expect.objectContaining({
+            actor_id: null,
+            action: 'APPOINTMENT_PROFESSIONAL_NO_SHOW',
+            resource_id: 'a-3',
+            metadata: expect.objectContaining({
+              newStatus: 'A_REPROGRAMAR',
+              patientJoined: true,
+              reprogramDeadline: new Date(
+                now.getTime() + 48 * 3_600_000,
+              ).toISOString(),
+              origin: 'JOB',
+            }),
+          }),
+          expect.objectContaining({ resource_id: 'a-4' }),
+        ],
+      });
+      expect(notices.professionalCancelled).toHaveBeenCalledWith(
+        'a-3',
+        'A_REPROGRAMAR',
+        now,
+      );
+      expect(inApp.notifyProfessional).toHaveBeenCalledWith(
+        'a-4',
+        'TURNO_NO_REALIZADO',
+        now,
+        { cause: 'AUSENCIA_PROFESIONAL' },
+      );
+    });
+  });
+
+  describe('reportTechnicalFailure (ENG-237, caso 13)', () => {
+    const MOTIVO = 'Se cortó la videollamada a los dos minutos.';
+
+    beforeEach(() => build(appointmentRow({ status: 'COMPLETADO' })));
+
+    it('deja el turno a reprogramar con 48 h, reinicia la sala, audita y avisa', async () => {
+      const now = at(120);
+
+      const result = await service.reportTechnicalFailure(
+        'jwt',
+        PROFESSIONAL,
+        APPOINTMENT,
+        MOTIVO,
+        now,
+      );
+
+      const deadline = new Date(now.getTime() + 48 * 3_600_000);
+      expect(result).toEqual({
+        id: APPOINTMENT,
+        status: 'A_REPROGRAMAR',
+        reprogramDeadline: deadline.toISOString(),
+      });
+      expect(tx.appointment.update).toHaveBeenCalledWith({
+        where: {
+          id: APPOINTMENT,
+          professional_id: PROFESSIONAL,
+          status: 'COMPLETADO',
+        },
+        data: {
+          status: 'A_REPROGRAMAR',
+          cancelled_by: 'PROFESIONAL',
+          reprogram_cause: 'FALLA_TECNICA',
+          cancellation_reason: MOTIVO,
+          cancelled_at: now,
+          reprogram_deadline: deadline,
+          updated_at: now,
+        },
+      });
+      expect(tx.videoSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ daily_room_name: null }),
+        }),
+      );
+      expect(tx.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          actor_id: PROFESSIONAL,
+          action: 'APPOINTMENT_TECHNICAL_FAILURE',
+          metadata: expect.objectContaining({ reason: MOTIVO }),
+        }),
+      });
+      expect(notices.professionalCancelled).toHaveBeenCalledWith(
+        APPOINTMENT,
+        'A_REPROGRAMAR',
+        now,
+      );
+    });
+
+    it('se puede hasta 24 h después del final de la consulta', async () => {
+      // 15:30 + 24 h.
+      await expect(
+        service.reportTechnicalFailure(
+          'jwt',
+          PROFESSIONAL,
+          APPOINTMENT,
+          MOTIVO,
+          at(30 + 24 * 60),
+        ),
+      ).resolves.toMatchObject({ status: 'A_REPROGRAMAR' });
+    });
+
+    it('da 409 pasadas las 24 h', async () => {
+      await expect(
+        service.reportTechnicalFailure(
+          'jwt',
+          PROFESSIONAL,
+          APPOINTMENT,
+          MOTIVO,
+          at(31 + 24 * 60),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.appointment.update).not.toHaveBeenCalled();
+    });
+
+    it('da 409 si la consulta no está completada', async () => {
+      build(appointmentRow({ status: 'NO_ASISTIO' }));
+      await expect(
+        service.reportTechnicalFailure(
+          'jwt',
+          PROFESSIONAL,
+          APPOINTMENT,
+          MOTIVO,
+          at(60),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('da 403 al paciente', async () => {
+      await expect(
+        service.reportTechnicalFailure(
+          'jwt',
+          PATIENT,
+          APPOINTMENT,
+          MOTIVO,
+          at(60),
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('da 409 si el turno cambió entre la lectura y la escritura, y no avisa', async () => {
+      tx.appointment.update.mockRejectedValue({ code: 'P2025' });
+      await expect(
+        service.reportTechnicalFailure(
+          'jwt',
+          PROFESSIONAL,
+          APPOINTMENT,
+          MOTIVO,
+          at(60),
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(notices.professionalCancelled).not.toHaveBeenCalled();
     });
   });
 });

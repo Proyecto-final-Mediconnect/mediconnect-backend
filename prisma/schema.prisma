@@ -110,6 +110,14 @@ enum notification_type {
   CANCELACION_CONFIRMADA
   REEMBOLSO_ACTUALIZADO
   TURNO_REEMBOLSADO
+  TURNO_NO_REALIZADO
+}
+
+/// Por qué un turno pasó a `A_REPROGRAMAR` sin que el profesional lo cancelara
+/// a mano (ENG-237, ADR-018 casos 3, 4 y 13). `null` es la cancelación a mano.
+enum appointment_reprogram_cause {
+  AUSENCIA_PROFESIONAL
+  FALLA_TECNICA
 }
 
 enum notification_channel {
@@ -439,6 +447,8 @@ model Appointment {
   /// Hasta cuándo el paciente puede elegir en `A_REPROGRAMAR` (ADR-018, caso 2):
   /// la hora original del turno o 48 h desde el aviso, lo que llegue primero.
   reprogram_deadline            DateTime?                 @db.Timestamptz(6)
+  /// ENG-237: por qué quedó a reprogramar si no fue una cancelación a mano.
+  reprogram_cause               appointment_reprogram_cause?
   created_at                    DateTime                  @default(now()) @db.Timestamptz(6)
   updated_at                    DateTime                  @default(now()) @db.Timestamptz(6)
 

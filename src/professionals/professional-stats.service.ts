@@ -29,10 +29,32 @@ export interface StatsTasa {
   denominador: number;
 }
 
+/**
+ * Lo que le pasó al profesional en el período (ENG-237, ADR-018 caso 9): no es
+ * una penalidad monetaria, pero queda registrado y a la vista. Por fecha del
+ * hecho, no del turno.
+ */
+export interface StatsIncidencias {
+  /** Turnos que canceló, a mano o con un bloqueo de agenda (caso 1). */
+  cancelaciones: number;
+  /** Consultas a las que no se conectó (casos 3 y 4). */
+  ausencias: number;
+  /** Consultas que informó como no realizadas por una falla técnica (caso 13). */
+  fallasTecnicas: number;
+}
+
+/** La acción de `audit_logs` que registra cada incidencia. */
+const INCIDENCIA_ACTION = {
+  cancelaciones: 'APPOINTMENT_CANCELLED_BY_PROFESSIONAL',
+  ausencias: 'APPOINTMENT_PROFESSIONAL_NO_SHOW',
+  fallasTecnicas: 'APPOINTMENT_TECHNICAL_FAILURE',
+} as const satisfies Record<keyof StatsIncidencias, string>;
+
 export interface ProfessionalStats {
   from: string;
   to: string;
   turnos: StatsTurnos;
+  incidencias: StatsIncidencias;
   tasas: {
     /** `null` sin turnos que hayan llegado a su fecha: no es un 0 %. */
     cancelacion: StatsTasa | null;
@@ -120,7 +142,7 @@ export class ProfessionalStatsService {
       created_at: { gte: period.start, lt: period.end },
     };
 
-    const [porEstado, porVenir, completadas, rating, sinResponder] =
+    const [porEstado, porVenir, completadas, rating, sinResponder, eventos] =
       await Promise.all([
         this.prisma.appointment.groupBy({
           by: ['status'],
@@ -152,6 +174,21 @@ export class ProfessionalStatsService {
         this.prisma.review.count({
           where: { ...resenasDelPeriodo, response: { is: null } },
         }),
+        // ENG-237: cada cancelación, ausencia o falla queda en `audit_logs`
+        // (append-only), así que se cuenta aunque el turno después se haya
+        // reprogramado o reembolsado.
+        this.prisma.$queryRaw<{ action: string; n: number }[]>`
+          select l.action, count(*)::int as n
+            from public.audit_logs l
+            join public.appointments a on a.id = l.resource_id
+           where l.resource_type = 'appointments'
+             and a.professional_id = ${professionalId}::uuid
+             and l.action in (${INCIDENCIA_ACTION.cancelaciones},
+                              ${INCIDENCIA_ACTION.ausencias},
+                              ${INCIDENCIA_ACTION.fallasTecnicas})
+             and l.created_at >= ${period.start}
+             and l.created_at < ${period.end}
+           group by l.action`,
       ]);
 
     const contar = (status: string) =>
@@ -162,6 +199,14 @@ export class ProfessionalStatsService {
       cancelados: contar('CANCELADO'),
       liberados: contar('LIBERADO'),
       porVenir,
+    };
+
+    const evento = (action: string) =>
+      eventos.find((e) => e.action === action)?.n ?? 0;
+    const incidencias: StatsIncidencias = {
+      cancelaciones: evento(INCIDENCIA_ACTION.cancelaciones),
+      ausencias: evento(INCIDENCIA_ACTION.ausencias),
+      fallasTecnicas: evento(INCIDENCIA_ACTION.fallasTecnicas),
     };
 
     const porPaciente = new Map<string, number>();
@@ -179,6 +224,7 @@ export class ProfessionalStatsService {
       from: period.from,
       to: period.to,
       turnos,
+      incidencias,
       tasas: {
         cancelacion: tasa(
           turnos.cancelados,

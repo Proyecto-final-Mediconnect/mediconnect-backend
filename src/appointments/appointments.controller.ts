@@ -171,4 +171,26 @@ export class AppointmentsController {
     const { userId, accessToken } = requireAuth(req);
     return this.closing.markNoShow(accessToken, userId, id);
   }
+
+  /**
+   * El profesional informa que una consulta completada no se pudo hacer por
+   * una falla técnica (ENG-237, ADR-018 caso 13). El turno queda
+   * `A_REPROGRAMAR` y el paciente elige otro horario o el 100 %. Las reglas
+   * están en `AppointmentClosingService.reportTechnicalFailure`.
+   */
+  @Patch(':id/technical-failure')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  reportTechnicalFailure(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Body() dto: CancelByProfessionalDto,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.closing.reportTechnicalFailure(
+      accessToken,
+      userId,
+      id,
+      dto.reason,
+    );
+  }
 }

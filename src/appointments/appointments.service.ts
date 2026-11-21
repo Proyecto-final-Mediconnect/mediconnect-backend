@@ -167,6 +167,12 @@ export interface AppointmentView {
   /** El motivo que dio el profesional al cancelar (ENG-204), o `null`. */
   cancellationReason: string | null;
   /**
+   * ENG-237: si el turno quedó a reprogramar porque el profesional no se
+   * conectó (`AUSENCIA_PROFESIONAL`) o por una falla técnica (`FALLA_TECNICA`).
+   * `null` si fue una cancelación a mano, o si nunca quedó a reprogramar.
+   */
+  reprogramCause: string | null;
+  /**
    * Hasta cuándo el paciente puede elegir otro horario o el reembolso de un turno
    * `A_REPROGRAMAR` (ISO-8601), o `null` en cualquier otro estado.
    */
@@ -211,13 +217,14 @@ interface AppointmentRow {
   cancelled_by?: string | null;
   cancellation_reason?: string | null;
   reprogram_deadline?: string | null;
+  reprogram_cause?: string | null;
 }
 
 /** Estados en los que un turno pago puede haber tenido un reembolso (ENG-174). */
 const ESTADOS_CON_REEMBOLSO = new Set(['CANCELADO', 'LIBERADO']);
 
 const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status, created_at, cancelled_at, rescheduled_at, cancelled_by, cancellation_reason, reprogram_deadline';
+  'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status, created_at, cancelled_at, rescheduled_at, cancelled_by, cancellation_reason, reprogram_deadline, reprogram_cause';
 
 @Injectable()
 export class AppointmentsService {
@@ -470,6 +477,7 @@ export class AppointmentsService {
             rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
             cancelled_by: updated.cancelled_by,
             cancellation_reason: updated.cancellation_reason,
+            reprogram_cause: updated.reprogram_cause,
             reprogram_deadline:
               updated.reprogram_deadline?.toISOString() ?? null,
           },
@@ -862,6 +870,7 @@ export class AppointmentsService {
           rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
           cancelled_by: updated.cancelled_by,
           cancellation_reason: updated.cancellation_reason,
+          reprogram_cause: updated.reprogram_cause,
           reprogram_deadline: updated.reprogram_deadline?.toISOString() ?? null,
         },
       ],
@@ -1333,6 +1342,7 @@ export class AppointmentsService {
         cancelledAt: isoOrNull(row.cancelled_at),
         cancelledBy: row.cancelled_by ?? null,
         cancellationReason: row.cancellation_reason ?? null,
+        reprogramCause: row.reprogram_cause ?? null,
         reprogramDeadline:
           row.status === 'A_REPROGRAMAR'
             ? isoOrNull(row.reprogram_deadline)

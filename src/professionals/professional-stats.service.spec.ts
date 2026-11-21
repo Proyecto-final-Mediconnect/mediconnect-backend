@@ -24,6 +24,7 @@ describe('ProfessionalStatsService', () => {
     professional: { findUnique: jest.Mock };
     appointment: { groupBy: jest.Mock; count: jest.Mock; findMany: jest.Mock };
     review: { aggregate: jest.Mock; count: jest.Mock };
+    $queryRaw: jest.Mock;
   };
   let service: ProfessionalStatsService;
 
@@ -43,8 +44,24 @@ describe('ProfessionalStatsService', () => {
           .mockResolvedValue({ _avg: { rating: null }, _count: { _all: 0 } }),
         count: jest.fn().mockResolvedValue(0),
       },
+      $queryRaw: jest.fn().mockResolvedValue([]),
     };
     service = new ProfessionalStatsService(prisma as unknown as PrismaService);
+  });
+
+  it('cuenta las cancelaciones, ausencias y fallas técnicas del profesional (ENG-237)', async () => {
+    prisma.$queryRaw.mockResolvedValue([
+      { action: 'APPOINTMENT_CANCELLED_BY_PROFESSIONAL', n: 2 },
+      { action: 'APPOINTMENT_PROFESSIONAL_NO_SHOW', n: 1 },
+    ]);
+
+    const stats = await service.get(PRO, {});
+
+    expect(stats.incidencias).toEqual({
+      cancelaciones: 2,
+      ausencias: 1,
+      fallasTecnicas: 0,
+    });
   });
 
   it('cuenta los turnos por cómo terminaron, sin los reservados sin pagar', async () => {
@@ -199,6 +216,7 @@ describe('ProfessionalStatsService', () => {
         liberados: 0,
         porVenir: 0,
       },
+      incidencias: { cancelaciones: 0, ausencias: 0, fallasTecnicas: 0 },
       tasas: { cancelacion: null, ausentismo: null },
       consultasPorMes: [
         { mes: '2026-09', consultas: 0 },

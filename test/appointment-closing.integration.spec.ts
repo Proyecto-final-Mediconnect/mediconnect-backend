@@ -4,6 +4,8 @@ import type { DailyService } from '../src/video/daily.service';
 import { AppointmentClosingService } from '../src/appointments/appointment-closing.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import type { SupabaseService } from '../src/supabase/supabase.service';
+import type { InAppNotificationsService } from '../src/notifications/in-app-notifications.service';
+import type { PatientNoticesService } from '../src/notifications/patient-notices.service';
 
 /**
  * ENG-189 — el cierre automático de turnos contra un Postgres real.
@@ -18,6 +20,8 @@ describe('Cierre automático de turnos (integration)', () => {
     prisma as unknown as PrismaService,
     {} as SupabaseService,
     {} as DailyService,
+    { professionalCancelled: jest.fn() } as unknown as PatientNoticesService,
+    { notifyProfessional: jest.fn() } as unknown as InAppNotificationsService,
   );
 
   const NOW = new Date('2026-11-20T18:00:00.000Z');
@@ -149,14 +153,65 @@ describe('Cierre automático de turnos (integration)', () => {
     expect(await statusOf(turno.id)).toBe('NO_ASISTIO');
   });
 
-  it('no toca el turno al que el profesional no entró', async () => {
+  it('sin el profesional, el turno queda a reprogramar con 48 h (ENG-237, casos 3 y 4)', async () => {
     const soloPaciente = await appointmentWith(46, { patient: true });
-    await service.closeFinished(soloPaciente.now);
-    expect(await statusOf(soloPaciente.id)).toBe('CONFIRMADO');
+    const closed = await service.closeFinished(soloPaciente.now);
+    expect(closed).toContainEqual({
+      id: soloPaciente.id,
+      status: 'A_REPROGRAMAR',
+    });
+
+    const fila = await prisma.appointment.findUniqueOrThrow({
+      where: { id: soloPaciente.id },
+      include: { consultation: { include: { video_session: true } } },
+    });
+    expect(fila).toMatchObject({
+      status: 'A_REPROGRAMAR',
+      cancelled_by: 'PROFESIONAL',
+      reprogram_cause: 'AUSENCIA_PROFESIONAL',
+      cancelled_at: soloPaciente.now,
+      reprogram_deadline: new Date(
+        soloPaciente.now.getTime() + 48 * 60 * MINUTE,
+      ),
+    });
+    // La consulta que no se hizo queda lista para el horario nuevo.
+    expect(fila.consultation?.patient_joined_at).toBeNull();
+    expect(fila.consultation?.video_session?.daily_room_name).toBeNull();
+    const audit = await prisma.auditLog.findFirstOrThrow({
+      where: {
+        resource_id: soloPaciente.id,
+        action: 'APPOINTMENT_PROFESSIONAL_NO_SHOW',
+      },
+    });
+    expect(audit.metadata).toMatchObject({ patientJoined: true });
 
     const nadie = await appointmentWith(46, {});
     await service.closeFinished(nadie.now);
-    expect(await statusOf(nadie.id)).toBe('CONFIRMADO');
+    expect(await statusOf(nadie.id)).toBe('A_REPROGRAMAR');
+  });
+
+  it('ningún turno pasado queda confirmado después del job (ENG-237)', async () => {
+    const turnos = [
+      await appointmentWith(46, { patient: true, professional: true }),
+      await appointmentWith(46, { professional: true }),
+      await appointmentWith(46, { patient: true }),
+      await appointmentWith(46, {}),
+    ];
+    for (const t of turnos) await service.closeFinished(t.now);
+
+    for (const t of turnos) {
+      expect(await statusOf(t.id)).not.toBe('CONFIRMADO');
+    }
+    // Y una segunda corrida no vuelve a auditar la ausencia.
+    await service.closeFinished(turnos[3].now);
+    expect(
+      await prisma.auditLog.count({
+        where: {
+          resource_id: turnos[3].id,
+          action: 'APPOINTMENT_PROFESSIONAL_NO_SHOW',
+        },
+      }),
+    ).toBe(1);
   });
 
   it('no toca un turno cuya sala sigue abierta (30 min + 15 de tolerancia)', async () => {

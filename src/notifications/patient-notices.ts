@@ -61,7 +61,15 @@ export interface PatientNoticeData {
   refundStatus?: string;
   /** Porcentaje devuelto según la política (cancelación del paciente). */
   percent?: number;
+  /**
+   * ENG-237: por qué quedó a reprogramar si no fue una cancelación a mano: el
+   * profesional no se conectó, o hubo una falla técnica.
+   */
+  reprogramCause?: ReprogramCause;
 }
+
+/** Por qué un turno quedó a reprogramar sin una cancelación a mano (ENG-237). */
+export type ReprogramCause = 'AUSENCIA_PROFESIONAL' | 'FALLA_TECNICA';
 
 export interface PatientNoticeText {
   title: string;
@@ -94,9 +102,22 @@ export function patientNoticeText(
       };
     }
     const deadline = formatWhen(data.deadline);
+    const opciones = `Elegí otro horario sin volver a pagar o pedí el reembolso del 100 %${deadline ? ` antes del ${deadline}` : ''}.`;
+    if (data.reprogramCause === 'AUSENCIA_PROFESIONAL') {
+      return {
+        title: 'Tu consulta no se realizó',
+        body: `${pro} no se conectó a tu consulta${del}. No perdés nada: ${opciones.charAt(0).toLowerCase()}${opciones.slice(1)}`,
+      };
+    }
+    if (data.reprogramCause === 'FALLA_TECNICA') {
+      return {
+        title: 'Tu consulta no se pudo completar',
+        body: `${pro} informó que tu consulta${del} no se pudo hacer por una falla técnica.${motivo} ${opciones}`,
+      };
+    }
     return {
       title: `${data.professional ?? 'Tu profesional'} no va a poder atenderte`,
-      body: `${pro} canceló tu turno${del}.${motivo} Elegí otro horario sin volver a pagar o pedí el reembolso del 100 %${deadline ? ` antes del ${deadline}` : ''}.`,
+      body: `${pro} canceló tu turno${del}.${motivo} ${opciones}`,
     };
   }
 
@@ -106,7 +127,7 @@ export function patientNoticeText(
     const deadline = formatWhen(data.deadline);
     return {
       title: 'Elegí qué hacer con tu turno',
-      body: `${pro} canceló tu turno${del}. Tenés${deadline ? ` hasta el ${deadline}` : ' poco tiempo'} para elegir otro horario sin volver a pagar o pedir el reembolso del 100 %. Si no elegís, te devolvemos el 100 % igual.`,
+      body: `Tu turno${conPro}${del} quedó a reprogramar. Tenés${deadline ? ` hasta el ${deadline}` : ' poco tiempo'} para elegir otro horario sin volver a pagar o pedir el reembolso del 100 %. Si no elegís, te devolvemos el 100 % igual.`,
     };
   }
 
@@ -205,5 +226,10 @@ export function noticeDataFromPayload(payload: unknown): PatientNoticeData {
     cause: cause === 'ELEGIDO' || cause === 'VENCIDO' ? cause : undefined,
     refundStatus: str(p.refundStatus),
     percent: typeof p.percent === 'number' ? p.percent : undefined,
+    reprogramCause:
+      p.reprogramCause === 'AUSENCIA_PROFESIONAL' ||
+      p.reprogramCause === 'FALLA_TECNICA'
+        ? p.reprogramCause
+        : undefined,
   };
 }

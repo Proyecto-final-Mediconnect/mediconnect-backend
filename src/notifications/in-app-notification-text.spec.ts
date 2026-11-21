@@ -186,3 +186,16 @@ describe('avisos al profesional del ciclo del turno (ENG-208)', () => {
     );
   });
 });
+
+describe('aviso al profesional que no se conectó (ENG-237)', () => {
+  it('dice qué pasó, qué puede hacer el paciente y que queda registrado', () => {
+    const { title, body } = renderInAppNotification('TURNO_NO_REALIZADO', {
+      patient: 'Julián Pérez',
+      scheduledAt: '2026-10-23T13:30:00.000Z',
+      cause: 'AUSENCIA_PROFESIONAL',
+    });
+    expect(title).toBe('No te conectaste a una consulta');
+    expect(body).toContain('No entraste a la consulta con Julián Pérez');
+    expect(body).toContain('Queda registrado en tu actividad');
+  });
+});

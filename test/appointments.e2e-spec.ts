@@ -488,12 +488,17 @@ describe('Turnos (e2e)', () => {
     const REASON = 'Tengo un congreso ese día y no voy a estar.';
     let tx: {
       appointment: { update: jest.Mock };
+      consultation: { updateMany: jest.Mock };
+      videoSession: { updateMany: jest.Mock };
       auditLog: { create: jest.Mock };
     };
 
     beforeEach(() => {
       tx = {
         appointment: { update: jest.fn().mockResolvedValue({}) },
+        // ENG-237: la cancelación reinicia la asistencia a la sala.
+        consultation: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+        videoSession: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
         auditLog: { create: jest.fn().mockResolvedValue({}) },
       };
       Object.assign(prisma, {

@@ -37,7 +37,9 @@ export type ProfessionalAppointmentNotice =
   | 'TURNO_CANCELADO'
   | 'TURNO_REPROGRAMADO'
   /** ENG-208: un turno que canceló terminó en reembolso (elegido o vencido). */
-  | 'TURNO_REEMBOLSADO';
+  | 'TURNO_REEMBOLSADO'
+  /** ENG-237: no se conectó a una consulta y el turno quedó a reprogramar. */
+  | 'TURNO_NO_REALIZADO';
 
 export interface InAppNotificationView extends InAppNotificationText {
   id: string;

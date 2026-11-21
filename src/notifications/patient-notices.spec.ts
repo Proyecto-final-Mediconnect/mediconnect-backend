@@ -205,3 +205,43 @@ describe('avisos del ciclo del turno (ENG-208)', () => {
     ).toBe('Hubo un problema con tu reembolso');
   });
 });
+
+describe('turnos que no se realizaron (ENG-237)', () => {
+  const base = {
+    professional: 'Ana Pérez',
+    scheduledAt: '2026-11-23T18:00:00.000Z',
+    outcome: 'A_REPROGRAMAR' as const,
+    deadline: '2026-11-25T18:00:00.000Z',
+  };
+
+  it('si el profesional no se conectó, no dice "canceló" ni repite un motivo', () => {
+    const { title, body } = patientNoticeText('TURNO_CANCELADO_PROFESIONAL', {
+      ...base,
+      reprogramCause: 'AUSENCIA_PROFESIONAL',
+    });
+    expect(title).toBe('Tu consulta no se realizó');
+    expect(body).toContain('Ana Pérez no se conectó a tu consulta');
+    expect(body).toContain('elegí otro horario sin volver a pagar');
+    expect(body).not.toContain('canceló');
+  });
+
+  it('una falla técnica dice qué pasó, con el motivo del profesional', () => {
+    const { title, body } = patientNoticeText('TURNO_CANCELADO_PROFESIONAL', {
+      ...base,
+      reprogramCause: 'FALLA_TECNICA',
+      reason: 'Se cortó la videollamada.',
+    });
+    expect(title).toBe('Tu consulta no se pudo completar');
+    expect(body).toContain('falla técnica');
+    expect(body).toContain('Motivo: "Se cortó la videollamada."');
+  });
+
+  it('la causa se lee del payload guardado, y una desconocida se ignora', () => {
+    expect(
+      noticeDataFromPayload({ reprogramCause: 'FALLA_TECNICA' }).reprogramCause,
+    ).toBe('FALLA_TECNICA');
+    expect(
+      noticeDataFromPayload({ reprogramCause: 'OTRA' }).reprogramCause,
+    ).toBeUndefined();
+  });
+});

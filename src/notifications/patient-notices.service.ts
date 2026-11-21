@@ -81,9 +81,15 @@ export class PatientNoticesService {
     now: Date = new Date(),
   ): Promise<void> {
     await this.send(appointmentId, 'TURNO_CANCELADO_PROFESIONAL', now, (a) => ({
-      reason: a.cancellation_reason ?? undefined,
+      // ENG-237: la ausencia del profesional ya se dice en el texto; su "motivo"
+      // fijo repetiría lo mismo.
+      reason:
+        a.reprogram_cause === 'AUSENCIA_PROFESIONAL'
+          ? undefined
+          : (a.cancellation_reason ?? undefined),
       outcome,
       deadline: a.reprogram_deadline?.toISOString(),
+      reprogramCause: a.reprogram_cause ?? undefined,
     }));
   }
 
@@ -327,10 +333,16 @@ function pushText(
 ): { title: string; body: string } {
   switch (type) {
     case 'TURNO_CANCELADO_PROFESIONAL':
-      return {
-        title: 'Cambió tu turno',
-        body: 'Tu profesional canceló un turno. Abrí la app para ver tus opciones.',
-      };
+      // ENG-237: una consulta que no se hizo no es "canceló".
+      return data.reprogramCause
+        ? {
+            title: 'Tu consulta no se realizó',
+            body: 'No perdés nada. Abrí la app para elegir otro horario o el reembolso.',
+          }
+        : {
+            title: 'Cambió tu turno',
+            body: 'Tu profesional canceló un turno. Abrí la app para ver tus opciones.',
+          };
     case 'PLAZO_REPROGRAMACION_POR_VENCER':
       return {
         title: 'Elegí qué hacer con tu turno',
@@ -366,6 +378,7 @@ const NOTICE_SELECT = {
   cancellation_reason: true,
   cancelled_at: true,
   reprogram_deadline: true,
+  reprogram_cause: true,
   professional: {
     select: { first_name: true, last_name: true, currency: true },
   },
