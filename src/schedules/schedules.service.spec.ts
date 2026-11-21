@@ -4,6 +4,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import type { ProfessionalCancellationService } from '../appointments/professional-cancellation.service';
+import type { PrismaService } from '../prisma/prisma.service';
 import { SchedulesService } from './schedules.service';
 
 /** La sonda de existencia previa a una escritura (`select profile_id`). */
@@ -71,6 +73,39 @@ function makeClient(
   };
 }
 
+/** Prisma de mentira para los bloqueos (ENG-206): el `tx` es el mismo objeto. */
+function makePrisma() {
+  const prisma = {
+    appointment: { findMany: jest.fn().mockResolvedValue([]) },
+    scheduleBlock: {
+      findMany: jest.fn().mockResolvedValue([]),
+      create: jest.fn(({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ id: 'block-1', ...data }),
+      ),
+    },
+    $transaction: jest.fn(),
+  };
+  prisma.$transaction.mockImplementation((cb: (tx: unknown) => unknown) =>
+    cb(prisma),
+  );
+  return prisma;
+}
+
+function makeCancellation() {
+  return {
+    applyCancellation: jest.fn(
+      (_tx: unknown, row: { id: string; status: string }) =>
+        Promise.resolve({
+          id: row.id,
+          status: row.status === 'CONFIRMADO' ? 'A_REPROGRAMAR' : 'CANCELADO',
+          cancelledBy: 'PROFESIONAL',
+          reprogramDeadline: null,
+        }),
+    ),
+    afterCancellation: jest.fn().mockResolvedValue(undefined),
+  };
+}
+
 function makeService(results: Array<{ data: unknown; error: unknown }>) {
   const calls: RecordedCall[] = [];
   const client = makeClient(results, calls);
@@ -78,7 +113,18 @@ function makeService(results: Array<{ data: unknown; error: unknown }>) {
     getClient: () => client,
     getClientForToken: () => client,
   } as unknown as SupabaseService;
-  return { service: new SchedulesService(supabaseMock), calls };
+  const prisma = makePrisma();
+  const cancellation = makeCancellation();
+  return {
+    service: new SchedulesService(
+      supabaseMock,
+      prisma as unknown as PrismaService,
+      cancellation as unknown as ProfessionalCancellationService,
+    ),
+    calls,
+    prisma,
+    cancellation,
+  };
 }
 
 /** Payload de la última llamada a `.insert(...)`. */
@@ -295,6 +341,23 @@ describe('SchedulesService (ENG-53)', () => {
   });
 
   describe('createBlock', () => {
+    const NOW = new Date('2026-09-01T12:00:00.000Z');
+    /** Turno pagado del 02/09 a las 10:00 (Argentina) y una reserva a las 15:00. */
+    const PAGADO = {
+      id: 'turno-pagado',
+      professional_id: 'user-1',
+      status: 'CONFIRMADO',
+      scheduled_at: new Date('2026-09-02T13:00:00.000Z'),
+      duration_minutes: 30,
+      patient: { first_name: 'Julián', last_name: 'Paciente' },
+    };
+    const SIN_PAGAR = {
+      ...PAGADO,
+      id: 'turno-sin-pagar',
+      status: 'RESERVADO_SIN_PAGAR',
+      scheduled_at: new Date('2026-09-02T18:00:00.000Z'),
+    };
+
     it('rechaza que venga solo una de las dos horas', async () => {
       const { service, calls } = makeService([]);
 
@@ -321,55 +384,238 @@ describe('SchedulesService (ENG-53)', () => {
     });
 
     it('sin horas guarda el bloqueo como día completo (null, null)', async () => {
-      const { service, calls } = makeService([
-        PROFILE_EXISTS,
-        { data: FULL_DAY_BLOCK_ROW, error: null },
-      ]);
+      const { service, prisma } = makeService([PROFILE_EXISTS]);
 
-      const block = await service.createBlock('token', 'user-1', {
+      const block = await service.createBlock(
+        'token',
+        'user-1',
+        { blockDate: '2026-09-02' },
+        NOW,
+      );
+
+      expect(prisma.scheduleBlock.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: {
+            professional_id: 'user-1',
+            block_date: new Date('2026-09-02T00:00:00.000Z'),
+            start_time: null,
+            end_time: null,
+            reason: null,
+          },
+        }),
+      );
+      expect(block).toMatchObject({
         blockDate: '2026-09-02',
+        startTime: null,
+        endTime: null,
+        cancelledAppointments: [],
       });
-
-      expect(lastInsertPayload(calls)).toEqual({
-        professional_id: 'user-1',
-        block_date: '2026-09-02',
-        start_time: null,
-        end_time: null,
-        reason: null,
-      });
-      expect(block.startTime).toBeNull();
     });
 
     it('con horas guarda solo esa franja del día', async () => {
-      const { service, calls } = makeService([
-        PROFILE_EXISTS,
-        { data: BLOCK_ROW, error: null },
-      ]);
+      const { service, prisma } = makeService([PROFILE_EXISTS]);
 
-      const block = await service.createBlock('token', 'user-1', {
-        blockDate: '2026-09-01',
-        startTime: '14:00',
-        endTime: '16:00',
-        reason: 'Congreso',
-      });
+      const block = await service.createBlock(
+        'token',
+        'user-1',
+        {
+          blockDate: '2026-09-01',
+          startTime: '14:00',
+          endTime: '16:00',
+          reason: 'Congreso',
+        },
+        NOW,
+      );
 
-      expect(lastInsertPayload(calls)).toMatchObject({
-        start_time: '14:00:00',
-        end_time: '16:00:00',
-        reason: 'Congreso',
-      });
-      expect(block.endTime).toBe('16:00');
+      expect(prisma.scheduleBlock.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            start_time: new Date('1970-01-01T14:00:00.000Z'),
+            end_time: new Date('1970-01-01T16:00:00.000Z'),
+            reason: 'Congreso',
+          }),
+        }),
+      );
+      expect(block).toMatchObject({ startTime: '14:00', endTime: '16:00' });
     });
 
     it('traduce el unique violation a 409 en vez de 500', async () => {
-      const { service } = makeService([
-        PROFILE_EXISTS,
-        { data: null, error: { code: '23505' } },
+      const { service, prisma } = makeService([PROFILE_EXISTS]);
+      prisma.scheduleBlock.create.mockRejectedValue(
+        Object.assign(new Error('dup'), { code: 'P2002' }),
+      );
+
+      await expect(
+        service.createBlock(
+          'token',
+          'user-1',
+          { blockDate: '2026-09-02' },
+          NOW,
+        ),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('rechaza un bloqueo que se superpone con otro del mismo día', async () => {
+      const { service, prisma } = makeService([PROFILE_EXISTS]);
+      prisma.scheduleBlock.findMany.mockResolvedValue([
+        {
+          start_time: new Date('1970-01-01T15:00:00.000Z'),
+          end_time: new Date('1970-01-01T17:00:00.000Z'),
+        },
       ]);
 
       await expect(
-        service.createBlock('token', 'user-1', { blockDate: '2026-09-02' }),
-      ).rejects.toThrow(ConflictException);
+        service.createBlock(
+          'token',
+          'user-1',
+          { blockDate: '2026-09-02', startTime: '14:00', endTime: '16:00' },
+          NOW,
+        ),
+      ).rejects.toThrow(/se superpone/);
+      expect(prisma.scheduleBlock.create).not.toHaveBeenCalled();
+    });
+
+    describe('con turnos tomados (ENG-206)', () => {
+      it('sin confirmar da 409 con la lista y no guarda nada', async () => {
+        const { service, prisma, cancellation } = makeService([PROFILE_EXISTS]);
+        prisma.appointment.findMany.mockResolvedValue([PAGADO, SIN_PAGAR]);
+
+        const error = (await service
+          .createBlock('token', 'user-1', { blockDate: '2026-09-02' }, NOW)
+          .catch((e: unknown) => e)) as ConflictException;
+
+        expect(error).toBeInstanceOf(ConflictException);
+        expect(error.getResponse()).toMatchObject({
+          code: 'BLOCK_HAS_APPOINTMENTS',
+          affected: [
+            {
+              id: 'turno-pagado',
+              date: '2026-09-02',
+              startTime: '10:00',
+              paid: true,
+              patient: { firstName: 'Julián', lastName: 'Paciente' },
+            },
+            { id: 'turno-sin-pagar', startTime: '15:00', paid: false },
+          ],
+        });
+        expect(prisma.scheduleBlock.create).not.toHaveBeenCalled();
+        expect(cancellation.applyCancellation).not.toHaveBeenCalled();
+      });
+
+      it('confirmando sin motivo para los pacientes da 400', async () => {
+        const { service, prisma } = makeService([PROFILE_EXISTS]);
+        prisma.appointment.findMany.mockResolvedValue([PAGADO]);
+
+        await expect(
+          service.createBlock(
+            'token',
+            'user-1',
+            { blockDate: '2026-09-02', cancelAffected: true },
+            NOW,
+          ),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('confirmando, guarda el bloqueo y cancela cada turno en la misma transacción, y después avisa', async () => {
+        const { service, prisma, cancellation } = makeService([PROFILE_EXISTS]);
+        prisma.appointment.findMany
+          .mockResolvedValueOnce([PAGADO, SIN_PAGAR])
+          // La segunda pasada no encuentra nada nuevo.
+          .mockResolvedValueOnce([]);
+
+        const block = await service.createBlock(
+          'token',
+          'user-1',
+          {
+            blockDate: '2026-09-02',
+            cancelAffected: true,
+            cancellationReason: 'Tengo un congreso todo el día.',
+          },
+          NOW,
+        );
+
+        expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+        expect(cancellation.applyCancellation).toHaveBeenCalledTimes(2);
+        expect(cancellation.applyCancellation).toHaveBeenCalledWith(
+          prisma,
+          PAGADO,
+          'Tengo un congreso todo el día.',
+          'user-1',
+          NOW,
+          'BLOQUEO',
+        );
+        expect(
+          prisma.scheduleBlock.create.mock.invocationCallOrder[0],
+        ).toBeLessThan(
+          cancellation.applyCancellation.mock.invocationCallOrder[0],
+        );
+        expect(cancellation.afterCancellation).toHaveBeenCalledTimes(2);
+        expect(block.cancelledAppointments.map((c) => c.status)).toEqual([
+          'A_REPROGRAMAR',
+          'CANCELADO',
+        ]);
+      });
+
+      it('si un turno cambió en el medio no guarda nada y da 409', async () => {
+        const { service, prisma, cancellation } = makeService([PROFILE_EXISTS]);
+        prisma.appointment.findMany.mockResolvedValue([PAGADO]);
+        cancellation.applyCancellation.mockRejectedValue(
+          Object.assign(new Error('not found'), { code: 'P2025' }),
+        );
+
+        await expect(
+          service.createBlock(
+            'token',
+            'user-1',
+            {
+              blockDate: '2026-09-02',
+              cancelAffected: true,
+              cancellationReason: 'Tengo un congreso todo el día.',
+            },
+            NOW,
+          ),
+        ).rejects.toThrow(/cambió mientras lo bloqueabas/);
+        expect(cancellation.afterCancellation).not.toHaveBeenCalled();
+      });
+
+      it('cancela un turno que se reservó justo mientras se creaba el bloqueo', async () => {
+        const { service, prisma, cancellation } = makeService([PROFILE_EXISTS]);
+        prisma.appointment.findMany
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([SIN_PAGAR]);
+
+        const block = await service.createBlock(
+          'token',
+          'user-1',
+          { blockDate: '2026-09-02' },
+          NOW,
+        );
+
+        expect(cancellation.applyCancellation).toHaveBeenCalledWith(
+          prisma,
+          SIN_PAGAR,
+          expect.stringMatching(/bloqueó ese horario/),
+          'user-1',
+          NOW,
+          'BLOQUEO',
+        );
+        expect(block.cancelledAppointments).toHaveLength(1);
+      });
+
+      it('solo cuenta los turnos que se superponen con la franja', async () => {
+        const { service, prisma } = makeService([PROFILE_EXISTS]);
+        // 10:00-10:30 queda fuera de un bloqueo de 14:00 a 16:00; 15:00 adentro.
+        prisma.appointment.findMany.mockResolvedValue([PAGADO, SIN_PAGAR]);
+
+        const { affected } = await service.previewBlock(
+          'token',
+          'user-1',
+          { blockDate: '2026-09-02', startTime: '14:00', endTime: '16:00' },
+          NOW,
+        );
+
+        expect(affected.map((a) => a.id)).toEqual(['turno-sin-pagar']);
+      });
     });
   });
 

@@ -1,4 +1,12 @@
-import { IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import { Transform } from 'class-transformer';
+import {
+  IsBoolean,
+  IsOptional,
+  IsString,
+  Length,
+  Matches,
+  MaxLength,
+} from 'class-validator';
 import { HHMM } from './save-schedule.dto';
 
 /** `YYYY-MM-DD`. Se usa un patrón explícito en vez de `@IsDateString()` porque
@@ -30,4 +38,29 @@ export class CreateScheduleBlockDto {
   @IsString()
   @MaxLength(200, { message: 'El motivo no puede superar los 200 caracteres' })
   reason?: string;
+
+  /**
+   * ENG-206: el profesional confirma que el bloqueo cancela los turnos que pisa.
+   * Sin esto, un bloqueo con turnos tomados da 409 con la lista: nunca se
+   * cancela un turno sin que el profesional lo haya visto antes.
+   */
+  @IsOptional()
+  @IsBoolean({ message: 'cancelAffected tiene que ser verdadero o falso.' })
+  cancelAffected?: boolean;
+
+  /**
+   * El motivo que ven los pacientes de los turnos cancelados (ADR-018, caso 1).
+   * Distinto de `reason`, que es una nota del profesional para su agenda.
+   * Obligatorio si el bloqueo cancela turnos.
+   */
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @Length(10, 500, {
+    message:
+      'El motivo para los pacientes tiene que tener entre 10 y 500 caracteres.',
+  })
+  cancellationReason?: string;
 }
