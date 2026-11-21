@@ -4,7 +4,6 @@ import {
   JOIN_GRACE_MINUTES_AFTER,
   JOIN_OPENS_MINUTES_BEFORE,
   joinWindowFor,
-  PAYMENT_REQUIRED_SINCE,
 } from './consultation.config';
 
 /**
@@ -81,24 +80,21 @@ describe('consultationRoomProperties', () => {
 });
 
 describe('isJoinableStatus', () => {
-  const ANTES = new Date(PAYMENT_REQUIRED_SINCE.getTime() - 1);
-
-  it('CONFIRMADO entra sin importar cuándo se reservó', () => {
-    expect(isJoinableStatus('CONFIRMADO', ANTES)).toBe(true);
-    expect(isJoinableStatus('CONFIRMADO', PAYMENT_REQUIRED_SINCE)).toBe(true);
+  it('CONFIRMADO entra', () => {
+    expect(isJoinableStatus('CONFIRMADO')).toBe(true);
   });
 
-  it('RESERVADO_SIN_PAGAR entra solo si se reservó antes del cobro', () => {
-    expect(isJoinableStatus('RESERVADO_SIN_PAGAR', ANTES)).toBe(true);
-    expect(
-      isJoinableStatus('RESERVADO_SIN_PAGAR', PAYMENT_REQUIRED_SINCE),
-    ).toBe(false);
-  });
-
-  it.each(['CANCELADO', 'LIBERADO', 'COMPLETADO', 'NO_ASISTIO'])(
-    '%s no entra nunca',
+  it.each([
+    'RESERVADO_SIN_PAGAR',
+    'A_REPROGRAMAR',
+    'CANCELADO',
+    'LIBERADO',
+    'COMPLETADO',
+    'NO_ASISTIO',
+  ])(
+    '%s no entra nunca (ENG-226: el impago tampoco, sin importar la fecha)',
     (status) => {
-      expect(isJoinableStatus(status, ANTES)).toBe(false);
+      expect(isJoinableStatus(status)).toBe(false);
     },
   );
 });

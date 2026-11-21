@@ -44,27 +44,14 @@ export const JOIN_GRACE_MINUTES_AFTER = 15;
  * `RESERVADO_SIN_PAGAR` cuando abre la sala. Sin este recorte, el paciente se
  * atendería sin pagar.
  *
- * La excepción son los turnos anteriores al cobro: ver
- * {@link PAYMENT_REQUIRED_SINCE}.
+ * Sin excepciones (ENG-226): hasta ENG-226 los turnos impagos reservados antes
+ * del deploy del cobro también entraban, por una fecha fija en el código. Era
+ * una consulta gratis abierta para siempre; en prod ya no quedaba ninguno.
  */
 export const JOINABLE_STATUSES = ['CONFIRMADO'] as const;
 
-/**
- * Desde cuándo un turno tiene que estar pagado para tener videoconsulta: el
- * deploy de ENG-63 (merge de backend #61 a `main`).
- *
- * Antes de eso no había forma de pagar y todo turno quedaba
- * `RESERVADO_SIN_PAGAR` para siempre, así que esos turnos son legítimos en ese
- * estado. Se compara contra `appointments.created_at`, que es cuándo se
- * reservó y el paciente no puede cambiar.
- */
-export const PAYMENT_REQUIRED_SINCE = new Date('2026-10-19T20:28:41Z');
-
-/** Si un turno en `status`, reservado en `createdAt`, puede entrar a la sala. */
-export function isJoinableStatus(status: string, createdAt: Date): boolean {
-  if (status === 'RESERVADO_SIN_PAGAR') {
-    return createdAt < PAYMENT_REQUIRED_SINCE;
-  }
+/** Si un turno en `status` puede entrar a la sala: solo el pagado. */
+export function isJoinableStatus(status: string): boolean {
   return JOINABLE_STATUSES.includes(
     status as (typeof JOINABLE_STATUSES)[number],
   );

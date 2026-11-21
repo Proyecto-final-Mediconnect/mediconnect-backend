@@ -497,9 +497,8 @@ export class AppointmentClosingService {
     now: Date,
     tooEarlyMessage: string,
   ): void {
-    // Los mismos estados que dejan entrar a la sala: el turno pago, y los
-    // impagos de antes de que existiera el cobro (ENG-147).
-    if (!isJoinableStatus(row.status, new Date(row.created_at))) {
+    // Los mismos estados que dejan entrar a la sala: solo el turno pago.
+    if (!isJoinableStatus(row.status)) {
       throw new ConflictException('Ese turno ya no se puede cerrar.');
     }
 
