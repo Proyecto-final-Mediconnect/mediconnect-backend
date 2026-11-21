@@ -193,3 +193,90 @@ describe('PatientNoticesService (ENG-204)', () => {
     });
   });
 });
+
+describe('PatientNoticesService (ENG-208)', () => {
+  let prisma: {
+    appointment: { findUnique: jest.Mock };
+    notification: { upsert: jest.Mock };
+  };
+  let email: { isConfigured: jest.Mock; send: jest.Mock };
+  let push: { sendToUser: jest.Mock };
+  let service: PatientNoticesService;
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    prisma = {
+      appointment: { findUnique: jest.fn().mockResolvedValue(appointment()) },
+      notification: { upsert: jest.fn().mockResolvedValue({}) },
+    };
+    email = {
+      isConfigured: jest.fn().mockReturnValue(true),
+      send: jest.fn().mockResolvedValue('email-1'),
+    };
+    push = { sendToUser: jest.fn().mockResolvedValue(undefined) };
+    service = new PatientNoticesService(
+      prisma as unknown as PrismaService,
+      email as unknown as EmailService,
+      push as unknown as PushService,
+      {
+        get: (key: string) =>
+          key === 'WEB_ORIGIN' ? 'https://mediconnect.test' : undefined,
+      } as unknown as ConfigService,
+    );
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('recordatorio del plazo: campanita, push y mail con el link para elegir', async () => {
+    await service.reprogramDeadlineSoon(APPOINTMENT, NOW);
+
+    expect(prisma.notification.upsert.mock.calls[0][0].create).toMatchObject({
+      type: 'PLAZO_REPROGRAMACION_POR_VENCER',
+      channel: 'IN_APP',
+      payload: { deadline: '2026-11-23T12:00:00.000Z' },
+    });
+    expect(push.sendToUser.mock.calls[0][1]).toMatchObject({
+      title: 'Elegí qué hacer con tu turno',
+      data: {
+        tipo: 'PLAZO_REPROGRAMACION_POR_VENCER',
+        appointmentId: APPOINTMENT,
+      },
+    });
+    const mail = email.send.mock.calls[0][0];
+    expect(mail.text).toContain('Elegir qué hacer con mi turno');
+    expect(mail.idempotencyKey).toBe(
+      `${APPOINTMENT}:PLAZO_REPROGRAMACION_POR_VENCER:${CANCELLED_AT.getTime()}`,
+    );
+  });
+
+  it('el comprobante de la cancelación del paciente no suena en el celular', async () => {
+    await service.patientCancelled(
+      APPOINTMENT,
+      { percent: 50, amount: 7500, status: 'PROCESADO' },
+      NOW,
+    );
+
+    expect(push.sendToUser).not.toHaveBeenCalled();
+    expect(prisma.notification.upsert.mock.calls[0][0].create).toMatchObject({
+      type: 'CANCELACION_CONFIRMADA',
+      payload: { percent: 50, amount: 7500, refundStatus: 'PROCESADO' },
+    });
+    expect(email.send.mock.calls[0][0].subject).toBe('Cancelaste tu turno');
+  });
+
+  it('el resultado de un reembolso sale una vez por reembolso y estado', async () => {
+    await service.refundUpdated(
+      APPOINTMENT,
+      { refundId: 'ref-9', amount: 15000, status: 'RECHAZADO' },
+      NOW,
+    );
+
+    expect(email.send.mock.calls[0][0]).toMatchObject({
+      subject: 'Hubo un problema con tu reembolso',
+      idempotencyKey: `${APPOINTMENT}:REEMBOLSO_ACTUALIZADO:ref-9:RECHAZADO`,
+    });
+    expect(push.sendToUser.mock.calls[0][1].title).toBe(
+      'Problema con tu reembolso',
+    );
+  });
+});

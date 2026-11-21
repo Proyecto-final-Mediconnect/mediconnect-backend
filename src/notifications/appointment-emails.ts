@@ -85,7 +85,11 @@ export function renderAppointmentEmail(
         url: data.appointmentUrl ?? data.myAppointmentsUrl,
         label: 'Calificar la consulta',
       }
-    : { url: data.myAppointmentsUrl, label: 'Ver mis turnos' };
+    : // ENG-208: el aviso lleva directo al turno, donde se entra a la consulta
+      // o se cancela. Sin el link del turno, a "Mis turnos".
+      data.appointmentUrl
+      ? { url: data.appointmentUrl, label: 'Ver el turno' }
+      : { url: data.myAppointmentsUrl, label: 'Ver mis turnos' };
 
   const text = [
     `Hola ${data.patientFirstName}:`,
@@ -115,6 +119,44 @@ export function renderAppointmentEmail(
 </html>`;
 
   return { subject, html, text };
+}
+
+/** Lo que lleva el mail de un aviso del ciclo del turno (ENG-204, ENG-208). */
+export interface NoticeEmailData {
+  greeting: string;
+  title: string;
+  body: string;
+  /** Link a la pantalla donde se actúa, o `null` si no hay `WEB_ORIGIN` válido. */
+  url: string | null;
+  label: string;
+}
+
+/**
+ * El mail de un aviso: el mismo título y texto que la campanita, con un botón a
+ * la pantalla del turno. Escapa todo lo que va al HTML.
+ */
+export function renderNoticeEmail(data: NoticeEmailData): RenderedEmail {
+  const { greeting, title, body, url, label } = data;
+  return {
+    subject: title,
+    text: [
+      greeting,
+      '',
+      body,
+      ...(url ? ['', `${label}: ${url}`] : []),
+      '',
+      'MediConnect',
+    ].join('\n'),
+    html: `<!doctype html>
+<html lang="es">
+  <body style="font-family: Arial, sans-serif; color: #1f2937; line-height: 1.5;">
+    <p>${escapeHtml(greeting)}</p>
+    <p>${escapeHtml(body)}</p>
+    ${url ? `<p><a href="${escapeHtml(url)}">${escapeHtml(label)}</a></p>` : ''}
+    <p style="color: #6b7280;">MediConnect</p>
+  </body>
+</html>`,
+  };
 }
 
 export function escapeHtml(value: string): string {

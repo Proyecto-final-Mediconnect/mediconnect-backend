@@ -5,6 +5,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import type { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import type { PatientNoticesService } from '../notifications/patient-notices.service';
 import type { AppointmentPaymentService } from '../payments/appointment-payment.service';
 import type { CancellationRefundService } from '../payments/cancellation-refund.service';
@@ -66,7 +67,12 @@ describe('ProfessionalCancellationService', () => {
   };
   let expireCheckout: jest.Mock;
   let refundInFull: jest.Mock;
-  let notices: { professionalCancelled: jest.Mock; fullRefund: jest.Mock };
+  let notices: {
+    professionalCancelled: jest.Mock;
+    fullRefund: jest.Mock;
+    reprogramDeadlineSoon: jest.Mock;
+  };
+  let inApp: { notifyProfessional: jest.Mock };
 
   function build(data: unknown, error: unknown = null) {
     const maybeSingle = jest.fn().mockResolvedValue({ data, error });
@@ -95,7 +101,9 @@ describe('ProfessionalCancellationService', () => {
     notices = {
       professionalCancelled: jest.fn().mockResolvedValue(undefined),
       fullRefund: jest.fn().mockResolvedValue(undefined),
+      reprogramDeadlineSoon: jest.fn().mockResolvedValue(undefined),
     };
+    inApp = { notifyProfessional: jest.fn().mockResolvedValue(undefined) };
 
     service = new ProfessionalCancellationService(
       prisma as unknown as PrismaService,
@@ -103,6 +111,7 @@ describe('ProfessionalCancellationService', () => {
       { expireCheckout } as unknown as AppointmentPaymentService,
       { refundInFull } as unknown as CancellationRefundService,
       notices as unknown as PatientNoticesService,
+      inApp as unknown as InAppNotificationsService,
     );
   }
 
@@ -373,6 +382,17 @@ describe('ProfessionalCancellationService', () => {
       },
     );
 
+    it('le avisa al profesional que el paciente eligió el reembolso (ENG-208)', async () => {
+      await service.requestFullRefund('jwt', PATIENT, APPOINTMENT, NOW);
+
+      expect(inApp.notifyProfessional).toHaveBeenCalledWith(
+        APPOINTMENT,
+        'TURNO_REEMBOLSADO',
+        NOW,
+        { cause: 'ELEGIDO' },
+      );
+    });
+
     it('409 y sin reembolso si el job lo resolvió en el medio', async () => {
       tx.appointment.update.mockRejectedValue(prismaError('P2025'));
       await expect(
@@ -389,7 +409,7 @@ describe('ProfessionalCancellationService', () => {
 
       const summary = await service.resolveReprogramDeadlines(NOW);
 
-      expect(summary).toEqual({ expired: 2, recovered: 0 });
+      expect(summary).toEqual({ reminded: 0, expired: 2, recovered: 0 });
       expect(tx.auditLog.createMany).toHaveBeenCalledWith({
         data: [
           expect.objectContaining({
@@ -400,6 +420,12 @@ describe('ProfessionalCancellationService', () => {
           expect.objectContaining({ resource_id: 'a2' }),
         ],
       });
+      expect(inApp.notifyProfessional).toHaveBeenCalledWith(
+        'a1',
+        'TURNO_REEMBOLSADO',
+        NOW,
+        { cause: 'VENCIDO' },
+      );
       expect(refundInFull).toHaveBeenCalledWith(
         'a1',
         NOW,
@@ -420,7 +446,7 @@ describe('ProfessionalCancellationService', () => {
     it('sin vencidos no audita ni reembolsa', async () => {
       const summary = await service.resolveReprogramDeadlines(NOW);
 
-      expect(summary).toEqual({ expired: 0, recovered: 0 });
+      expect(summary).toEqual({ reminded: 0, expired: 0, recovered: 0 });
       expect(tx.auditLog.createMany).not.toHaveBeenCalled();
       expect(refundInFull).not.toHaveBeenCalled();
     });
@@ -433,7 +459,7 @@ describe('ProfessionalCancellationService', () => {
 
       const summary = await service.resolveReprogramDeadlines(NOW);
 
-      expect(summary).toEqual({ expired: 0, recovered: 2 });
+      expect(summary).toEqual({ reminded: 0, expired: 0, recovered: 2 });
       expect(prisma.appointment.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: {
@@ -461,6 +487,97 @@ describe('ProfessionalCancellationService', () => {
         expect.objectContaining({ cause: 'VENCIDO' }),
         NOW,
       );
+    });
+  });
+});
+
+describe('ProfessionalCancellationService: recordatorio del plazo (ENG-208)', () => {
+  const NOW = new Date('2026-11-21T12:00:00.000Z');
+  const HOUR = 3_600_000;
+  let findMany: jest.Mock;
+  let reprogramDeadlineSoon: jest.Mock;
+  let notifyProfessional: jest.Mock;
+  let service: ProfessionalCancellationService;
+
+  /** Un turno a reprogramar cancelado hace `hace` h, con plazo en `vence` h. */
+  function aReprogramar(
+    id: string,
+    hace: number,
+    vence: number,
+    avisos: { sent_at: Date | null }[] = [],
+  ) {
+    return {
+      id,
+      cancelled_at: new Date(NOW.getTime() - hace * HOUR),
+      reprogram_deadline: new Date(NOW.getTime() + vence * HOUR),
+      notifications: avisos,
+    };
+  }
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    findMany = jest.fn().mockResolvedValue([]);
+    reprogramDeadlineSoon = jest.fn().mockResolvedValue(undefined);
+    notifyProfessional = jest.fn().mockResolvedValue(undefined);
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      auditLog: { createMany: jest.fn() },
+    };
+    service = new ProfessionalCancellationService(
+      {
+        $transaction: jest.fn((cb: (t: typeof tx) => unknown) => cb(tx)),
+        appointment: { findMany },
+      } as unknown as PrismaService,
+      {} as unknown as SupabaseService,
+      {} as unknown as AppointmentPaymentService,
+      { refundInFull: jest.fn() } as unknown as CancellationRefundService,
+      {
+        reprogramDeadlineSoon,
+        fullRefund: jest.fn(),
+      } as unknown as PatientNoticesService,
+      { notifyProfessional } as unknown as InAppNotificationsService,
+    );
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('le recuerda al paciente cuando quedan 12 h o menos, una vez por cancelación', async () => {
+    findMany.mockResolvedValueOnce([
+      // Cancelado hace 40 h, vence en 8 h: se recuerda.
+      aReprogramar('a1', 40, 8),
+      // Ya recordado en esta cancelación.
+      aReprogramar('a2', 40, 6, [{ sent_at: new Date(NOW.getTime() - HOUR) }]),
+      // Recordado en una cancelación anterior (caso 12): se recuerda de nuevo.
+      aReprogramar('a3', 30, 10, [
+        { sent_at: new Date(NOW.getTime() - 100 * HOUR) },
+      ]),
+      // Al cancelar ya quedaban 10 h: el aviso de la cancelación alcanza.
+      aReprogramar('a4', 2, 8),
+    ]);
+
+    const summary = await service.resolveReprogramDeadlines(NOW);
+
+    expect(summary.reminded).toBe(2);
+    expect(
+      reprogramDeadlineSoon.mock.calls.map((c: unknown[]) => c[0] as string),
+    ).toEqual(['a1', 'a3']);
+    expect(findMany.mock.calls[0][0].where).toEqual({
+      status: 'A_REPROGRAMAR',
+      reprogram_deadline: {
+        gt: NOW,
+        lte: new Date(NOW.getTime() + 12 * HOUR),
+      },
+    });
+  });
+
+  it('si el recordatorio falla, los vencimientos se resuelven igual', async () => {
+    findMany.mockRejectedValueOnce(new Error('db caída'));
+
+    await expect(service.resolveReprogramDeadlines(NOW)).resolves.toEqual({
+      reminded: 0,
+      expired: 0,
+      recovered: 0,
     });
   });
 });

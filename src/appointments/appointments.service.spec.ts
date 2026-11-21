@@ -9,6 +9,7 @@ import { AppointmentPaymentService } from '../payments/appointment-payment.servi
 import { CancellationRefundService } from '../payments/cancellation-refund.service';
 import { UnpaidReleaseService } from './unpaid-release.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
+import { PatientNoticesService } from '../notifications/patient-notices.service';
 import { CancellationPolicyService } from '../professionals/cancellation-policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -80,6 +81,7 @@ describe('AppointmentsService', () => {
   let inApp: { notifyProfessional: jest.Mock };
   let policies: { policyFor: jest.Mock };
   let refunds: { refundCancellation: jest.Mock; quote: jest.Mock };
+  let notices: { patientCancelled: jest.Mock };
   let prisma: {
     professional: { findFirst: jest.Mock; findMany: jest.Mock };
     patient: { findMany: jest.Mock };
@@ -149,6 +151,7 @@ describe('AppointmentsService', () => {
         partialRefundPercent: 50,
       }),
     };
+    notices = { patientCancelled: jest.fn().mockResolvedValue(undefined) };
     refunds = {
       refundCancellation: jest.fn().mockResolvedValue({
         percent: 100,
@@ -167,6 +170,7 @@ describe('AppointmentsService', () => {
       inApp as unknown as InAppNotificationsService,
       policies as unknown as CancellationPolicyService,
       refunds as unknown as CancellationRefundService,
+      notices as unknown as PatientNoticesService,
     );
   });
 
@@ -1134,6 +1138,22 @@ describe('AppointmentsService', () => {
       await cancel();
 
       expect(inApp.notifyProfessional).not.toHaveBeenCalled();
+      // Tampoco hay comprobante: no se pagó nada.
+      expect(notices.patientCancelled).not.toHaveBeenCalled();
+    });
+
+    it('le manda al paciente el comprobante con lo que se le devuelve (ENG-208)', async () => {
+      results = [
+        { data: { ...INSERTED_ROW, status: 'CONFIRMADO' }, error: null },
+      ];
+
+      await cancel();
+
+      expect(notices.patientCancelled).toHaveBeenCalledWith(
+        APPOINTMENT_ID,
+        { percent: 100, amount: 15000, status: 'PROCESADO' },
+        NOW,
+      );
     });
 
     it('si el pago se aprobó entre la lectura y el UPDATE, reembolsa y avisa', async () => {

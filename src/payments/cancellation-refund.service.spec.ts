@@ -6,6 +6,7 @@ jest.mock('@sentry/nestjs', () => ({
   captureException: jest.fn(),
 }));
 import { Prisma } from '../../generated/prisma/client';
+import { PatientNoticesService } from '../notifications/patient-notices.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CancellationRefundService } from './cancellation-refund.service';
 import { MercadoPagoService } from './mercadopago.service';
@@ -74,6 +75,7 @@ describe('CancellationRefundService', () => {
     getRefund: jest.Mock;
   };
   let loggerError: jest.SpyInstance;
+  let notices: { refundUpdated: jest.Mock };
 
   beforeEach(() => {
     prisma = {
@@ -95,9 +97,11 @@ describe('CancellationRefundService', () => {
       listRefunds: jest.fn().mockResolvedValue([]),
       getRefund: jest.fn(),
     };
+    notices = { refundUpdated: jest.fn().mockResolvedValue(undefined) };
     service = new CancellationRefundService(
       prisma as unknown as PrismaService,
       mercadoPago as unknown as MercadoPagoService,
+      notices as unknown as PatientNoticesService,
     );
     loggerError = jest
       .spyOn(Logger.prototype, 'error')
@@ -335,6 +339,7 @@ describe('CancellationRefundService', () => {
           id: 'pay-1',
           amount: new Prisma.Decimal('15000.00'),
           mercadopago_payment_id: 'mp-123',
+          appointment_id: 'appt-9',
         },
         ...extra,
       };
@@ -381,6 +386,12 @@ describe('CancellationRefundService', () => {
         where: { id: 'pay-1' },
         data: { status: 'REEMBOLSADO' },
       });
+      // ENG-208: el paciente se entera.
+      expect(notices.refundUpdated).toHaveBeenCalledWith(
+        'appt-9',
+        { refundId: 'ref-9', amount: 15000, status: 'PROCESADO' },
+        NOW,
+      );
     });
 
     it('si MercadoPago ya lo tenía, lo asocia y no lo pide de nuevo', async () => {
@@ -458,6 +469,11 @@ describe('CancellationRefundService', () => {
         data: expect.objectContaining({ status: 'RECHAZADO' }),
       });
       expect(Sentry.captureMessage).toHaveBeenCalled();
+      expect(notices.refundUpdated).toHaveBeenCalledWith(
+        'appt-9',
+        expect.objectContaining({ status: 'RECHAZADO' }),
+        NOW,
+      );
     });
 
     it('si MercadoPago falla, guarda el error y sigue pendiente', async () => {
@@ -477,6 +493,8 @@ describe('CancellationRefundService', () => {
           last_error: '503 de MercadoPago',
         },
       });
+      // Sigue pendiente: todavía no hay nada que avisar.
+      expect(notices.refundUpdated).not.toHaveBeenCalled();
     });
 
     it('un reembolso de un pago sobre turno inactivo reintenta con su clave original', async () => {

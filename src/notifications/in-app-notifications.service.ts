@@ -1,9 +1,15 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { renderNoticeEmail } from './appointment-emails';
+import { EmailService } from './email.service';
 import {
   renderInAppNotification,
   type InAppNotificationText,
 } from './in-app-notification-text';
+import { APPOINTMENTS_CHANNEL_ID } from './patient-notices';
+import { PushService } from './push.service';
 
 /** `P2002` de Prisma: violación de unicidad. */
 const PRISMA_UNIQUE_VIOLATION = 'P2002';
@@ -29,7 +35,9 @@ const normalizar = (v: unknown): string =>
 export type ProfessionalAppointmentNotice =
   | 'PAGO_CONFIRMADO'
   | 'TURNO_CANCELADO'
-  | 'TURNO_REPROGRAMADO';
+  | 'TURNO_REPROGRAMADO'
+  /** ENG-208: un turno que canceló terminó en reembolso (elegido o vencido). */
+  | 'TURNO_REEMBOLSADO';
 
 export interface InAppNotificationView extends InAppNotificationText {
   id: string;
@@ -60,12 +68,22 @@ export interface InAppInbox {
  *
  * Usa la misma unicidad `(appointment_id, type, channel)` que los emails: un
  * webhook que llega dos veces no deja dos avisos.
+ *
+ * ## Por mail también (ENG-208)
+ *
+ * Cada aviso al profesional sale además por mail, con el mismo texto que la
+ * campanita y un link al turno. El profesional usa la web, que no tiene push.
  */
 @Injectable()
 export class InAppNotificationsService {
   private readonly logger = new Logger(InAppNotificationsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly email: EmailService,
+    private readonly push: PushService,
+    private readonly config: ConfigService,
+  ) {}
 
   /**
    * Deja el aviso en la bandeja del profesional del turno.
@@ -89,26 +107,59 @@ export class InAppNotificationsService {
      */
     options: { replace?: boolean } = {},
   ): Promise<void> {
+    let appointment: ProfessionalNoticeAppointment | null;
     try {
-      const appointment = await this.prisma.appointment.findUnique({
+      appointment = await this.prisma.appointment.findUnique({
         where: { id: appointmentId },
-        select: {
-          professional_id: true,
-          scheduled_at: true,
-          patient: { select: { first_name: true, last_name: true } },
-        },
+        select: PROFESSIONAL_NOTICE_SELECT,
       });
-      if (!appointment) return;
+    } catch (err) {
+      this.logger.error(
+        `No se pudo leer el turno ${appointmentId} para el aviso ${type}: ${String(err)}`,
+      );
+      return;
+    }
+    if (!appointment) return;
 
-      // El nombre se congela en el aviso: si el paciente lo cambia después,
-      // el aviso cuenta lo que pasó con el nombre de ese momento.
-      const payload = {
-        appointmentId,
-        patient:
-          `${appointment.patient.first_name} ${appointment.patient.last_name}`.trim(),
-        scheduledAt: appointment.scheduled_at.toISOString(),
-        ...extra,
-      };
+    // El nombre se congela en el aviso: si el paciente lo cambia después,
+    // el aviso cuenta lo que pasó con el nombre de ese momento.
+    const payload = {
+      appointmentId,
+      patient:
+        `${appointment.patient.first_name} ${appointment.patient.last_name}`.trim(),
+      scheduledAt: appointment.scheduled_at.toISOString(),
+      durationMinutes: appointment.duration_minutes,
+      ...extra,
+    };
+
+    await this.inAppToProfessional(
+      appointmentId,
+      appointment,
+      type,
+      payload,
+      now,
+      options,
+    );
+    await this.mailProfessional(
+      appointmentId,
+      appointment,
+      type,
+      payload,
+      extra,
+      now,
+      options,
+    );
+  }
+
+  private async inAppToProfessional(
+    appointmentId: string,
+    appointment: ProfessionalNoticeAppointment,
+    type: ProfessionalAppointmentNotice,
+    payload: Prisma.InputJsonObject,
+    now: Date,
+    options: { replace?: boolean },
+  ): Promise<void> {
+    try {
       const data = {
         user_id: appointment.professional_id,
         appointment_id: appointmentId,
@@ -137,6 +188,84 @@ export class InAppNotificationsService {
       this.logger.error(
         `No se pudo dejar el aviso ${type} del turno ${appointmentId}: ${String(err)}`,
       );
+    }
+  }
+
+  /**
+   * El mismo aviso por mail (ENG-208). Un aviso que no se repite (`replace`
+   * apagado) sale una sola vez: si ya hay fila `EMAIL`, no se manda de nuevo.
+   * Uno que se repite (caso 12) sale por evento: la clave de idempotencia lleva
+   * los datos del evento, así un reintento del mismo no duplica. Nunca tira.
+   */
+  private async mailProfessional(
+    appointmentId: string,
+    appointment: ProfessionalNoticeAppointment,
+    type: ProfessionalAppointmentNotice,
+    payload: Prisma.InputJsonObject,
+    extra: Record<string, string>,
+    now: Date,
+    options: { replace?: boolean },
+  ): Promise<void> {
+    if (!this.email.isConfigured()) return;
+    const where = {
+      appointment_id_type_channel: {
+        appointment_id: appointmentId,
+        type,
+        channel: 'EMAIL' as const,
+      },
+    };
+    try {
+      if (!options.replace) {
+        const sent = await this.prisma.notification.findUnique({
+          where,
+          select: { id: true },
+        });
+        if (sent) return;
+      }
+
+      const { title, body } = renderInAppNotification(type, payload);
+      const event = [
+        appointment.scheduled_at.getTime(),
+        ...Object.values(extra),
+      ].join(':');
+      await this.email.send({
+        to: appointment.professional.profile.email,
+        ...renderNoticeEmail({
+          greeting: `Hola ${appointment.professional.first_name}:`,
+          title,
+          body,
+          url: this.webUrl(`/turnos/${appointmentId}`),
+          label: 'Ver el turno',
+        }),
+        idempotencyKey: `${appointmentId}:${type}:${event}`,
+      });
+
+      await this.prisma.notification.upsert({
+        where,
+        create: {
+          user_id: appointment.professional_id,
+          appointment_id: appointmentId,
+          type,
+          channel: 'EMAIL',
+          sent_at: now,
+        },
+        update: { sent_at: now },
+      });
+    } catch (err) {
+      this.logger.error(
+        `No se pudo mandar el mail ${type} del turno ${appointmentId}: ${String(err)}`,
+      );
+    }
+  }
+
+  /** Una ruta de la web, o `null` si `WEB_ORIGIN` no es una URL única. */
+  private webUrl(path: string): string | null {
+    const configured = this.config.get<string>('WEB_ORIGIN');
+    if (!configured || configured.includes(',')) return null;
+    try {
+      return `${new URL(configured).origin}${path}`;
+    } catch {
+      return null;
     }
   }
 
@@ -183,6 +312,16 @@ export class InAppNotificationsService {
           },
           sent_at: now,
         },
+      });
+
+      // ENG-208: también al celular. Solo si el aviso es nuevo: un webhook
+      // repetido cae en el `catch` de arriba y no vuelve a sonar. Sin nombres
+      // ni montos: aparece en la pantalla bloqueada.
+      await this.push.sendToUser(appointment.patient_id, {
+        title: 'Tu turno está confirmado',
+        body: 'Se acreditó tu pago. Abrí la app para ver el detalle.',
+        data: { tipo: 'PAGO_ACREDITADO', appointmentId },
+        channelId: APPOINTMENTS_CHANNEL_ID,
       });
     } catch (err) {
       if ((err as { code?: string }).code === PRISMA_UNIQUE_VIOLATION) return;
@@ -400,3 +539,17 @@ function conversationIdOf(payload: unknown): string | null {
   const value = (payload as Record<string, unknown>).conversationId;
   return typeof value === 'string' ? value : null;
 }
+
+const PROFESSIONAL_NOTICE_SELECT = {
+  professional_id: true,
+  scheduled_at: true,
+  duration_minutes: true,
+  patient: { select: { first_name: true, last_name: true } },
+  professional: {
+    select: { first_name: true, profile: { select: { email: true } } },
+  },
+} as const;
+
+type ProfessionalNoticeAppointment = Prisma.AppointmentGetPayload<{
+  select: typeof PROFESSIONAL_NOTICE_SELECT;
+}>;

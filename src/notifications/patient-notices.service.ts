@@ -2,9 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { escapeHtml } from './appointment-emails';
+import { renderNoticeEmail } from './appointment-emails';
 import { EmailService } from './email.service';
 import {
+  APPOINTMENTS_CHANNEL_ID,
   type FullRefundCause,
   type PatientNoticeData,
   type PatientNoticeType,
@@ -13,8 +14,7 @@ import {
 } from './patient-notices';
 import { PushService } from './push.service';
 
-/** Canal de Android de los avisos de turnos. Lo crea la app mobile. */
-export const APPOINTMENTS_CHANNEL_ID = 'turnos';
+export { APPOINTMENTS_CHANNEL_ID };
 
 /** Lo que se le informa al paciente del reembolso total. */
 export interface FullRefundNotice {
@@ -23,9 +23,32 @@ export interface FullRefundNotice {
   cause: FullRefundCause;
 }
 
+/** Lo que se le informa al paciente de su propia cancelación. */
+export interface PatientCancellationNotice {
+  percent: number;
+  amount: number;
+  status: string | null;
+}
+
+/** Un reembolso pendiente que llegó a su estado final. */
+export interface RefundUpdateNotice {
+  refundId: string;
+  amount: number;
+  status: 'PROCESADO' | 'RECHAZADO';
+}
+
+/** Cómo sale cada aviso. */
+interface SendOptions {
+  /** El push repite lo que el paciente acaba de hacer en pantalla: ahí sobra. */
+  push?: boolean;
+  /** Clave de idempotencia del mail. Por defecto, el instante de la cancelación. */
+  mailKey?: string;
+}
+
 /**
- * Avisos al paciente cuando el profesional cancela su turno (ENG-204, ADR-018):
- * campanita, push y mail, los tres con el mismo texto (`patient-notices.ts`).
+ * Avisos al paciente sobre los cambios en su turno (ENG-204, ENG-208,
+ * ADR-018): campanita, push y mail, los tres con el mismo texto
+ * (`patient-notices.ts`).
  *
  * ## Repetidos
  *
@@ -78,11 +101,74 @@ export class PatientNoticesService {
     }));
   }
 
+  /**
+   * Se vence el plazo para elegir (ENG-208, caso 2). Lo manda el job de
+   * vencimientos, una vez por cancelación.
+   */
+  async reprogramDeadlineSoon(
+    appointmentId: string,
+    now: Date = new Date(),
+  ): Promise<void> {
+    await this.send(
+      appointmentId,
+      'PLAZO_REPROGRAMACION_POR_VENCER',
+      now,
+      (a) => ({ deadline: a.reprogram_deadline?.toISOString() }),
+    );
+  }
+
+  /**
+   * Comprobante de la cancelación que hizo el paciente (ENG-208): cuánto se le
+   * devuelve y en qué estado está. Sin push: lo acaba de hacer en pantalla.
+   */
+  async patientCancelled(
+    appointmentId: string,
+    refund: PatientCancellationNotice,
+    now: Date = new Date(),
+  ): Promise<void> {
+    await this.send(
+      appointmentId,
+      'CANCELACION_CONFIRMADA',
+      now,
+      (a) => ({
+        percent: refund.percent,
+        amount: refund.amount,
+        currency: a.professional.currency,
+        refundStatus: refund.status ?? undefined,
+      }),
+      { push: false },
+    );
+  }
+
+  /**
+   * Un reembolso que había quedado pendiente se acreditó o se dio por perdido
+   * (ENG-208, caso 16). Lo manda el job de reintentos de ENG-205.
+   */
+  async refundUpdated(
+    appointmentId: string,
+    refund: RefundUpdateNotice,
+    now: Date = new Date(),
+  ): Promise<void> {
+    await this.send(
+      appointmentId,
+      'REEMBOLSO_ACTUALIZADO',
+      now,
+      (a) => ({
+        amount: refund.amount,
+        currency: a.professional.currency,
+        refundStatus: refund.status,
+      }),
+      // Un aviso por reembolso y estado: un reintento del job no lo repite.
+      { mailKey: `${refund.refundId}:${refund.status}` },
+    );
+  }
+
   private async send(
     appointmentId: string,
     type: PatientNoticeType,
     now: Date,
     extra: (a: NoticeAppointment) => PatientNoticeData,
+    options: SendOptions = {},
   ): Promise<void> {
     let appointment: NoticeAppointment | null;
     try {
@@ -110,8 +196,10 @@ export class PatientNoticesService {
 
     await Promise.all([
       this.inApp(appointment, type, payload, now),
-      this.pushTo(appointment, type),
-      this.mail(appointment, type, data, now),
+      options.push === false
+        ? Promise.resolve()
+        : this.pushTo(appointment, type, data),
+      this.mail(appointment, type, data, now, options.mailKey),
     ]);
   }
 
@@ -155,19 +243,10 @@ export class PatientNoticesService {
   private async pushTo(
     a: NoticeAppointment,
     type: PatientNoticeType,
+    data: PatientNoticeData,
   ): Promise<void> {
-    const message =
-      type === 'TURNO_CANCELADO_PROFESIONAL'
-        ? {
-            title: 'Cambió tu turno',
-            body: 'Tu profesional canceló un turno. Abrí la app para ver tus opciones.',
-          }
-        : {
-            title: 'Reembolso en camino',
-            body: 'Te devolvemos el 100 % de un turno. Abrí la app para ver el detalle.',
-          };
     await this.push.sendToUser(a.patient_id, {
-      ...message,
+      ...pushText(type, data),
       data: { tipo: type, appointmentId: a.id },
       channelId: APPOINTMENTS_CHANNEL_ID,
     });
@@ -178,41 +257,28 @@ export class PatientNoticesService {
     type: PatientNoticeType,
     data: PatientNoticeData,
     now: Date,
+    mailKey?: string,
   ): Promise<void> {
     if (!this.email.isConfigured()) return;
     try {
       const { title, body } = patientNoticeText(type, data);
-      const url = this.webUrl(`/turnos/${a.id}`);
-      const label =
-        type === 'TURNO_CANCELADO_PROFESIONAL' &&
-        data.outcome === 'A_REPROGRAMAR'
-          ? 'Elegir qué hacer con mi turno'
-          : 'Ver el turno';
-      const greeting = `Hola ${a.patient.first_name}:`;
+      const eligir =
+        (type === 'TURNO_CANCELADO_PROFESIONAL' &&
+          data.outcome === 'A_REPROGRAMAR') ||
+        type === 'PLAZO_REPROGRAMACION_POR_VENCER';
 
       await this.email.send({
         to: a.patient.profile.email,
-        subject: title,
-        text: [
-          greeting,
-          '',
+        ...renderNoticeEmail({
+          greeting: `Hola ${a.patient.first_name}:`,
+          title,
           body,
-          ...(url ? ['', `${label}: ${url}`] : []),
-          '',
-          'MediConnect',
-        ].join('\n'),
-        html: `<!doctype html>
-<html lang="es">
-  <body style="font-family: Arial, sans-serif; color: #1f2937; line-height: 1.5;">
-    <p>${escapeHtml(greeting)}</p>
-    <p>${escapeHtml(body)}</p>
-    ${url ? `<p><a href="${escapeHtml(url)}">${escapeHtml(label)}</a></p>` : ''}
-    <p style="color: #6b7280;">MediConnect</p>
-  </body>
-</html>`,
+          url: this.webUrl(`/turnos/${a.id}`),
+          label: eligir ? 'Elegir qué hacer con mi turno' : 'Ver el turno',
+        }),
         // Por instante: un turno que el profesional cancela dos veces (caso 12)
         // manda dos mails, pero un reintento del mismo aviso no.
-        idempotencyKey: `${a.id}:${type}:${(a.cancelled_at ?? now).getTime()}`,
+        idempotencyKey: `${a.id}:${type}:${mailKey ?? (a.cancelled_at ?? now).getTime()}`,
       });
 
       await this.prisma.notification.upsert({
@@ -248,6 +314,48 @@ export class PatientNoticesService {
     } catch {
       return null;
     }
+  }
+}
+
+/**
+ * El push aparece en la pantalla bloqueada: no lleva motivos, montos ni el
+ * nombre del profesional. Dice qué pasó y lleva al turno, donde está el detalle.
+ */
+function pushText(
+  type: PatientNoticeType,
+  data: PatientNoticeData,
+): { title: string; body: string } {
+  switch (type) {
+    case 'TURNO_CANCELADO_PROFESIONAL':
+      return {
+        title: 'Cambió tu turno',
+        body: 'Tu profesional canceló un turno. Abrí la app para ver tus opciones.',
+      };
+    case 'PLAZO_REPROGRAMACION_POR_VENCER':
+      return {
+        title: 'Elegí qué hacer con tu turno',
+        body: 'Se vence el plazo para elegir otro horario o el reembolso. Abrí la app para elegir.',
+      };
+    case 'REEMBOLSO_ACTUALIZADO':
+      return data.refundStatus === 'RECHAZADO'
+        ? {
+            title: 'Problema con tu reembolso',
+            body: 'No pudimos completar un reembolso. Abrí la app para ver cómo seguir.',
+          }
+        : {
+            title: 'Se acreditó tu reembolso',
+            body: 'MercadoPago procesó un reembolso. Abrí la app para ver el detalle.',
+          };
+    case 'CANCELACION_CONFIRMADA':
+      return {
+        title: 'Cancelaste tu turno',
+        body: 'Abrí la app para ver el detalle del reembolso.',
+      };
+    default:
+      return {
+        title: 'Reembolso en camino',
+        body: 'Te devolvemos el 100 % de un turno. Abrí la app para ver el detalle.',
+      };
   }
 }
 

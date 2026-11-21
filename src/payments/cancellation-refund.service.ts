@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as Sentry from '@sentry/nestjs';
 import { Prisma } from '../../generated/prisma/client';
+import { PatientNoticesService } from '../notifications/patient-notices.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   refundPercentFor,
@@ -157,6 +158,7 @@ export class CancellationRefundService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly mercadoPago: MercadoPagoService,
+    private readonly notices: PatientNoticesService,
   ) {}
 
   /**
@@ -511,7 +513,12 @@ export class CancellationRefundService {
         created_at: true,
         mercadopago_refund_id: true,
         payment: {
-          select: { id: true, amount: true, mercadopago_payment_id: true },
+          select: {
+            id: true,
+            amount: true,
+            mercadopago_payment_id: true,
+            appointment_id: true,
+          },
         },
       },
       orderBy: { created_at: 'asc' },
@@ -532,6 +539,14 @@ export class CancellationRefundService {
       const outcome = await this.retryOne(row, now);
       if (outcome === 'PROCESADO') summary.procesados += 1;
       if (outcome === 'RECHAZADO') summary.rechazados += 1;
+      // ENG-208: el paciente se entera de cómo terminó. Nunca tira.
+      if (outcome !== 'PENDIENTE') {
+        await this.notices.refundUpdated(
+          row.payment.appointment_id,
+          { refundId: row.id, amount: row.amount.toNumber(), status: outcome },
+          now,
+        );
+      }
     }
     return summary;
   }

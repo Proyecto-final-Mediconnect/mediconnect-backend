@@ -7,6 +7,7 @@ import {
 } from '../src/notifications/email.service';
 import type { ConfigService } from '@nestjs/config';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import type { PushService } from '../src/notifications/push.service';
 
 /**
  * ENG-68 — qué turnos reciben cada email, contra un Postgres real.
@@ -17,10 +18,12 @@ import type { PrismaService } from '../src/prisma/prisma.service';
 describe('Emails de turno (integration)', () => {
   const prisma = new PrismaClient();
   const send = jest.fn().mockResolvedValue('email-id');
+  const pushToUser = jest.fn().mockResolvedValue(undefined);
   const service = new AppointmentNotificationsService(
     prisma as unknown as PrismaService,
     { isConfigured: () => true, send } as unknown as EmailService,
     { get: () => 'https://app.test' } as unknown as ConfigService,
+    { sendToUser: pushToUser } as unknown as PushService,
   );
 
   const NOW = new Date('2026-10-14T12:00:00.000Z');
@@ -100,13 +103,35 @@ describe('Emails de turno (integration)', () => {
     return row.id;
   }
 
-  async function sentKinds(appointmentId: string) {
+  /** Los mails que salieron. Los avisos in-app (ENG-208) se miran aparte. */
+  async function sentKinds(
+    appointmentId: string,
+    channel: 'EMAIL' | 'IN_APP' = 'EMAIL',
+  ) {
     const rows = await prisma.notification.findMany({
-      where: { appointment_id: appointmentId, sent_at: { not: null } },
+      where: { appointment_id: appointmentId, sent_at: { not: null }, channel },
       select: { type: true },
     });
     return rows.map((r) => r.type).sort();
   }
+
+  it('los recordatorios también van a la campanita y al celular, una vez cada uno (ENG-208)', async () => {
+    const id = await appointment({
+      startsIn: 30 * 60 * 1000,
+      createdAgo: 72 * HOUR,
+    });
+    pushToUser.mockClear();
+
+    await service.sendDue(NOW);
+    await service.sendDue(new Date(NOW.getTime() + 5 * 60_000));
+
+    expect(await sentKinds(id, 'IN_APP')).toEqual(['RECORDATORIO_1H']);
+    const pushes = pushToUser.mock.calls.filter(
+      ([, msg]) =>
+        (msg as { data: { appointmentId: string } }).data.appointmentId === id,
+    );
+    expect(pushes).toHaveLength(1);
+  });
 
   it('confirma un turno confirmado recién, y una sola vez', async () => {
     const id = await appointment({

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
 import { PrismaClient } from '../generated/prisma';
 import { ProfessionalCancellationService } from '../src/appointments/professional-cancellation.service';
+import type { InAppNotificationsService } from '../src/notifications/in-app-notifications.service';
 import type { PatientNoticesService } from '../src/notifications/patient-notices.service';
 import type { AppointmentPaymentService } from '../src/payments/appointment-payment.service';
 import { CancellationRefundService } from '../src/payments/cancellation-refund.service';
@@ -174,6 +175,7 @@ describe('El profesional cancela un turno (integration, ENG-204)', () => {
     const refunds = new CancellationRefundService(
       prisma as unknown as PrismaService,
       { refundPayment } as unknown as MercadoPagoService,
+      { refundUpdated: jest.fn() } as unknown as PatientNoticesService,
     );
     service = new ProfessionalCancellationService(
       prisma as unknown as PrismaService,
@@ -183,7 +185,9 @@ describe('El profesional cancela un turno (integration, ENG-204)', () => {
       {
         professionalCancelled: jest.fn(),
         fullRefund: jest.fn(),
+        reprogramDeadlineSoon: jest.fn(),
       } as unknown as PatientNoticesService,
+      { notifyProfessional: jest.fn() } as unknown as InAppNotificationsService,
     );
   });
 
@@ -341,6 +345,7 @@ describe('El profesional cancela un turno (integration, ENG-204)', () => {
     const refunds = new CancellationRefundService(
       prisma as unknown as PrismaService,
       { refundPayment } as unknown as MercadoPagoService,
+      { refundUpdated: jest.fn() } as unknown as PatientNoticesService,
     );
 
     await Promise.all([

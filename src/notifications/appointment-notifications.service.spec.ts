@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppointmentNotificationsService } from './appointment-notifications.service';
 import { EmailDeliveryError, EmailService } from './email.service';
+import { PushService } from './push.service';
 
 /**
  * ENG-68 — reclamo, envío y reintento de los emails de turno.
@@ -30,6 +31,7 @@ describe('AppointmentNotificationsService', () => {
     notification: { create: jest.Mock; update: jest.Mock; delete: jest.Mock };
   };
   let email: { isConfigured: jest.Mock; send: jest.Mock };
+  let push: { sendToUser: jest.Mock };
   let service: AppointmentNotificationsService;
 
   beforeEach(() => {
@@ -48,10 +50,12 @@ describe('AppointmentNotificationsService', () => {
       isConfigured: jest.fn().mockReturnValue(true),
       send: jest.fn().mockResolvedValue('email-1'),
     };
+    push = { sendToUser: jest.fn().mockResolvedValue(undefined) };
     service = new AppointmentNotificationsService(
       prisma as unknown as PrismaService,
       email as unknown as EmailService,
       { get: () => 'https://app.test' } as unknown as ConfigService,
+      push as unknown as PushService,
     );
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -149,7 +153,7 @@ describe('AppointmentNotificationsService', () => {
   });
 
   describe('sendDue', () => {
-    it('sin email configurado no consulta ni manda nada', async () => {
+    it('sin email configurado no manda mails, pero los recordatorios van a la campanita (ENG-208)', async () => {
       email.isConfigured.mockReturnValue(false);
 
       await expect(service.sendDue(NOW)).resolves.toEqual({
@@ -157,7 +161,12 @@ describe('AppointmentNotificationsService', () => {
         sent: 0,
         failed: 0,
       });
-      expect(prisma.appointment.findMany).not.toHaveBeenCalled();
+      expect(email.send).not.toHaveBeenCalled();
+      // Solo las dos ventanas de recordatorio para la campanita, no las de mail.
+      expect(prisma.appointment.findMany).toHaveBeenCalledTimes(2);
+      for (const [args] of prisma.appointment.findMany.mock.calls) {
+        expect(args.where.notifications.none.channel).toBe('IN_APP');
+      }
     });
 
     it('cuenta enviados y fallidos', async () => {
@@ -265,6 +274,92 @@ describe('AppointmentNotificationsService', () => {
         failed: 0,
       });
       expect(prisma.appointment.findMany).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('AppointmentNotificationsService: recordatorios en la campanita y el celular (ENG-208)', () => {
+  let prisma: {
+    appointment: { findMany: jest.Mock };
+    notification: { create: jest.Mock; update: jest.Mock; delete: jest.Mock };
+  };
+  let push: { sendToUser: jest.Mock };
+  let service: AppointmentNotificationsService;
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    prisma = {
+      appointment: { findMany: jest.fn().mockResolvedValue([]) },
+      notification: {
+        create: jest.fn().mockResolvedValue({ id: 'n-1' }),
+        update: jest.fn().mockResolvedValue({}),
+        delete: jest.fn().mockResolvedValue({}),
+      },
+    };
+    push = { sendToUser: jest.fn().mockResolvedValue(undefined) };
+    service = new AppointmentNotificationsService(
+      prisma as unknown as PrismaService,
+      { isConfigured: () => false } as unknown as EmailService,
+      { get: () => 'https://app.test' } as unknown as ConfigService,
+      push as unknown as PushService,
+    );
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  const enUnaHora = {
+    ...APPOINTMENT,
+    scheduled_at: new Date(NOW.getTime() + 40 * 60_000),
+    created_at: new Date(NOW.getTime() - 48 * HOUR),
+  };
+
+  it('deja el recordatorio en la campanita y manda el push al turno', async () => {
+    prisma.appointment.findMany
+      .mockResolvedValueOnce([]) // 24 h
+      .mockResolvedValueOnce([enUnaHora]); // 1 h
+
+    await service.sendDue(NOW);
+
+    expect(prisma.notification.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        user_id: 'paciente-1',
+        appointment_id: 'turno-1',
+        type: 'RECORDATORIO_1H',
+        channel: 'IN_APP',
+        payload: expect.objectContaining({ professional: 'Ana Gómez' }),
+      }),
+      select: { id: true },
+    });
+    expect(push.sendToUser).toHaveBeenCalledWith('paciente-1', {
+      title: 'Tu turno empieza en una hora',
+      body: expect.stringContaining('tenés videoconsulta'),
+      data: { tipo: 'RECORDATORIO_1H', appointmentId: 'turno-1' },
+      channelId: 'turnos',
+    });
+    // El push no nombra al profesional: aparece en la pantalla bloqueada.
+    expect(push.sendToUser.mock.calls[0][1].body).not.toContain('Ana');
+  });
+
+  it('respeta la oposición a los recordatorios y no repite el aviso', async () => {
+    prisma.appointment.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([enUnaHora]);
+    prisma.notification.create.mockRejectedValue({ code: 'P2002' });
+
+    await service.sendDue(NOW);
+
+    const where = prisma.appointment.findMany.mock.calls[0][0].where;
+    expect(where.patient).toEqual({ profile: { email_reminders: true } });
+    expect(push.sendToUser).not.toHaveBeenCalled();
+  });
+
+  it('si la base falla, no tira', async () => {
+    prisma.appointment.findMany.mockRejectedValue(new Error('db caída'));
+
+    await expect(service.sendDue(NOW)).resolves.toMatchObject({
+      enabled: false,
     });
   });
 });

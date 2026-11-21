@@ -8,6 +8,9 @@ import {
   type AppointmentEmailKind,
 } from './appointment-emails';
 import { EmailDeliveryError, EmailService } from './email.service';
+import { APPOINTMENTS_CHANNEL_ID } from './patient-notices';
+import { PushService } from './push.service';
+import { toLocalDateTime } from '../common/time/argentina-time';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -100,6 +103,7 @@ export class AppointmentNotificationsService {
     private readonly prisma: PrismaService,
     private readonly email: EmailService,
     private readonly config: ConfigService,
+    private readonly push: PushService,
   ) {}
 
   /** Lo que llama el job: todo aviso que ya debería haber salido. */
@@ -108,6 +112,9 @@ export class AppointmentNotificationsService {
       this.logger.warn(
         'Emails de turno deshabilitados: falta RESEND_API_KEY o EMAIL_FROM.',
       );
+      // ENG-208: los recordatorios en la campanita y el celular no dependen del
+      // mail: salen aunque Resend no esté configurado.
+      await this.sendReminderNotices(now);
       return { enabled: false, sent: 0, failed: 0 };
     }
 
@@ -137,6 +144,8 @@ export class AppointmentNotificationsService {
         `Emails de turno: ${summary.sent} enviados, ${summary.failed} fallidos.`,
       );
     }
+    // ENG-208: también a la campanita y al celular.
+    await this.sendReminderNotices(now);
     return summary;
   }
 
@@ -268,6 +277,7 @@ export class AppointmentNotificationsService {
     now: Date,
     lead: number,
     notBefore: number,
+    channel: 'EMAIL' | 'IN_APP' = 'EMAIL',
   ): Promise<DueAppointment[]> {
     const type = lead === HOUR_MS ? 'RECORDATORIO_1H' : 'RECORDATORIO_24H';
 
@@ -278,8 +288,9 @@ export class AppointmentNotificationsService {
           gt: new Date(now.getTime() + notBefore),
           lte: new Date(now.getTime() + lead),
         },
-        notifications: { none: { type, channel: 'EMAIL' } },
+        notifications: { none: { type, channel } },
         // Oposición (ENG-86): quien apagó los recordatorios no los recibe.
+        // Tampoco en la campanita ni en el celular (ENG-208).
         // La confirmación de la reserva no pasa por acá y sigue saliendo.
         patient: { profile: { email_reminders: true } },
       },
@@ -291,6 +302,83 @@ export class AppointmentNotificationsService {
     return rows.filter(
       (row) => row.created_at.getTime() <= row.scheduled_at.getTime() - lead,
     );
+  }
+
+  /**
+   * Recordatorios a 24 h y a 1 h en la campanita y por push (ENG-208), con las
+   * mismas reglas que el mail: misma ventana, misma anticipación mínima y
+   * misma oposición. La fila `IN_APP` reclama el aviso: si ya está, no sale de
+   * nuevo. Nunca tira: el mail sale igual.
+   */
+  private async sendReminderNotices(now: Date): Promise<number> {
+    let sent = 0;
+    try {
+      const windows = [
+        [24 * HOUR_MS, HOUR_MS, 'RECORDATORIO_24H'],
+        [HOUR_MS, 0, 'RECORDATORIO_1H'],
+      ] as const;
+      for (const [lead, notBefore, type] of windows) {
+        const due = await this.dueReminders(now, lead, notBefore, 'IN_APP');
+        for (const appointment of due) {
+          if (await this.remind(appointment, type, now)) sent += 1;
+        }
+      }
+    } catch (err) {
+      this.logger.error(
+        `No se pudieron dejar los recordatorios in-app: ${String(err)}`,
+      );
+    }
+    return sent;
+  }
+
+  private async remind(
+    a: DueAppointment,
+    type: 'RECORDATORIO_24H' | 'RECORDATORIO_1H',
+    now: Date,
+  ): Promise<boolean> {
+    try {
+      await this.prisma.notification.create({
+        data: {
+          user_id: a.patient_id,
+          appointment_id: a.id,
+          type,
+          channel: 'IN_APP',
+          payload: {
+            appointmentId: a.id,
+            professional:
+              `${a.professional.first_name} ${a.professional.last_name}`.trim(),
+            scheduledAt: a.scheduled_at.toISOString(),
+          },
+          sent_at: now,
+        },
+        select: { id: true },
+      });
+    } catch (err) {
+      if ((err as { code?: string }).code === PRISMA_UNIQUE_VIOLATION) {
+        return false;
+      }
+      this.logger.error(
+        `No se pudo dejar el recordatorio ${type} del turno ${a.id}: ${String(err)}`,
+      );
+      return false;
+    }
+
+    // Sin el nombre del profesional: aparece en la pantalla bloqueada.
+    const { startTime } = toLocalDateTime(a.scheduled_at);
+    await this.push.sendToUser(a.patient_id, {
+      ...(type === 'RECORDATORIO_24H'
+        ? {
+            title: 'Tu turno es mañana',
+            body: `Mañana a las ${startTime} tenés videoconsulta. Abrí la app para ver el detalle.`,
+          }
+        : {
+            title: 'Tu turno empieza en una hora',
+            body: `A las ${startTime} tenés videoconsulta. Podés entrar unos minutos antes.`,
+          }),
+      data: { tipo: type, appointmentId: a.id },
+      channelId: APPOINTMENTS_CHANNEL_ID,
+    });
+    return true;
   }
 
   /** Reclama el envío, manda y registra el resultado. */

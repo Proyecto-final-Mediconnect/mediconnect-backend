@@ -37,8 +37,8 @@ describe('renderInAppNotification', () => {
         scheduledAt: SCHEDULED,
       }),
     ).toEqual({
-      title: 'Turno nuevo confirmado',
-      body: 'Julián Pérez reservó y pagó un turno para el viernes, 23 de octubre a las 10:30.',
+      title: 'Turno nuevo con Julián Pérez',
+      body: 'Reservó y pagó una videoconsulta para el viernes, 23 de octubre a las 10:30. El pago ya está acreditado.',
     });
   });
 
@@ -136,5 +136,53 @@ describe('renderInAppNotification', () => {
       title: 'Aviso',
       body: 'Tenés un aviso nuevo.',
     });
+  });
+});
+
+describe('avisos al profesional del ciclo del turno (ENG-208)', () => {
+  const payload = {
+    patient: 'Julián Pérez',
+    scheduledAt: '2026-10-23T13:30:00.000Z',
+  };
+
+  it('el turno asignado dice quién, cuándo, la modalidad, la duración y el pago', () => {
+    expect(
+      renderInAppNotification('PAGO_CONFIRMADO', {
+        ...payload,
+        durationMinutes: 45,
+      }),
+    ).toEqual({
+      title: 'Turno nuevo con Julián Pérez',
+      body: 'Reservó y pagó una videoconsulta de 45 minutos para el viernes, 23 de octubre a las 10:30. El pago ya está acreditado.',
+    });
+  });
+
+  it('el paciente eligió el reembolso de un turno que el profesional canceló', () => {
+    expect(
+      renderInAppNotification('TURNO_REEMBOLSADO', {
+        ...payload,
+        cause: 'ELEGIDO',
+      }),
+    ).toMatchObject({ title: 'Julián Pérez pidió el reembolso' });
+  });
+
+  it('venció el plazo del paciente para elegir', () => {
+    const { title, body } = renderInAppNotification('TURNO_REEMBOLSADO', {
+      ...payload,
+      cause: 'VENCIDO',
+    });
+    expect(title).toBe('Se reembolsó un turno que cancelaste');
+    expect(body).toContain('no eligió un horario nuevo a tiempo');
+  });
+
+  it('los recordatorios dicen la hora', () => {
+    expect(
+      renderInAppNotification('RECORDATORIO_1H', {
+        professional: 'Ana Pérez',
+        scheduledAt: '2026-10-23T13:30:00.000Z',
+      }).body,
+    ).toBe(
+      'En una hora, a las 10:30, tenés videoconsulta con Ana Pérez. Podés entrar unos minutos antes.',
+    );
   });
 });
