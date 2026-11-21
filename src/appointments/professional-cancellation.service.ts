@@ -203,9 +203,16 @@ export class ProfessionalCancellationService {
       );
     }
     let next: ProfessionalCancellationResult['status'];
-    if (row.status === 'CONFIRMADO') next = 'A_REPROGRAMAR';
-    else if (row.status === 'RESERVADO_SIN_PAGAR') next = 'CANCELADO';
-    else throw new ConflictException('Ese turno ya no está activo.');
+    let previous: appointment_status;
+    if (row.status === 'CONFIRMADO') {
+      previous = 'CONFIRMADO';
+      next = 'A_REPROGRAMAR';
+    } else if (row.status === 'RESERVADO_SIN_PAGAR') {
+      previous = 'RESERVADO_SIN_PAGAR';
+      next = 'CANCELADO';
+    } else {
+      throw new ConflictException('Ese turno ya no está activo.');
+    }
 
     const deadline =
       next === 'A_REPROGRAMAR'
@@ -216,7 +223,7 @@ export class ProfessionalCancellationService {
       where: {
         id: row.id,
         professional_id: actorId,
-        status: row.status as appointment_status,
+        status: previous,
         scheduled_at: { gt: now },
       },
       data: {
