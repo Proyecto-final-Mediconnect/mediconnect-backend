@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type { appointment_status } from '../../generated/prisma';
+import type { Prisma } from '../../generated/prisma/client';
 import { PatientNoticesService } from '../notifications/patient-notices.service';
 import { AppointmentPaymentService } from '../payments/appointment-payment.service';
 import {
@@ -147,62 +148,108 @@ export class ProfessionalCancellationService {
       );
     }
 
-    let next: ProfessionalCancellationResult['status'];
-    if (row.status === 'CONFIRMADO') next = 'A_REPROGRAMAR';
-    else if (row.status === 'RESERVADO_SIN_PAGAR') next = 'CANCELADO';
-    else throw new ConflictException('Ese turno ya no está activo.');
-
-    const deadline =
-      next === 'A_REPROGRAMAR' ? reprogramDeadlineFor(scheduledAt, now) : null;
-
+    let result: ProfessionalCancellationResult;
     try {
-      await this.prisma.$transaction(async (tx) => {
-        await tx.appointment.update({
-          // El `where` revalida todo lo que se chequeó arriba: si entre la
-          // lectura y la escritura el webhook confirmó el pago, el job liberó la
-          // reserva o un segundo click ya canceló, no matchea y sale 409.
-          where: {
-            id: row.id,
-            professional_id: userId,
-            status: row.status as appointment_status,
-            scheduled_at: { gt: now },
-          },
-          data: {
-            status: next,
-            cancelled_by: 'PROFESIONAL',
-            cancellation_reason: reason,
-            cancelled_at: now,
-            reprogram_deadline: deadline,
-            updated_at: now,
-          },
-        });
-        await tx.auditLog.create({
-          data: {
-            actor_id: userId,
-            action: 'APPOINTMENT_CANCELLED_BY_PROFESSIONAL',
-            resource_type: 'appointments',
-            resource_id: row.id,
-            metadata: {
-              previousStatus: row.status,
-              newStatus: next,
-              reason,
-              reprogramDeadline: deadline?.toISOString() ?? null,
-            },
-          },
-        });
-      });
+      result = await this.prisma.$transaction((tx) =>
+        this.applyCancellation(
+          tx,
+          { ...row, scheduled_at: scheduledAt },
+          reason,
+          userId,
+          now,
+          'MANUAL',
+        ),
+      );
     } catch (err) {
+      if (err instanceof ConflictException) throw err;
       throw this.writeError(err, 'cancelar el turno', row.id);
     }
 
-    // Después del commit y sin tirar, como en la cancelación del paciente.
-    if (next === 'CANCELADO') {
-      // Si no, la pestaña de MercadoPago que el paciente dejó abierta cobraría
-      // un turno cancelado. Si igual entra un pago, el webhook lo ve inactivo y
-      // lo devuelve entero (ENG-144).
-      await this.payments.expireCheckout(row.id, now);
+    await this.afterCancellation(result, now);
+    return result;
+  }
+
+  /**
+   * Escribe, dentro de la transacción `tx`, que el profesional cancela un turno
+   * (ADR-018, casos 1 y 11): `CONFIRMADO` → `A_REPROGRAMAR` con plazo, y
+   * `RESERVADO_SIN_PAGAR` → `CANCELADO`. Deja la auditoría. **No** hace nada
+   * fuera de la base: los avisos y el link de pago van en `afterCancellation`,
+   * después del commit.
+   *
+   * La usan la cancelación de un turno (`cancelByProfessional`) y el bloqueo de
+   * agenda que pisa turnos (ENG-206), que cancela varios en una sola
+   * transacción con el bloqueo: o se guarda todo, o nada.
+   *
+   * El `where` revalida estado, profesional y que el turno no haya empezado: si
+   * algo cambió entre la lectura y la escritura (el webhook confirmó el pago,
+   * el job liberó la reserva, un segundo click ya canceló), Prisma tira P2025.
+   */
+  async applyCancellation(
+    tx: Prisma.TransactionClient,
+    row: {
+      id: string;
+      professional_id: string;
+      status: string;
+      scheduled_at: Date;
+    },
+    reason: string,
+    actorId: string,
+    now: Date,
+    origin: 'MANUAL' | 'BLOQUEO',
+  ): Promise<ProfessionalCancellationResult> {
+    if (row.scheduled_at <= now) {
+      throw new ConflictException(
+        'Ese turno ya empezó o ya pasó: no se puede cancelar.',
+      );
     }
-    await this.notices.professionalCancelled(row.id, next, now);
+    let next: ProfessionalCancellationResult['status'];
+    let previous: appointment_status;
+    if (row.status === 'CONFIRMADO') {
+      previous = 'CONFIRMADO';
+      next = 'A_REPROGRAMAR';
+    } else if (row.status === 'RESERVADO_SIN_PAGAR') {
+      previous = 'RESERVADO_SIN_PAGAR';
+      next = 'CANCELADO';
+    } else {
+      throw new ConflictException('Ese turno ya no está activo.');
+    }
+
+    const deadline =
+      next === 'A_REPROGRAMAR'
+        ? reprogramDeadlineFor(row.scheduled_at, now)
+        : null;
+
+    await tx.appointment.update({
+      where: {
+        id: row.id,
+        professional_id: actorId,
+        status: previous,
+        scheduled_at: { gt: now },
+      },
+      data: {
+        status: next,
+        cancelled_by: 'PROFESIONAL',
+        cancellation_reason: reason,
+        cancelled_at: now,
+        reprogram_deadline: deadline,
+        updated_at: now,
+      },
+    });
+    await tx.auditLog.create({
+      data: {
+        actor_id: actorId,
+        action: 'APPOINTMENT_CANCELLED_BY_PROFESSIONAL',
+        resource_type: 'appointments',
+        resource_id: row.id,
+        metadata: {
+          previousStatus: row.status,
+          newStatus: next,
+          reason,
+          reprogramDeadline: deadline?.toISOString() ?? null,
+          origin,
+        },
+      },
+    });
 
     return {
       id: row.id,
@@ -210,6 +257,23 @@ export class ProfessionalCancellationService {
       cancelledBy: 'PROFESIONAL',
       reprogramDeadline: deadline?.toISOString() ?? null,
     };
+  }
+
+  /**
+   * Lo que va después del commit de `applyCancellation`. **Nunca tira**: la
+   * cancelación ya quedó escrita.
+   */
+  async afterCancellation(
+    result: ProfessionalCancellationResult,
+    now: Date,
+  ): Promise<void> {
+    if (result.status === 'CANCELADO') {
+      // Si no, la pestaña de MercadoPago que el paciente dejó abierta cobraría
+      // un turno cancelado. Si igual entra un pago, el webhook lo ve inactivo y
+      // lo devuelve entero (ENG-144).
+      await this.payments.expireCheckout(result.id, now);
+    }
+    await this.notices.professionalCancelled(result.id, result.status, now);
   }
 
   /**
