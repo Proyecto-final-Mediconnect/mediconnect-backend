@@ -271,7 +271,7 @@ describe('VideoConsultationService', () => {
       ).resolves.toMatchObject({ role: 'PACIENTE' });
     });
 
-    it('pide pagar un turno RESERVADO_SIN_PAGAR reservado con el cobro ya andando', async () => {
+    it('pide pagar un turno RESERVADO_SIN_PAGAR', async () => {
       build(appointmentRow({ status: 'RESERVADO_SIN_PAGAR' }));
 
       await expect(
@@ -288,7 +288,7 @@ describe('VideoConsultationService', () => {
       ).rejects.toThrow('El paciente todavía no pagó este turno.');
     });
 
-    it('acepta RESERVADO_SIN_PAGAR en un turno reservado antes de que existiera el cobro', async () => {
+    it('ENG-226: tampoco entra un impago reservado antes de que existiera el cobro', async () => {
       build(
         appointmentRow({
           status: 'RESERVADO_SIN_PAGAR',
@@ -298,7 +298,8 @@ describe('VideoConsultationService', () => {
 
       await expect(
         service.join('jwt', PATIENT, APPOINTMENT, DENTRO_DE_LA_VENTANA),
-      ).resolves.toMatchObject({ role: 'PACIENTE' });
+      ).rejects.toThrow('Pagá el turno para entrar a la consulta.');
+      expect(daily.createConsultationRoom).not.toHaveBeenCalled();
     });
   });
 

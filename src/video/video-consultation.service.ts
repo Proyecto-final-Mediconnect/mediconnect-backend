@@ -189,9 +189,7 @@ export class VideoConsultationService {
     role: ConsultationRole,
     now: Date,
   ): void {
-    if (
-      !isJoinableStatus(appointment.status, new Date(appointment.created_at))
-    ) {
+    if (!isJoinableStatus(appointment.status)) {
       // El impago tiene salida (pagar), así que el mensaje es otro: es el que
       // muestran la web y la app. Pagar es cosa del paciente: al profesional
       // se le avisa el estado, no se le pide una acción que no puede hacer.
