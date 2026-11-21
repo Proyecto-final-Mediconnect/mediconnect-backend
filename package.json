@@ -111,6 +111,7 @@
       "express>proxy-addr": "^2.0.8",
       "express>body-parser": "^2.4.0",
       "@prisma/config>deepmerge-ts": "^8.0.0",
+      "@prisma/config>effect": "^3.22.1",
       "brace-expansion@<1.1.21": "^1.1.21",
       "brace-expansion@>=2.0.0 <2.1.7": "^2.1.7"
     }
