@@ -17,7 +17,9 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { requireAuth } from '../common/http/require-auth';
 import { AppointmentClosingService } from './appointment-closing.service';
 import { AppointmentsService } from './appointments.service';
+import { CancelByProfessionalDto } from './dto/cancel-by-professional.dto';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
+import { ProfessionalCancellationService } from './professional-cancellation.service';
 import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
 
 /** Turnos del usuario autenticado (ENG-54). */
@@ -27,6 +29,7 @@ export class AppointmentsController {
   constructor(
     private readonly appointments: AppointmentsService,
     private readonly closing: AppointmentClosingService,
+    private readonly professionalCancellation: ProfessionalCancellationService,
   ) {}
 
   /**
@@ -85,6 +88,45 @@ export class AppointmentsController {
   ) {
     const { userId, accessToken } = requireAuth(req);
     return this.appointments.cancel(accessToken, userId, id);
+  }
+
+  /**
+   * El profesional cancela un turno futuro propio, con un motivo obligatorio
+   * (ENG-204, ADR-018). Si estaba pagado queda `A_REPROGRAMAR` y el paciente
+   * elige otro horario o el reembolso del 100 %; si era una reserva sin pagar,
+   * queda `CANCELADO`. Las reglas están en `ProfessionalCancellationService`.
+   */
+  @Patch(':id/cancel-by-professional')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  cancelByProfessional(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Body() dto: CancelByProfessionalDto,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.professionalCancellation.cancelByProfessional(
+      accessToken,
+      userId,
+      id,
+      dto.reason,
+    );
+  }
+
+  /**
+   * El paciente elige el reembolso del 100 % de un turno que el profesional
+   * canceló (ENG-204, ADR-018). Sin body: no hay nada que elegir más que eso.
+   */
+  @Patch(':id/full-refund')
+  requestFullRefund(
+    @Req() req: Request,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    const { userId, accessToken } = requireAuth(req);
+    return this.professionalCancellation.requestFullRefund(
+      accessToken,
+      userId,
+      id,
+    );
   }
 
   /**

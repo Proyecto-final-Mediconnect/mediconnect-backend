@@ -18,6 +18,8 @@ export const JOBS = {
   'close-finished-appointments': { everyMinutes: 5 },
   /** ENG-190: el pedido de reseña sale 3 h después del cierre. */
   'send-review-requests': { everyMinutes: 5 },
+  /** ENG-204 (ADR-018, caso 2): vence el plazo de un turno a reprogramar. */
+  'resolve-reprogram-deadlines': { everyMinutes: 5 },
 } as const satisfies Record<string, { everyMinutes: number }>;
 
 export type JobName = keyof typeof JOBS;

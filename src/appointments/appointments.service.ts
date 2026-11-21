@@ -160,6 +160,15 @@ export interface AppointmentView {
   /** Cuándo se reservó y cuándo se canceló (ISO-8601), para la historia del turno. */
   createdAt: string | null;
   cancelledAt: string | null;
+  /** Quién canceló (ADR-018): `PACIENTE`, `PROFESIONAL` o `SISTEMA`; `null` si nadie. */
+  cancelledBy: string | null;
+  /** El motivo que dio el profesional al cancelar (ENG-204), o `null`. */
+  cancellationReason: string | null;
+  /**
+   * Hasta cuándo el paciente puede elegir otro horario o el reembolso de un turno
+   * `A_REPROGRAMAR` (ISO-8601), o `null` en cualquier otro estado.
+   */
+  reprogramDeadline: string | null;
   /**
    * En qué quedó el reembolso de un turno cancelado o liberado que estaba pago
    * (ENG-174): lo registrado en `refunds`, sumado si hay más de uno. `null` si no
@@ -197,13 +206,16 @@ interface AppointmentRow {
   rescheduled_at?: string | null;
   created_at?: string | null;
   cancelled_at?: string | null;
+  cancelled_by?: string | null;
+  cancellation_reason?: string | null;
+  reprogram_deadline?: string | null;
 }
 
 /** Estados en los que un turno pago puede haber tenido un reembolso (ENG-174). */
 const ESTADOS_CON_REEMBOLSO = new Set(['CANCELADO', 'LIBERADO']);
 
 const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status, created_at, cancelled_at, rescheduled_at';
+  'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status, created_at, cancelled_at, rescheduled_at, cancelled_by, cancellation_reason, reprogram_deadline';
 
 @Injectable()
 export class AppointmentsService {
@@ -428,6 +440,7 @@ export class AppointmentsService {
         },
         data: {
           status: 'CANCELADO',
+          cancelled_by: 'PACIENTE',
           cancelled_at: now,
           // La columna tiene DEFAULT now() pero no `@updatedAt`: Prisma no la
           // toca sola y quedaría con la fecha de la reserva.
@@ -450,6 +463,10 @@ export class AppointmentsService {
             created_at: updated.created_at.toISOString(),
             cancelled_at: updated.cancelled_at?.toISOString() ?? null,
             rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
+            cancelled_by: updated.cancelled_by,
+            cancellation_reason: updated.cancellation_reason,
+            reprogram_deadline:
+              updated.reprogram_deadline?.toISOString() ?? null,
           },
         ],
         userId,
@@ -765,6 +782,9 @@ export class AppointmentsService {
           price: updated.price.toString(),
           status: updated.status,
           rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
+          cancelled_by: updated.cancelled_by,
+          cancellation_reason: updated.cancellation_reason,
+          reprogram_deadline: updated.reprogram_deadline?.toISOString() ?? null,
         },
       ],
       userId,
@@ -1205,6 +1225,12 @@ export class AppointmentsService {
           : null,
         createdAt: isoOrNull(row.created_at),
         cancelledAt: isoOrNull(row.cancelled_at),
+        cancelledBy: row.cancelled_by ?? null,
+        cancellationReason: row.cancellation_reason ?? null,
+        reprogramDeadline:
+          row.status === 'A_REPROGRAMAR'
+            ? isoOrNull(row.reprogram_deadline)
+            : null,
         refundState: refundById.get(row.id) ?? null,
       };
     });

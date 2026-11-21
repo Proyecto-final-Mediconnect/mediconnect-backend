@@ -20,6 +20,8 @@ name: Scheduled Jobs (respaldo)
 #   sala ya cerró.
 # - send-review-requests (ENG-190): un mail por turno pidiendo la reseña, 3 h
 #   después de que cierra la sala.
+# - resolve-reprogram-deadlines (ENG-204): los turnos que el profesional
+#   canceló y cuyo plazo para elegir venció se reembolsan al 100 %.
 #
 # Secrets que necesita (Settings → Secrets and variables → Actions):
 #   - RENDER_BACKEND_URL  el mismo que usa keepalive.yml.
@@ -106,6 +108,19 @@ jobs:
           curl -fsS --max-time 60 --retry 3 --retry-all-errors
           -X POST -H "Authorization: Bearer $JOBS_SECRET"
           "$RENDER_BACKEND_URL/internal/jobs/send-review-requests"
+        env:
+          RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
+          JOBS_SECRET: ${{ secrets.JOBS_SECRET }}
+
+  resolve-reprogram-deadlines:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolver turnos a reprogramar vencidos
+        run: >-
+          curl -fsS --max-time 60 --retry 3 --retry-all-errors
+          -X POST -H "Authorization: Bearer $JOBS_SECRET"
+          "$RENDER_BACKEND_URL/internal/jobs/resolve-reprogram-deadlines"
         env:
           RENDER_BACKEND_URL: ${{ secrets.RENDER_BACKEND_URL }}
           JOBS_SECRET: ${{ secrets.JOBS_SECRET }}

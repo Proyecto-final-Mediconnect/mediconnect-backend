@@ -116,6 +116,8 @@ select cron.schedule('mediconnect-close-finished-appointments', '1-59/5 * * * *'
   $$select scheduler.trigger_job('close-finished-appointments')$$);
 select cron.schedule('mediconnect-send-review-requests', '2-59/5 * * * *',
   $$select scheduler.trigger_job('send-review-requests')$$);
+select cron.schedule('mediconnect-resolve-reprogram-deadlines', '3-59/5 * * * *',
+  $$select scheduler.trigger_job('resolve-reprogram-deadlines')$$);
 
 -- Limpieza: la bitácora no crece sin control.
 select cron.schedule('mediconnect-purge-job-runs', '17 3 * * *',

@@ -23,6 +23,8 @@ export interface PushMessage {
   body: string;
   /** Lo que la app lee al tocar la notificación. No se muestra. */
   data: Record<string, string>;
+  /** Canal de Android. Por defecto, el de mensajes (`MESSAGES_CHANNEL_ID`). */
+  channelId?: string;
 }
 
 interface ExpoTicket {
@@ -99,7 +101,7 @@ export class PushService {
           data: message.data,
           sound: 'default',
           priority: 'high',
-          channelId: MESSAGES_CHANNEL_ID,
+          channelId: message.channelId ?? MESSAGES_CHANNEL_ID,
         })),
       );
       if (!tickets) return;

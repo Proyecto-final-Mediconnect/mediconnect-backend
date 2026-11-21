@@ -1,4 +1,5 @@
 import { AR_TIMEZONE, toLocalDateTime } from '../common/time/argentina-time';
+import { noticeDataFromPayload, patientNoticeText } from './patient-notices';
 
 /** Lo que se le muestra al usuario de un aviso in-app. */
 export interface InAppNotificationText {
@@ -64,6 +65,10 @@ export function renderInAppNotification(
         body: `${patient ?? 'Un paciente'} movió su turno${before ? ` del ${before}` : ''}${when ? ` al ${when}` : ''}.`,
       };
     }
+    case 'TURNO_CANCELADO_PROFESIONAL':
+    case 'REEMBOLSO_TOTAL':
+      // ENG-204: el mismo texto que el push y el mail (`patient-notices.ts`).
+      return patientNoticeText(type, noticeDataFromPayload(payload));
     case 'TURNO_RESERVADO':
       return { title: 'Turno reservado', body: 'Tenés un turno reservado.' };
     case 'RECORDATORIO_24H':
