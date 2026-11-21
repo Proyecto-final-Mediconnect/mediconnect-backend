@@ -18,9 +18,7 @@ import { VideoConsultationService } from './video-consultation.service';
  * Videoconsulta de un turno (ENG-56).
  *
  * Cuelga de `/appointments/:appointmentId/video` y no de `/video/...` porque el
- * recurso es el turno: no existe una sala que no sea la de un turno. Esa es
- * justamente la diferencia con los endpoints del spike (`/video/spike`), que sí
- * crean salas sueltas y se borran cuando ENG-51 termine de tomar sus métricas.
+ * recurso es el turno: no existe una sala de consulta que no sea la de un turno.
  *
  * El controller vive igual dentro de `VideoModule` porque lo que hace es hablar
  * con Daily; `AppointmentsModule` no tiene por qué enterarse de que existe un
@@ -40,8 +38,8 @@ export class VideoConsultationController {
    * quedar cacheada por nadie — la URL que devuelve lleva una credencial
    * adentro.
    *
-   * Rate limit igual de ajustado que en el spike y por el mismo motivo: cada
-   * primera llamada puede crear una sala, y crear salas cuesta plata. 10/min deja
+   * Rate limit ajustado: cada primera llamada puede crear una sala, y crear
+   * salas cuesta plata. 10/min deja
    * lugar a recargar la página o a reconectarse tras un corte, y no a mucho más.
    */
   @Post()

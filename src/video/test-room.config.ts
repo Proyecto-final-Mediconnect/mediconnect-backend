@@ -12,8 +12,8 @@
  * se ata a un turno y no la puede ver nadie más.
  */
 
-/** Prefijo de las salas de prueba. Las separa de las de consulta y del spike en
- *  el namespace plano de Daily, para poder barrerlas por separado. */
+/** Prefijo de las salas de prueba. Las separa de las de consulta en el
+ *  namespace plano de Daily, para poder barrerlas por separado. */
 export const TEST_ROOM_PREFIX = 'prueba';
 
 /**
