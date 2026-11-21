@@ -16,7 +16,7 @@ const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
 
 function dto(overrides: Partial<UpdateCancellationPolicyDto> = {}) {
   return {
-    hoursFullRefund: 48,
+    hoursFullRefund: 20,
     hoursPartialRefund: 12,
     partialRefundPercent: 30,
     ...overrides,
@@ -61,15 +61,15 @@ describe('CancellationPolicyService', () => {
 
     it('con política configurada devuelve la del profesional', async () => {
       prisma.cancellationPolicy.findUnique.mockResolvedValue({
-        hours_full_refund: 72,
-        hours_partial_refund: 24,
-        partial_refund_percent: 25,
+        hours_full_refund: 20,
+        hours_partial_refund: 8,
+        partial_refund_percent: 40,
       });
 
       await expect(service.getMyPolicy(PROFESSIONAL)).resolves.toEqual({
-        hoursFullRefund: 72,
-        hoursPartialRefund: 24,
-        partialRefundPercent: 25,
+        hoursFullRefund: 20,
+        hoursPartialRefund: 8,
+        partialRefundPercent: 40,
         configured: true,
       });
     });
@@ -89,7 +89,7 @@ describe('CancellationPolicyService', () => {
       await expect(
         service.replaceMyPolicy(PROFESSIONAL, dto()),
       ).resolves.toEqual({
-        hoursFullRefund: 48,
+        hoursFullRefund: 20,
         hoursPartialRefund: 12,
         partialRefundPercent: 30,
         configured: true,
@@ -100,7 +100,7 @@ describe('CancellationPolicyService', () => {
           where: { professional_id: PROFESSIONAL },
           create: expect.objectContaining({
             professional_id: PROFESSIONAL,
-            hours_full_refund: 48,
+            hours_full_refund: 20,
             hours_partial_refund: 12,
             partial_refund_percent: 30,
           }),
@@ -113,7 +113,7 @@ describe('CancellationPolicyService', () => {
       await expect(
         service.replaceMyPolicy(
           PROFESSIONAL,
-          dto({ hoursFullRefund: 6, hoursPartialRefund: 24 }),
+          dto({ hoursFullRefund: 6, hoursPartialRefund: 12 }),
         ),
       ).rejects.toThrow(BadRequestException);
       expect(prisma.cancellationPolicy.upsert).not.toHaveBeenCalled();

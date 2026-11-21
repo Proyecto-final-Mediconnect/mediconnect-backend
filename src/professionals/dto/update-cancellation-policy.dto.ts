@@ -1,8 +1,8 @@
 import { IsInt, Max, Min } from 'class-validator';
 import {
-  MAX_POLICY_HOURS,
+  MAX_FULL_REFUND_HOURS,
   MAX_REFUND_PERCENT,
-  MIN_REFUND_PERCENT,
+  MIN_PARTIAL_REFUND_PERCENT,
 } from '../cancellation-policy';
 
 /**
@@ -26,8 +26,9 @@ export class UpdateCancellationPolicyDto {
   @Min(0, {
     message: 'Las horas para el reembolso total no pueden ser negativas',
   })
-  @Max(MAX_POLICY_HOURS, {
-    message: `Las horas para el reembolso total no pueden superar ${MAX_POLICY_HOURS} (30 días)`,
+  // Límite de plataforma (ENG-205): el 100 % aplica al menos desde 24 h antes.
+  @Max(MAX_FULL_REFUND_HOURS, {
+    message: `El reembolso total tiene que aplicar al menos desde ${MAX_FULL_REFUND_HOURS} horas antes del turno`,
   })
   hoursFullRefund!: number;
 
@@ -38,20 +39,22 @@ export class UpdateCancellationPolicyDto {
   @Min(0, {
     message: 'Las horas para el reembolso parcial no pueden ser negativas',
   })
-  @Max(MAX_POLICY_HOURS, {
-    message: `Las horas para el reembolso parcial no pueden superar ${MAX_POLICY_HOURS} (30 días)`,
+  // No puede estar más lejos que el total, que tiene tope de 24 h.
+  @Max(MAX_FULL_REFUND_HOURS, {
+    message: `Las horas para el reembolso parcial no pueden superar ${MAX_FULL_REFUND_HOURS}`,
   })
   hoursPartialRefund!: number;
 
   /**
    * Porcentaje que se devuelve en la ventana intermedia.
    *
-   * Se admiten los extremos. `0` es una política válida —"o se devuelve todo o
-   * nada"— y `100` también, que equivale a estirar la ventana del total. No se
-   * rechazan porque son decisiones del profesional, no errores.
+   * Límite de plataforma (ENG-205): al menos el 30 %. `100` se admite: equivale
+   * a estirar la ventana del total.
    */
   @IsInt({ message: 'El porcentaje debe ser un número entero' })
-  @Min(MIN_REFUND_PERCENT, { message: 'El porcentaje no puede ser negativo' })
+  @Min(MIN_PARTIAL_REFUND_PERCENT, {
+    message: `La devolución parcial tiene que ser de al menos el ${MIN_PARTIAL_REFUND_PERCENT} %`,
+  })
   @Max(MAX_REFUND_PERCENT, {
     message: `El porcentaje no puede superar ${MAX_REFUND_PERCENT}`,
   })

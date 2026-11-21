@@ -100,7 +100,7 @@ describe('Política de cancelación (e2e)', () => {
   }
 
   const cuerpo = {
-    hoursFullRefund: 48,
+    hoursFullRefund: 20,
     hoursPartialRefund: 12,
     partialRefundPercent: 30,
   };
@@ -157,6 +157,9 @@ describe('Política de cancelación (e2e)', () => {
         ['un porcentaje negativo', { partialRefundPercent: -1 }],
         ['horas negativas', { hoursFullRefund: -5 }],
         ['horas por encima del tope de 720', { hoursFullRefund: 5000 }],
+        // ENG-205: límites de plataforma.
+        ['un total que exige más de 24 h', { hoursFullRefund: 48 }],
+        ['un parcial menor al 30 %', { partialRefundPercent: 20 }],
         ['horas con decimales', { hoursFullRefund: 12.5 }],
         ['un valor que no es número', { hoursFullRefund: 'muchas' }],
       ])('%s', async (_caso, parcial) => {
@@ -208,7 +211,7 @@ describe('Política de cancelación (e2e)', () => {
       const res = await request(app.getHttpServer())
         .put('/professionals/me/cancellation-policy')
         .set('Authorization', `Bearer ${token}`)
-        .send({ ...cuerpo, hoursFullRefund: 6, hoursPartialRefund: 24 })
+        .send({ ...cuerpo, hoursFullRefund: 6, hoursPartialRefund: 12 })
         .expect(400);
 
       expect(res.body.message).toMatch(/más lejos/);
@@ -228,10 +231,10 @@ describe('Política de cancelación (e2e)', () => {
       expect(prismaMock.cancellationPolicy.upsert).not.toHaveBeenCalled();
     });
 
-    it('acepta los extremos del porcentaje', async () => {
+    it('acepta los extremos del porcentaje permitidos (30 y 100, ENG-205)', async () => {
       const token = await signToken();
 
-      for (const partialRefundPercent of [0, 100]) {
+      for (const partialRefundPercent of [30, 100]) {
         await request(app.getHttpServer())
           .put('/professionals/me/cancellation-policy')
           .set('Authorization', `Bearer ${token}`)

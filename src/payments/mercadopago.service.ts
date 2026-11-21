@@ -381,6 +381,42 @@ export class MercadoPagoService {
     return { id: String(body.id), status: body.status, amount: body.amount };
   }
 
+  /**
+   * Un reembolso ya pedido (ENG-205): MercadoPago puede dejarlo `in_process` y
+   * aprobarlo después. El job de reintentos consulta el estado en lugar de
+   * volver a pedirlo.
+   */
+  async getRefund(
+    paymentId: string,
+    refundId: string,
+  ): Promise<MercadoPagoRefund> {
+    this.assertConfigured();
+    const body = await this.request<RefundResponse>(
+      'GET',
+      `/v1/payments/${encodeURIComponent(paymentId)}/refunds/${encodeURIComponent(refundId)}`,
+    );
+    return { id: String(body.id), status: body.status, amount: body.amount };
+  }
+
+  /**
+   * Los reembolsos que MercadoPago tiene registrados para un pago (ENG-205).
+   * Antes de reintentar uno que quedó sin respuesta, el job mira acá si
+   * MercadoPago ya lo hizo: así un reintento nunca devuelve dos veces, aunque la
+   * clave de idempotencia ya haya vencido.
+   */
+  async listRefunds(paymentId: string): Promise<MercadoPagoRefund[]> {
+    this.assertConfigured();
+    const body = await this.request<RefundResponse[]>(
+      'GET',
+      `/v1/payments/${encodeURIComponent(paymentId)}/refunds`,
+    );
+    return (body ?? []).map((r) => ({
+      id: String(r.id),
+      status: r.status,
+      amount: r.amount,
+    }));
+  }
+
   private assertConfigured(): void {
     if (!this.isConfigured()) {
       throw new ServiceUnavailableException(

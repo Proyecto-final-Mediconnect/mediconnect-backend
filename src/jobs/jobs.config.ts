@@ -20,6 +20,8 @@ export const JOBS = {
   'send-review-requests': { everyMinutes: 5 },
   /** ENG-204 (ADR-018, caso 2): vence el plazo de un turno a reprogramar. */
   'resolve-reprogram-deadlines': { everyMinutes: 5 },
+  /** ENG-205 (ADR-018, caso 16): retoma los reembolsos que quedaron pendientes. */
+  'retry-pending-refunds': { everyMinutes: 15 },
 } as const satisfies Record<string, { everyMinutes: number }>;
 
 export type JobName = keyof typeof JOBS;

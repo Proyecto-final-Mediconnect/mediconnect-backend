@@ -118,6 +118,8 @@ select cron.schedule('mediconnect-send-review-requests', '2-59/5 * * * *',
   $$select scheduler.trigger_job('send-review-requests')$$);
 select cron.schedule('mediconnect-resolve-reprogram-deadlines', '3-59/5 * * * *',
   $$select scheduler.trigger_job('resolve-reprogram-deadlines')$$);
+select cron.schedule('mediconnect-retry-pending-refunds', '4-59/15 * * * *',
+  $$select scheduler.trigger_job('retry-pending-refunds')$$);
 
 -- Limpieza: la bitácora no crece sin control.
 select cron.schedule('mediconnect-purge-job-runs', '17 3 * * *',

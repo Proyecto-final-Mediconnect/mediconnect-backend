@@ -13,6 +13,10 @@ import {
   type ReprogramSweepSummary,
 } from '../appointments/professional-cancellation.service';
 import { UnpaidReleaseService } from '../appointments/unpaid-release.service';
+import {
+  CancellationRefundService,
+  type RefundRetrySummary,
+} from '../payments/cancellation-refund.service';
 import { MediPassService } from '../medipass/medipass.service';
 import {
   AppointmentNotificationsService,
@@ -47,6 +51,7 @@ export class JobsController {
     private readonly closing: AppointmentClosingService,
     private readonly runner: JobRunnerService,
     private readonly professionalCancellation: ProfessionalCancellationService,
+    private readonly refunds: CancellationRefundService,
   ) {}
 
   /**
@@ -115,6 +120,18 @@ export class JobsController {
   resolveReprogramDeadlines(): Promise<ReprogramSweepSummary | SkippedRun> {
     return this.runner.run('resolve-reprogram-deadlines', () =>
       this.professionalCancellation.resolveReprogramDeadlines(),
+    );
+  }
+
+  /**
+   * ENG-205: retoma los reembolsos PENDIENTE (consulta o reintenta) y da por
+   * perdidos los que pasaron 48 h, con aviso. Idempotente.
+   */
+  @Post('retry-pending-refunds')
+  @HttpCode(HttpStatus.OK)
+  retryPendingRefunds(): Promise<RefundRetrySummary | SkippedRun> {
+    return this.runner.run('retry-pending-refunds', () =>
+      this.refunds.retryPending(),
     );
   }
 

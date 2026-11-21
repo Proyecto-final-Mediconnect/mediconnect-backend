@@ -65,6 +65,45 @@ export const MIN_REFUND_PERCENT = 0;
 export const MAX_REFUND_PERCENT = 100;
 
 /**
+ * Límites de plataforma para la política que configura el profesional
+ * (ENG-205, ADR-018 caso 6). En un servicio que se cobra por adelantado, una
+ * política libre permitiría abusos como "0 % siempre".
+ *
+ * - El reembolso total aplica **al menos desde 24 h antes** del turno: el
+ *   profesional puede pedir menos anticipación, nunca más.
+ * - La ventana intermedia devuelve **al menos el 30 %**.
+ *
+ * Espejados en el CHECK de `cancellation_policies` y en la web.
+ */
+export const MAX_FULL_REFUND_HOURS = 24;
+export const MIN_PARTIAL_REFUND_PERCENT = 30;
+
+/**
+ * La política dentro de los límites de plataforma.
+ *
+ * Las políticas configuradas ya cumplen (DTO, service y CHECK), así que para
+ * ellas no cambia nada. Sirve para las **congeladas en turnos reservados antes
+ * de ENG-205**: si alguna quedó fuera de rango, se evalúa con el límite. Siempre
+ * a favor del paciente: nunca devuelve menos que la política original.
+ */
+export function applyPlatformLimits(
+  policy: CancellationPolicy,
+): CancellationPolicy {
+  const hoursFullRefund = Math.min(
+    policy.hoursFullRefund,
+    MAX_FULL_REFUND_HOURS,
+  );
+  return {
+    hoursFullRefund,
+    hoursPartialRefund: Math.min(policy.hoursPartialRefund, hoursFullRefund),
+    partialRefundPercent: Math.max(
+      policy.partialRefundPercent,
+      MIN_PARTIAL_REFUND_PERCENT,
+    ),
+  };
+}
+
+/**
  * Fila de `cancellation_policies` tal como puede venir de la base: las tres
  * columnas son `nullable` en el esquema.
  */
@@ -102,11 +141,11 @@ export function resolvePolicy(row: CancellationPolicyRow | null | undefined): {
   }
 
   return {
-    policy: {
+    policy: applyPlatformLimits({
       hoursFullRefund: row.hours_full_refund,
       hoursPartialRefund: row.hours_partial_refund,
       partialRefundPercent: row.partial_refund_percent,
-    },
+    }),
     configured: true,
   };
 }
@@ -156,6 +195,12 @@ export function refundPercentFor(
  * plazos**.
  */
 export function validatePolicy(policy: CancellationPolicy): string | null {
+  if (policy.hoursFullRefund > MAX_FULL_REFUND_HOURS) {
+    return `El reembolso total tiene que aplicar al menos desde ${MAX_FULL_REFUND_HOURS} horas antes del turno: podés pedir menos anticipación, no más.`;
+  }
+  if (policy.partialRefundPercent < MIN_PARTIAL_REFUND_PERCENT) {
+    return `La devolución parcial tiene que ser de al menos el ${MIN_PARTIAL_REFUND_PERCENT} %.`;
+  }
   if (policy.hoursFullRefund < policy.hoursPartialRefund) {
     return (
       'La ventana de reembolso total tiene que estar más lejos del turno que la parcial: ' +
