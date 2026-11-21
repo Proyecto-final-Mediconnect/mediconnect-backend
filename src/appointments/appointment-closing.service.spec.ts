@@ -43,6 +43,7 @@ describe('AppointmentClosingService', () => {
   };
   /** Quién entró a la sala. Por defecto los dos: la consulta se hizo. */
   let deleteRoom: jest.Mock;
+  let closedSessions: jest.Mock;
   let notices: { professionalCancelled: jest.Mock };
   let inApp: { notifyProfessional: jest.Mock };
   let joined: {
@@ -68,11 +69,13 @@ describe('AppointmentClosingService', () => {
       },
       $queryRaw: jest.fn().mockResolvedValue([]),
     };
+    closedSessions = jest.fn().mockResolvedValue({ count: 1 });
     const prisma = {
       $transaction: jest.fn((cb: (t: typeof tx) => unknown) => cb(tx)),
       consultation: { findUnique: jest.fn(() => Promise.resolve(joined)) },
       videoSession: {
         findMany: jest.fn().mockResolvedValue([{ daily_room_name: 'room-1' }]),
+        updateMany: closedSessions,
       },
     } as unknown as PrismaService;
     deleteRoom = jest.fn().mockResolvedValue(undefined);
@@ -122,10 +125,18 @@ describe('AppointmentClosingService', () => {
       );
     });
 
-    it('borra la sala de Daily al finalizar', async () => {
+    it('borra la sala de Daily al finalizar y la sesión deja de apuntarle (ENG-227)', async () => {
       await service.complete('jwt', PROFESSIONAL, APPOINTMENT, at(25));
 
       expect(deleteRoom).toHaveBeenCalledWith('room-1');
+      expect(closedSessions).toHaveBeenCalledWith({
+        where: { consultation: { appointment_id: APPOINTMENT } },
+        data: {
+          daily_room_name: null,
+          daily_room_url: null,
+          daily_room_expires_at: null,
+        },
+      });
     });
 
     it('si Daily falla al borrar la sala, el cierre igual se completa', async () => {

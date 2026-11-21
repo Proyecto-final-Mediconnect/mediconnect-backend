@@ -89,6 +89,9 @@ describe('AppointmentsService', () => {
     scheduleRule: { findMany: jest.Mock };
     scheduleBlock: { findMany: jest.Mock };
     appointment: { findMany: jest.Mock; update: jest.Mock; create: jest.Mock };
+    consultation: { updateMany: jest.Mock };
+    videoSession: { updateMany: jest.Mock };
+    $transaction: jest.Mock;
   };
   /** Cola de respuestas del cliente PostgREST mockeado, en orden de consumo. */
   let results: { data: unknown; error: unknown }[];
@@ -138,7 +141,14 @@ describe('AppointmentsService', () => {
         update: jest.fn().mockResolvedValue(CANCELLED_PRISMA_ROW),
         create: jest.fn().mockResolvedValue(CREATED_PRISMA_ROW),
       },
+      // ENG-227: reprogramar reinicia la sala en la misma transacción.
+      consultation: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      videoSession: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      $transaction: jest.fn(),
     };
+    prisma.$transaction.mockImplementation((cb: (tx: unknown) => unknown) =>
+      cb(prisma),
+    );
 
     payments = { expireCheckout: jest.fn().mockResolvedValue(undefined) };
     unpaidRelease = { releaseExpired: jest.fn().mockResolvedValue([]) };
@@ -698,6 +708,30 @@ describe('AppointmentsService', () => {
       });
       // De una reserva sin pagar el profesional todavía no se enteró.
       expect(inApp.notifyProfessional).not.toHaveBeenCalled();
+      // ENG-227: el horario nuevo no hereda la sala ni las entradas del viejo.
+      expect(prisma.videoSession.updateMany).toHaveBeenCalledWith({
+        where: { consultation: { appointment_id: { in: [APPOINTMENT_ID] } } },
+        data: expect.objectContaining({
+          daily_room_name: null,
+          daily_room_url: null,
+          daily_room_expires_at: null,
+        }),
+      });
+      expect(prisma.consultation.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ professional_joined_at: null }),
+        }),
+      );
+    });
+
+    it('si otro lo movió en el medio no reinicia la sala de nadie', async () => {
+      results = [read(UNPAID), NO_COLLISION];
+      prisma.appointment.update.mockRejectedValue({ code: 'P2025' });
+
+      await expect(reschedule(MONDAY, '09:30')).rejects.toThrow(
+        'El turno cambió mientras lo reprogramabas',
+      );
+      expect(prisma.videoSession.updateMany).not.toHaveBeenCalled();
     });
 
     it('un turno pagado se reprograma con anticipación y el profesional se entera', async () => {

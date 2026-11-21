@@ -491,15 +491,17 @@ model Consultation {
 
 /// Sala de Daily.co asociada a la consulta (ADR-010).
 model VideoSession {
-  id                  String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  consultation_id     String               @unique @db.Uuid
-  daily_room_name     String?
-  daily_room_url      String?
-  audio_recording_url String?
-  status              video_session_status @default(CREADA)
-  started_at          DateTime?            @db.Timestamptz(6)
-  ended_at            DateTime?            @db.Timestamptz(6)
-  created_at          DateTime             @default(now()) @db.Timestamptz(6)
+  id                    String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  consultation_id       String               @unique @db.Uuid
+  daily_room_name       String?
+  daily_room_url        String?
+  /// Hasta cuándo vale la sala de Daily (su `exp`). ENG-227: no se reusa una sala vencida.
+  daily_room_expires_at DateTime?            @db.Timestamptz(6)
+  audio_recording_url   String?
+  status                video_session_status @default(CREADA)
+  started_at            DateTime?            @db.Timestamptz(6)
+  ended_at              DateTime?            @db.Timestamptz(6)
+  created_at            DateTime             @default(now()) @db.Timestamptz(6)
 
   consultation Consultation @relation(fields: [consultation_id], references: [id], onDelete: Cascade)
 

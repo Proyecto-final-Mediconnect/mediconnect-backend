@@ -483,6 +483,17 @@ export class AppointmentClosingService {
       await Promise.all(
         sessions.map((s) => this.daily.deleteRoom(s.daily_room_name as string)),
       );
+      // ENG-227: la sesión (ya FINALIZADA por el cierre) no apunta más a una
+      // sala que no existe. Si el turno vuelve a tener consulta (falla
+      // técnica), `ensureRoom` crea otra.
+      await this.prisma.videoSession.updateMany({
+        where: { consultation: { appointment_id: appointmentId } },
+        data: {
+          daily_room_name: null,
+          daily_room_url: null,
+          daily_room_expires_at: null,
+        },
+      });
     } catch (error) {
       this.logger.warn(
         `No se pudo borrar la sala del turno ${appointmentId}: ${String(error)}`,

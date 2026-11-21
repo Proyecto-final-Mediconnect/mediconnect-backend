@@ -258,10 +258,26 @@ export class VideoConsultationService {
         started_at: now,
       },
       update: {},
-      select: { id: true, daily_room_name: true, daily_room_url: true },
+      select: {
+        id: true,
+        daily_room_name: true,
+        daily_room_url: true,
+        daily_room_expires_at: true,
+      },
     });
 
-    if (session.daily_room_name && session.daily_room_url) {
+    // ENG-227: la sala se reusa solo si vale hasta el cierre de la ventana
+    // ACTUAL del turno. El `exp` se fija al crearla; si después el turno se
+    // movió a más tarde, la sala vencería en medio de la consulta (o ya venció)
+    // y Daily rechazaría el token. Sin vencimiento guardado (sala anterior a
+    // esta columna) no se sabe: se trata como vencida.
+    const expiresAt = new Date(expiresAtUnix * 1000);
+    if (
+      session.daily_room_name &&
+      session.daily_room_url &&
+      session.daily_room_expires_at &&
+      session.daily_room_expires_at.getTime() >= expiresAt.getTime()
+    ) {
       return {
         name: session.daily_room_name,
         url: session.daily_room_url,
@@ -274,29 +290,33 @@ export class VideoConsultationService {
       recording,
     );
 
-    // Condicional a propósito: si entre el `upsert` y este update el otro
-    // participante ya guardó SU sala, este `updateMany` afecta 0 filas y no la
-    // pisa. Un `update` normal dejaría a los dos en salas distintas, cada uno
-    // hablándole a nadie — el peor resultado posible de esta carrera.
+    // Condicional a propósito: se reemplaza solo la sala que se leyó (ninguna,
+    // o la vencida). Si entre el `upsert` y este update el otro participante ya
+    // guardó SU sala, este `updateMany` afecta 0 filas y no la pisa. Un `update`
+    // normal dejaría a los dos en salas distintas, cada uno hablándole a nadie
+    // — el peor resultado posible de esta carrera.
     const claimed = await this.prisma.videoSession.updateMany({
-      where: { id: session.id, daily_room_name: null },
-      data: { daily_room_name: room.name, daily_room_url: room.url },
+      where: { id: session.id, daily_room_name: session.daily_room_name },
+      data: {
+        daily_room_name: room.name,
+        daily_room_url: room.url,
+        daily_room_expires_at: expiresAt,
+      },
     });
 
-    if (claimed.count === 1)
+    if (claimed.count === 1) {
+      // La vencida ya no la usa nadie. Best-effort: si falla, vence sola.
+      if (session.daily_room_name) {
+        this.deleteRoomQuietly(session.daily_room_name);
+      }
       return { ...room, consultationId: consultation.id };
+    }
 
     // Perdimos la carrera: la sala que acabamos de crear no la va a usar nadie.
     // Se borra porque Daily factura por minuto de participante y una sala
     // huérfana con `exp` lejano es cuota reservada al pedo. Si el borrado falla
     // no se corta el ingreso: la sala expira sola.
-    void this.daily
-      .deleteRoom(room.name)
-      .catch((error: unknown) =>
-        this.logger.warn(
-          `No se pudo borrar la sala huérfana ${room.name}: ${String(error)}`,
-        ),
-      );
+    this.deleteRoomQuietly(room.name);
 
     const winner = await this.prisma.videoSession.findUniqueOrThrow({
       where: { id: session.id },
@@ -314,6 +334,17 @@ export class VideoConsultationService {
       url: winner.daily_room_url,
       consultationId: consultation.id,
     };
+  }
+
+  /** Borra una sala que ya no usa nadie, sin cortar el ingreso si falla. */
+  private deleteRoomQuietly(roomName: string): void {
+    void this.daily
+      .deleteRoom(roomName)
+      .catch((error: unknown) =>
+        this.logger.warn(
+          `No se pudo borrar la sala ${roomName}: ${String(error)}`,
+        ),
+      );
   }
 
   /**

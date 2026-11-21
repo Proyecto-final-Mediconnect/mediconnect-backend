@@ -1,0 +1,11 @@
+-- EP-05 · La videoconsulta no reusa una sala vencida (ENG-227)
+--
+-- Hasta cuándo vale la sala de Daily guardada en la sesión: es el `exp` con que
+-- se creó (el cierre de la ventana del turno en ese momento). Antes de reusarla,
+-- el backend compara contra la ventana actual del turno: si el turno se movió a
+-- más tarde, la sala vence antes de que termine la consulta y se crea otra.
+--
+-- Aditiva y nullable: `NULL` es una sala creada antes de esta columna, que se
+-- trata como vencida y se reemplaza en el próximo ingreso.
+-- AlterTable
+ALTER TABLE "video_sessions" ADD COLUMN "daily_room_expires_at" TIMESTAMPTZ(6);
