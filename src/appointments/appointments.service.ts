@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { AppointmentPaymentService } from '../payments/appointment-payment.service';
@@ -219,6 +220,8 @@ const APPOINTMENT_SELECT =
 
 @Injectable()
 export class AppointmentsService {
+  private readonly logger = new Logger(AppointmentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly supabase: SupabaseService,
@@ -615,6 +618,17 @@ export class AppointmentsService {
    * La política es la que quedó congelada en el turno al reservarlo (ENG-65),
    * la misma que usa la cancelación. Los turnos anteriores a ENG-65 no la
    * tienen y usan la vigente del profesional (ENG-179).
+   *
+   * **Desde `A_REPROGRAMAR`** (ENG-203, ADR-018 caso 1) el turno lo canceló el
+   * profesional y las reglas cambian a favor del paciente:
+   *
+   * - **No consume** su única reprogramación (`rescheduled_at` no se toca).
+   * - **No mira la política de cancelación:** la culpa no es del paciente.
+   * - Conserva el precio y el pago, y el turno vuelve a `CONFIRMADO`.
+   * - Solo hasta `reprogram_deadline`: después el job lo reembolsa al 100 %.
+   *
+   * Compite con el pedido de reembolso y con el job de vencimiento: el UPDATE es
+   * condicional sobre `A_REPROGRAMAR`, así que gana uno solo (P2025 → 409).
    */
   async reschedule(
     accessToken: string,
@@ -658,19 +672,34 @@ export class AppointmentsService {
       );
     }
 
+    // ENG-203: el turno que canceló el profesional espera que el paciente elija.
+    const fromProfessionalCancellation = row.status === 'A_REPROGRAMAR';
+
     if (
+      !fromProfessionalCancellation &&
       !ACTIVE_STATUSES.includes(row.status as (typeof ACTIVE_STATUSES)[number])
     ) {
       throw new ConflictException('Ese turno ya no está activo.');
     }
 
-    if (row.rescheduled_at) {
+    if (fromProfessionalCancellation) {
+      const deadline = row.reprogram_deadline
+        ? new Date(row.reprogram_deadline)
+        : null;
+      if (!deadline || deadline <= now) {
+        throw new ConflictException(
+          'Venció el plazo para elegir otro horario: te devolvemos el 100 % de lo que pagaste.',
+        );
+      }
+    } else if (row.rescheduled_at) {
       throw new ConflictException(
         'Este turno ya se reprogramó una vez. Si necesitás otro horario, cancelalo y reservá uno nuevo.',
       );
     }
 
-    if (row.status === 'CONFIRMADO') {
+    if (fromProfessionalCancellation) {
+      // Sin política ni retención: el turno está pagado y la culpa no es suya.
+    } else if (row.status === 'CONFIRMADO') {
       const policy = await this.policyOf(row);
       const percent = refundPercentFor(policy, currentStart, now);
       if (percent < 100) {
@@ -692,7 +721,12 @@ export class AppointmentsService {
     assertWithinHorizon(dto.date, now);
 
     const newStart = toInstant(dto.date, dto.startTime);
-    if (newStart.getTime() === currentStart.getTime()) {
+    // Desde `A_REPROGRAMAR` el horario original quedó libre: si el profesional
+    // lo vuelve a ofrecer, el paciente lo puede elegir.
+    if (
+      !fromProfessionalCancellation &&
+      newStart.getTime() === currentStart.getTime()
+    ) {
       throw new BadRequestException('Ese ya es el horario de tu turno.');
     }
 
@@ -725,19 +759,37 @@ export class AppointmentsService {
         // exacto, no "cualquier activo": si el webhook de MercadoPago lo pasó a
         // CONFIRMADO en el medio, se salteó la regla de devolución y el aviso al
         // profesional, y tiene que volver a evaluarse (P2025 -> 409).
-        where: {
-          id: appointmentId,
-          patient_id: userId,
-          status: row.status as (typeof ACTIVE_STATUSES)[number],
-          scheduled_at: currentStart,
-          rescheduled_at: null,
-        },
-        data: {
-          scheduled_at: newStart,
-          duration_minutes: slot.durationMinutes,
-          rescheduled_at: now,
-          updated_at: now,
-        },
+        where: fromProfessionalCancellation
+          ? {
+              id: appointmentId,
+              patient_id: userId,
+              status: 'A_REPROGRAMAR',
+              scheduled_at: currentStart,
+              reprogram_deadline: { gt: now },
+            }
+          : {
+              id: appointmentId,
+              patient_id: userId,
+              status: row.status as (typeof ACTIVE_STATUSES)[number],
+              scheduled_at: currentStart,
+              rescheduled_at: null,
+            },
+        data: fromProfessionalCancellation
+          ? {
+              scheduled_at: newStart,
+              duration_minutes: slot.durationMinutes,
+              // Vuelve a ser un turno vigente. `cancelled_by` y el motivo se
+              // conservan: son la historia de que el profesional lo canceló.
+              status: 'CONFIRMADO',
+              reprogram_deadline: null,
+              updated_at: now,
+            }
+          : {
+              scheduled_at: newStart,
+              duration_minutes: slot.durationMinutes,
+              rescheduled_at: now,
+              updated_at: now,
+            },
       });
     } catch (err) {
       const code = (err as { code?: string }).code;
@@ -762,14 +814,25 @@ export class AppointmentsService {
     // todavía no se enteró. Nunca tira. Va apenas después del `update`, antes de
     // armar la vista: si `toViews` fallara, el turno ya se movió y el aviso no
     // se puede perder.
-    if (row.status === 'CONFIRMADO') {
+    if (row.status === 'CONFIRMADO' || fromProfessionalCancellation) {
       await this.inApp.notifyProfessional(
         appointmentId,
         'TURNO_REPROGRAMADO',
         now,
         { previousScheduledAt: currentStart.toISOString() },
+        // Desde `A_REPROGRAMAR` se puede repetir (ADR-018, caso 12): el aviso
+        // nuevo reemplaza al anterior en vez de perderse por duplicado.
+        { replace: fromProfessionalCancellation },
       );
     }
+    await this.audit(userId, appointmentId, {
+      action: fromProfessionalCancellation
+        ? 'APPOINTMENT_REPROGRAMMED_AFTER_PROFESSIONAL_CANCELLATION'
+        : 'APPOINTMENT_RESCHEDULED',
+      previousStatus: row.status,
+      previousScheduledAt: currentStart.toISOString(),
+      newScheduledAt: newStart.toISOString(),
+    });
 
     const [view] = await this.toViews(
       [
@@ -790,6 +853,34 @@ export class AppointmentsService {
       userId,
     );
     return view;
+  }
+
+  /**
+   * Deja la reprogramación en `audit_logs` (ENG-203: "quién y cuándo"). Va
+   * después del UPDATE y **nunca tira**: el turno ya se movió, y un fallo del
+   * registro no puede convertirlo en un 500 que haga creer que no se movió.
+   */
+  private async audit(
+    actorId: string,
+    appointmentId: string,
+    entry: { action: string } & Record<string, string>,
+  ): Promise<void> {
+    const { action, ...metadata } = entry;
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actor_id: actorId,
+          action,
+          resource_type: 'appointments',
+          resource_id: appointmentId,
+          metadata: { ...metadata, origin: 'PACIENTE' },
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `No se pudo auditar ${action} del turno ${appointmentId}: ${String(err)}`,
+      );
+    }
   }
 
   /**
