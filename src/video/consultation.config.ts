@@ -1,14 +1,13 @@
 /**
  * Configuración de la sala de una videoconsulta real (ENG-56).
  *
- * Separada de `daily.config.ts`, que es del spike (ENG-51): aquellas constantes
- * describen una sala de prueba de 40 minutos que se crea a mano; estas describen
- * una sala atada a un turno, que nace y muere con él.
+ * Una sala atada a un turno, que nace y muere con él. La de la prueba de cámara
+ * y micrófono tiene su propia configuración (`test-room.config.ts`).
  */
 
-/** Prefijo de las salas de consulta. Las del spike usan `spike-eng51-`, así que
- *  las dos poblaciones quedan separadas en el namespace plano de Daily y se
- *  pueden barrer por separado. */
+/** Prefijo de las salas de consulta. Las de la prueba de cámara usan `prueba-`,
+ *  así que las dos poblaciones quedan separadas en el namespace plano de Daily y
+ *  se pueden barrer por separado. */
 export const CONSULTATION_ROOM_PREFIX = 'consulta';
 
 /**
@@ -75,8 +74,8 @@ export const DEFAULT_RECORDING_MODE: RecordingMode = 'off';
 /**
  * Propiedades de la sala de una consulta.
  *
- * Se parte de las del spike y se cambian tres cosas, todas por el mismo motivo
- * —esto ya no es una prueba—:
+ * Se partió de las del spike de Daily (ENG-51) y se cambiaron tres cosas, todas
+ * por el mismo motivo —esto ya no es una prueba—:
  *
  * - `exp` sale del turno, no de un TTL fijo: la sala vive lo que dura la
  *   consulta más la tolerancia.

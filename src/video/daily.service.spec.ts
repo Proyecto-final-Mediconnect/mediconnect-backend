@@ -5,21 +5,17 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { DailyApiError, DailyService } from './daily.service';
-import {
-  MAX_PARTICIPANTS,
-  ROOM_TTL_SECONDS,
-  SPIKE_ROOM_PREFIX,
-} from './daily.config';
+import { CONSULTATION_ROOM_PREFIX } from './consultation.config';
 import { TEST_ROOM_PREFIX, TEST_ROOM_TTL_SECONDS } from './test-room.config';
 
 /**
- * `DailyService` contra un `fetch` mockeado: se verifica el contrato que el
- * spike afirma (sala privada, tope de participantes, expiración, un token por
- * rol) sin gastar minutos de Daily ni depender de la red en CI.
+ * `DailyService` contra un `fetch` mockeado: se verifica el contrato con Daily
+ * (sala privada, tope de participantes, expiración, errores traducidos) sin
+ * gastar minutos de Daily ni depender de la red en CI.
  */
 describe('DailyService', () => {
   const API_KEY = 'test-daily-key';
-  const ROOM_NAME = `${SPIKE_ROOM_PREFIX}-a1b2c3d4`;
+  const ROOM_NAME = `${CONSULTATION_ROOM_PREFIX}-a1b2c3d4e5f6`;
   const ROOM_URL = `https://mediconnect.daily.co/${ROOM_NAME}`;
 
   let service: DailyService;
@@ -68,14 +64,6 @@ describe('DailyService', () => {
     jest.restoreAllMocks();
   });
 
-  /** Encola sala + los dos meeting tokens, en el orden en que los pide el service. */
-  function stubRoomCreation(): void {
-    fetchMock
-      .mockResolvedValueOnce(ok({ name: ROOM_NAME, url: ROOM_URL }))
-      .mockResolvedValueOnce(ok({ token: 'token-pro' }))
-      .mockResolvedValueOnce(ok({ token: 'token-pac' }));
-  }
-
   describe('isConfigured', () => {
     it('es false sin DAILY_API_KEY', () => {
       env = {};
@@ -87,21 +75,20 @@ describe('DailyService', () => {
     });
   });
 
-  describe('createSpikeRoom', () => {
+  describe('createConsultationRoom', () => {
     it('sin DAILY_API_KEY da 503 y no llama a Daily', async () => {
       env = {};
 
-      await expect(service.createSpikeRoom('Test')).rejects.toBeInstanceOf(
-        ServiceUnavailableException,
-      );
+      await expect(
+        service.createConsultationRoom(1_800_000_000, 'off'),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    it('crea la sala privada, con tope de participantes y expiración', async () => {
-      stubRoomCreation();
-      const before = Math.floor(Date.now() / 1000);
+    it('crea la sala privada, con tope de participantes y la expiración del turno', async () => {
+      fetchMock.mockResolvedValueOnce(ok({ name: ROOM_NAME, url: ROOM_URL }));
 
-      await service.createSpikeRoom('Test');
+      const room = await service.createConsultationRoom(1_800_000_000, 'off');
 
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(url).toBe('https://api.daily.co/v1/rooms');
@@ -109,68 +96,41 @@ describe('DailyService', () => {
       expect((init.headers as Record<string, string>).Authorization).toBe(
         `Bearer ${API_KEY}`,
       );
-
       const body = JSON.parse(init.body as string) as {
         name: string;
         privacy: string;
         properties: Record<string, unknown>;
       };
-      // La sala privada es el punto del spike: con la URL sola no se entra.
+      // Privada: con la URL sola no se entra, hace falta el meeting token.
       expect(body.privacy).toBe('private');
       expect(body.name).toMatch(
-        new RegExp(`^${SPIKE_ROOM_PREFIX}-[0-9a-f]{8}$`),
+        new RegExp(`^${CONSULTATION_ROOM_PREFIX}-[0-9a-f-]{12}$`),
       );
-      expect(body.properties.max_participants).toBe(MAX_PARTICIPANTS);
+      expect(body.properties.max_participants).toBe(2);
       expect(body.properties.eject_at_room_exp).toBe(true);
-      expect(body.properties.enable_recording).toBe(false);
-      expect(body.properties.exp).toBeGreaterThanOrEqual(
-        before + ROOM_TTL_SECONDS,
-      );
+      expect(body.properties.exp).toBe(1_800_000_000);
+      // Sin tokens: se emiten por ingreso.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(room).toEqual({ name: ROOM_NAME, url: ROOM_URL });
     });
+  });
 
-    it('emite un token por rol: el profesional es owner y el paciente no', async () => {
-      stubRoomCreation();
-
-      const room = await service.createSpikeRoom('Santino');
-
-      const tokenCalls = fetchMock.mock.calls.slice(1) as [
-        string,
-        RequestInit,
-      ][];
-      expect(tokenCalls).toHaveLength(2);
-
-      const payloads = tokenCalls.map(
-        ([, init]) =>
-          (
-            JSON.parse(init.body as string) as {
-              properties: { is_owner: boolean; room_name: string };
-            }
-          ).properties,
-      );
-      expect(payloads.map((p) => p.is_owner)).toEqual([true, false]);
-      expect(payloads.every((p) => p.room_name === ROOM_NAME)).toBe(true);
-
-      expect(room.professionalUrl).toBe(`${ROOM_URL}?t=token-pro`);
-      expect(room.patientUrl).toBe(`${ROOM_URL}?t=token-pac`);
-      expect(room.maxParticipants).toBe(MAX_PARTICIPANTS);
-      expect(Date.parse(room.expiresAt)).toBeGreaterThan(Date.now());
-    });
-
+  describe('errores de Daily', () => {
     it('un fallo de Daily sale como 502, nunca con el status del proveedor', async () => {
       // Un 401 de Daily (API key vencida) propagado tal cual haría que la web
       // creyera que venció la sesión del usuario e intentara renovarla en loop.
       fetchMock.mockResolvedValueOnce(fail(401, 'invalid api key'));
 
-      await expect(service.createSpikeRoom('Test')).rejects.toMatchObject({
-        status: HttpStatus.BAD_GATEWAY,
-      });
+      await expect(
+        service.createConsultationRoom(1_800_000_000, 'off'),
+      ).rejects.toMatchObject({ status: HttpStatus.BAD_GATEWAY });
     });
 
     it('un error de red sale como 503 sin filtrar el detalle interno', async () => {
       fetchMock.mockRejectedValueOnce(new Error('ECONNREFUSED 10.0.0.1:443'));
 
       const error: unknown = await service
-        .createSpikeRoom('Test')
+        .createConsultationRoom(1_800_000_000, 'off')
         .catch((e: unknown) => e);
 
       expect(error).toBeInstanceOf(DailyApiError);
@@ -253,54 +213,6 @@ describe('DailyService', () => {
     });
   });
 
-  describe('getMeetingSessions', () => {
-    it('mapea la sesión y suma los minutos de participante', async () => {
-      fetchMock.mockResolvedValueOnce(
-        ok({
-          data: [
-            {
-              id: 'session-1',
-              room: ROOM_NAME,
-              start_time: 1_760_000_000,
-              duration: 1_800,
-              participants: [
-                { participant_id: 'p1', duration: 1_800 },
-                { participant_id: 'p2', duration: 1_740 },
-              ],
-            },
-          ],
-        }),
-      );
-
-      const [session] = await service.getMeetingSessions(ROOM_NAME);
-
-      expect(session.durationSeconds).toBe(1_800);
-      expect(session.participants).toBe(2);
-      // Daily factura por minuto de participante: 30 min + 29 min = 59.
-      expect(session.participantMinutes).toBe(59);
-      expect(session.startTime).toBe(
-        new Date(1_760_000_000 * 1000).toISOString(),
-      );
-    });
-
-    it('devuelve vacío mientras la llamada sigue en curso', async () => {
-      // Daily publica la sesión recién cuando termina; no es un error.
-      fetchMock.mockResolvedValueOnce(ok({ data: [] }));
-
-      await expect(service.getMeetingSessions(ROOM_NAME)).resolves.toEqual([]);
-    });
-
-    it('escapa el nombre de sala en la query', async () => {
-      fetchMock.mockResolvedValueOnce(ok({ data: [] }));
-
-      await service.getMeetingSessions('sala con espacios');
-
-      expect(fetchMock.mock.calls[0][0]).toContain(
-        `room=${encodeURIComponent('sala con espacios')}`,
-      );
-    });
-  });
-
   describe('deleteRoom', () => {
     it('trata el 404 como éxito: la sala ya no está, que era el objetivo', async () => {
       fetchMock.mockResolvedValueOnce(fail(404));
@@ -329,12 +241,12 @@ describe('DailyService', () => {
 
   it('respeta DAILY_API_URL cuando se apunta a un mock', async () => {
     env.DAILY_API_URL = 'http://localhost:4010/v1';
-    fetchMock.mockResolvedValueOnce(ok({ data: [] }));
+    fetchMock.mockResolvedValueOnce(ok({}));
 
-    await service.getMeetingSessions(ROOM_NAME);
+    await service.deleteRoom(ROOM_NAME);
 
-    expect(String(fetchMock.mock.calls[0][0])).toContain(
-      'http://localhost:4010/v1/meetings',
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      `http://localhost:4010/v1/rooms/${ROOM_NAME}`,
     );
   });
 });

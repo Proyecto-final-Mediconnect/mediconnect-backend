@@ -12,13 +12,7 @@ import {
   consultationRoomProperties,
   type RecordingMode,
 } from './consultation.config';
-import {
-  DAILY_API_URL,
-  ROOM_PROPERTIES,
-  ROOM_TTL_SECONDS,
-  SPIKE_ROOM_PREFIX,
-  TOKEN_TTL_SECONDS,
-} from './daily.config';
+import { DAILY_API_URL } from './daily.config';
 import {
   TEST_ROOM_PREFIX,
   TEST_ROOM_TTL_SECONDS,
@@ -44,20 +38,6 @@ import {
  *  lado deja requests colgados ocupando conexiones del backend. */
 const REQUEST_TIMEOUT_MS = 10_000;
 
-/** Sala de prueba lista para embeber, con un token por rol. */
-export interface SpikeRoom {
-  /** Nombre de la sala en Daily (único por dominio). */
-  name: string;
-  /** URL base de la sala, sin token. */
-  url: string;
-  /** Momento en que Daily expulsa a todos y la sala deja de aceptar entradas. */
-  expiresAt: string;
-  /** URL lista para el iframe, con el token del rol correspondiente. */
-  professionalUrl: string;
-  patientUrl: string;
-  maxParticipants: number;
-}
-
 /** Sala de prueba de cámara y micrófono, lista para abrir. */
 export interface TestRoom {
   /** URL de la sala con el meeting token: es la credencial, no se guarda en ningún lado. */
@@ -74,19 +54,6 @@ export interface ConsultationRoom {
   url: string;
 }
 
-/** Resumen de una sesión ya terminada, para las métricas del criterio 3. */
-export interface MeetingSession {
-  id: string;
-  room: string;
-  startTime: string;
-  /** Duración de la sesión en segundos, según Daily. */
-  durationSeconds: number;
-  /** Cantidad de participantes distintos que pasaron por la sesión. */
-  participants: number;
-  /** Minutos de participante facturables (suma de la permanencia de cada uno). */
-  participantMinutes: number;
-}
-
 /** Respuesta de `POST /rooms`. Solo se tipa lo que se usa. */
 interface DailyRoomResponse {
   name: string;
@@ -96,16 +63,6 @@ interface DailyRoomResponse {
 
 interface DailyTokenResponse {
   token: string;
-}
-
-interface DailyMeetingsResponse {
-  data?: {
-    id: string;
-    room: string;
-    start_time: number;
-    duration: number;
-    participants?: { participant_id: string; duration: number }[];
-  }[];
 }
 
 @Injectable()
@@ -124,63 +81,14 @@ export class DailyService {
   }
 
   /**
-   * Crea una sala privada de prueba y devuelve una URL por rol, ya tokenizada.
-   *
-   * **Privada, no pública.** Una sala pública es accesible por cualquiera que
-   * tenga la URL, y la URL de una consulta médica termina en un historial de
-   * navegación, en un chat o en un log. Con `privacy: 'private'` la URL sola no
-   * alcanza: hace falta un meeting token firmado por el dominio, que solo emite
-   * este backend. Es el flujo que va a necesitar ENG-56, y validarlo es la mitad
-   * del valor de este spike.
-   */
-  async createSpikeRoom(userName: string): Promise<SpikeRoom> {
-    this.assertConfigured();
-
-    const now = Math.floor(Date.now() / 1000);
-    const roomExp = now + ROOM_TTL_SECONDS;
-    const tokenExp = now + TOKEN_TTL_SECONDS;
-
-    const room = await this.request<DailyRoomResponse>('POST', '/rooms', {
-      // Nombre único: dos pruebas en paralelo no se pisan, y el prefijo permite
-      // barrer las salas del spike sin tocar ninguna otra.
-      name: `${SPIKE_ROOM_PREFIX}-${crypto.randomUUID().slice(0, 8)}`,
-      privacy: 'private',
-      properties: { ...ROOM_PROPERTIES, exp: roomExp },
-    });
-
-    // Dos tokens, no uno: `is_owner` habilita los controles de moderación del
-    // Prebuilt (expulsar, silenciar). En una consulta el profesional conduce y
-    // el paciente no debería poder sacarlo de su propia sala.
-    const [professionalToken, patientToken] = await Promise.all([
-      this.createMeetingToken(
-        room.name,
-        `${userName} (profesional)`,
-        true,
-        tokenExp,
-      ),
-      this.createMeetingToken(
-        room.name,
-        `${userName} (paciente)`,
-        false,
-        tokenExp,
-      ),
-    ]);
-
-    return {
-      name: room.name,
-      url: room.url,
-      expiresAt: new Date(roomExp * 1000).toISOString(),
-      professionalUrl: `${room.url}?t=${professionalToken}`,
-      patientUrl: `${room.url}?t=${patientToken}`,
-      maxParticipants: ROOM_PROPERTIES.max_participants,
-    };
-  }
-
-  /**
    * Crea la sala de una videoconsulta (ENG-56) y devuelve su nombre y su URL.
    *
-   * A diferencia de `createSpikeRoom`, **no emite tokens**: los emite
-   * `createConsultationToken` en cada ingreso. La diferencia es de diseño, no de
+   * La sala es **privada**: la URL sola no abre nada, hace falta un meeting
+   * token firmado por el dominio, que solo emite este backend. Una sala pública
+   * sería accesible para cualquiera con la URL, y la URL de una consulta médica
+   * termina en un historial de navegación, en un chat o en un log.
+   *
+   * **No emite tokens**: los emite `createConsultationToken` en cada ingreso. La diferencia es de diseño, no de
    * comodidad. Una sala de consulta se crea una vez y se usa dos veces (entra el
    * paciente, entra el profesional), a veces con minutos de diferencia y a veces
    * después de que alguien recargó la página. Guardar los tokens junto con la
@@ -270,41 +178,8 @@ export class DailyService {
     };
   }
 
-  /**
-   * Sesiones ya finalizadas de una sala, para el informe del spike.
-   *
-   * Daily publica los datos de una sesión recién cuando termina, así que esto
-   * devuelve vacío mientras la llamada está en curso. No es un error: es cómo
-   * funciona su API de analytics.
-   */
-  async getMeetingSessions(roomName: string): Promise<MeetingSession[]> {
-    this.assertConfigured();
-
-    const response = await this.request<DailyMeetingsResponse>(
-      'GET',
-      `/meetings?room=${encodeURIComponent(roomName)}&limit=100`,
-    );
-
-    return (response.data ?? []).map((session) => {
-      const participants = session.participants ?? [];
-      return {
-        id: session.id,
-        room: session.room,
-        startTime: new Date(session.start_time * 1000).toISOString(),
-        durationSeconds: session.duration,
-        participants: participants.length,
-        // Daily factura por minuto de participante, no por minuto de sala: una
-        // llamada de 30 min entre dos personas consume 60. El informe del spike
-        // necesita este número para proyectar el costo del MVP.
-        participantMinutes: Math.round(
-          participants.reduce((total, p) => total + p.duration, 0) / 60,
-        ),
-      };
-    });
-  }
-
-  /** Borra una sala de prueba. Daily responde 404 si ya no existe; se trata como
-   *  éxito porque el objetivo (que no quede la sala) está cumplido igual. */
+  /** Borra una sala. Daily responde 404 si ya no existe; se trata como éxito
+   *  porque el objetivo (que no quede la sala) está cumplido igual. */
   async deleteRoom(roomName: string): Promise<void> {
     this.assertConfigured();
 

@@ -12,7 +12,7 @@ abuso cuesta caro. Todos son **por cliente** y por ventana de 60 segundos.
 | *Todas* (global) | **60 / min** | — |
 | `POST /auth/login` | 5 / min | Fuerza bruta de contraseñas. |
 | `POST /auth/refresh` | 5 / min | Mitigación del reuso de refresh tokens que Supabase no detecta (ver [`refresh-token-reuse-risk-plan.md`](./refresh-token-reuse-risk-plan.md)). |
-| `POST /video/spike/rooms` | 5 / min | Cada llamada crea una sala en Daily, que se factura por uso. |
+| `POST /video/test-room` | 3 / min, por usuario | Cada llamada crea una sala de prueba en Daily, que se factura por uso. |
 | `POST /appointments` | 10 / min | Reservar bloquea agenda del profesional. |
 | `POST /appointments/:id/video` | 10 / min | Crea o reusa una sala de Daily. |
 | `POST /patients/:id/clinical-record` | 20 / min | Cada entrada es append-only: no se puede borrar. |
