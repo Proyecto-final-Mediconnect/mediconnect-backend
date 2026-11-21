@@ -23,6 +23,7 @@ describe('InAppNotificationsService', () => {
     appointment: { findUnique: jest.Mock };
     notification: {
       create: jest.Mock;
+      upsert: jest.Mock;
       findMany: jest.Mock;
       count: jest.Mock;
       updateMany: jest.Mock;
@@ -36,6 +37,7 @@ describe('InAppNotificationsService', () => {
       appointment: { findUnique: jest.fn().mockResolvedValue(APPOINTMENT) },
       notification: {
         create: jest.fn().mockResolvedValue({ id: 'n-1' }),
+        upsert: jest.fn().mockResolvedValue({ id: 'n-1' }),
         findMany: jest.fn().mockResolvedValue([]),
         count: jest.fn().mockResolvedValue(0),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -50,6 +52,28 @@ describe('InAppNotificationsService', () => {
   afterEach(() => jest.restoreAllMocks());
 
   describe('notifyProfessional', () => {
+    it('con replace reemplaza el aviso anterior y lo deja sin leer (ENG-203)', async () => {
+      await service.notifyProfessional(
+        APPOINTMENT_ID,
+        'TURNO_REPROGRAMADO',
+        NOW,
+        { previousScheduledAt: '2026-08-24T13:00:00.000Z' },
+        { replace: true },
+      );
+
+      expect(prisma.notification.create).not.toHaveBeenCalled();
+      const args = prisma.notification.upsert.mock.calls[0][0];
+      expect(args.where.appointment_id_type_channel).toEqual({
+        appointment_id: APPOINTMENT_ID,
+        type: 'TURNO_REPROGRAMADO',
+        channel: 'IN_APP',
+      });
+      expect(args.update).toMatchObject({ read_at: null, sent_at: NOW });
+      expect(args.create.payload).toMatchObject({
+        previousScheduledAt: '2026-08-24T13:00:00.000Z',
+      });
+    });
+
     it('deja el aviso en la bandeja del profesional del turno', async () => {
       await service.notifyProfessional(APPOINTMENT_ID, 'PAGO_CONFIRMADO', NOW);
 

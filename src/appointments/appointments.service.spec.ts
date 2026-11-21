@@ -711,7 +711,121 @@ describe('AppointmentsService', () => {
         'TURNO_REPROGRAMADO',
         NOW,
         { previousScheduledAt: PAID.scheduled_at },
+        { replace: false },
       );
+    });
+
+    describe('desde A_REPROGRAMAR (ENG-203, ADR-018 caso 1)', () => {
+      /** El profesional canceló el turno de dentro de 7 días; plazo en 2 días. */
+      const A_REPROGRAMAR = {
+        ...PAID,
+        status: 'A_REPROGRAMAR',
+        cancelled_by: 'PROFESIONAL',
+        cancellation_reason: 'Congreso',
+        reprogram_deadline: '2026-08-19T11:00:00.000Z',
+      };
+      const reprogramado = {
+        ...updatedTo(PAID, NEXT_MONDAY, '09:30'),
+        status: 'CONFIRMADO',
+        rescheduled_at: null,
+        cancelled_by: 'PROFESIONAL',
+        cancellation_reason: 'Congreso',
+        reprogram_deadline: null,
+      };
+
+      it('vuelve a CONFIRMADO sin consumir la reprogramación ni mirar la política', async () => {
+        results = [read(A_REPROGRAMAR), NO_COLLISION];
+        prisma.appointment.update.mockResolvedValue(reprogramado);
+
+        const view = await reschedule(NEXT_MONDAY, '09:30');
+
+        expect(view).toMatchObject({
+          status: 'CONFIRMADO',
+          startTime: '09:30',
+          rescheduledAt: null,
+          reprogramDeadline: null,
+        });
+        expect(policies.policyFor).not.toHaveBeenCalled();
+        expect(prisma.appointment.update).toHaveBeenCalledWith({
+          where: {
+            id: APPOINTMENT_ID,
+            patient_id: PATIENT_ID,
+            status: 'A_REPROGRAMAR',
+            scheduled_at: new Date(A_REPROGRAMAR.scheduled_at),
+            reprogram_deadline: { gt: NOW },
+          },
+          data: {
+            scheduled_at: toInstant(NEXT_MONDAY, '09:30'),
+            duration_minutes: 30,
+            status: 'CONFIRMADO',
+            reprogram_deadline: null,
+            updated_at: NOW,
+          },
+        });
+        expect(inApp.notifyProfessional).toHaveBeenCalledWith(
+          APPOINTMENT_ID,
+          'TURNO_REPROGRAMADO',
+          NOW,
+          { previousScheduledAt: A_REPROGRAMAR.scheduled_at },
+          { replace: true },
+        );
+      });
+
+      it('aunque el paciente ya haya reprogramado una vez, puede elegir', async () => {
+        results = [
+          read({
+            ...A_REPROGRAMAR,
+            rescheduled_at: '2026-08-10T12:00:00.000Z',
+          }),
+          NO_COLLISION,
+        ];
+        prisma.appointment.update.mockResolvedValue(reprogramado);
+
+        await expect(reschedule(NEXT_MONDAY, '09:30')).resolves.toMatchObject({
+          status: 'CONFIRMADO',
+        });
+      });
+
+      it('puede volver al mismo horario si el profesional lo ofrece de nuevo', async () => {
+        results = [read(A_REPROGRAMAR), NO_COLLISION];
+        prisma.appointment.update.mockResolvedValue(reprogramado);
+
+        await expect(reschedule(NEXT_MONDAY, '10:00')).resolves.toBeDefined();
+      });
+
+      it('con el plazo vencido da 409 y no mueve nada', async () => {
+        results = [
+          read({
+            ...A_REPROGRAMAR,
+            reprogram_deadline: '2026-08-17T10:59:00.000Z',
+          }),
+        ];
+
+        await expect(reschedule(NEXT_MONDAY, '09:30')).rejects.toThrow(
+          /Venció el plazo/,
+        );
+        expect(prisma.appointment.update).not.toHaveBeenCalled();
+      });
+
+      it('si el job o el reembolso lo resolvieron en el medio, da 409', async () => {
+        results = [read(A_REPROGRAMAR), NO_COLLISION];
+        prisma.appointment.update.mockRejectedValue(
+          Object.assign(new Error('not found'), { code: 'P2025' }),
+        );
+
+        await expect(reschedule(NEXT_MONDAY, '09:30')).rejects.toBeInstanceOf(
+          ConflictException,
+        );
+        expect(inApp.notifyProfessional).not.toHaveBeenCalled();
+      });
+
+      it('el profesional no puede elegir por el paciente', async () => {
+        results = [read(A_REPROGRAMAR)];
+
+        await expect(
+          reschedule(NEXT_MONDAY, '09:30', PRO_ID),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      });
     });
 
     it('usa la política congelada en el turno, no la vigente del profesional (ENG-179)', async () => {
@@ -913,6 +1027,7 @@ describe('AppointmentsService', () => {
         'TURNO_REPROGRAMADO',
         NOW,
         { previousScheduledAt: PAID.scheduled_at },
+        { replace: false },
       );
     });
 
