@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { appointment_status } from '../../generated/prisma';
 import type { Prisma } from '../../generated/prisma/client';
+import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { PatientNoticesService } from '../notifications/patient-notices.service';
 import { AppointmentPaymentService } from '../payments/appointment-payment.service';
 import {
@@ -62,7 +63,16 @@ export interface FullRefundResult {
 }
 
 /** Lo que hizo una corrida del job de vencimientos. */
+/**
+ * Cuántas horas antes de que venza el plazo para elegir se le recuerda al
+ * paciente (ENG-208, caso 2). Si al cancelar ya quedaba menos, el aviso de la
+ * cancelación hace de recordatorio.
+ */
+export const REPROGRAM_REMINDER_HOURS = 12;
+
 export interface ReprogramSweepSummary {
+  /** Pacientes a los que se les recordó que se vence el plazo (ENG-208). */
+  reminded: number;
   /** Turnos cuyo plazo venció y se reembolsaron al 100 %. */
   expired: number;
   /** Reembolsos totales que habían quedado sin registrar y se retomaron. */
@@ -120,6 +130,7 @@ export class ProfessionalCancellationService {
     private readonly payments: AppointmentPaymentService,
     private readonly refunds: CancellationRefundService,
     private readonly notices: PatientNoticesService,
+    private readonly inApp: InAppNotificationsService,
   ) {}
 
   /**
@@ -338,6 +349,10 @@ export class ProfessionalCancellationService {
       { amount: refund.amount, status: refund.status, cause: 'ELEGIDO' },
       now,
     );
+    // ENG-208: el profesional se entera de cómo terminó el turno que canceló.
+    await this.inApp.notifyProfessional(row.id, 'TURNO_REEMBOLSADO', now, {
+      cause: 'ELEGIDO',
+    });
     return { id: row.id, status: 'CANCELADO', refund };
   }
 
@@ -359,6 +374,8 @@ export class ProfessionalCancellationService {
   async resolveReprogramDeadlines(
     now: Date = new Date(),
   ): Promise<ReprogramSweepSummary> {
+    const reminded = await this.remindDeadlines(now);
+
     const expired = await this.prisma.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<{ id: string }[]>`
         update public.appointments
@@ -416,7 +433,63 @@ export class ProfessionalCancellationService {
         `Vencieron ${expired.length} turno(s) a reprogramar: reembolsados al 100 %.`,
       );
     }
-    return { expired: expired.length, recovered: stranded.length };
+    return { reminded, expired: expired.length, recovered: stranded.length };
+  }
+
+  /**
+   * ENG-208 (caso 2): a los turnos `A_REPROGRAMAR` a los que les quedan
+   * `REPROGRAM_REMINDER_HOURS` o menos, se les recuerda el plazo. Una vez por
+   * cancelación: un turno que el profesional vuelve a cancelar (caso 12) tiene
+   * su propio recordatorio. Nunca tira: los vencimientos se resuelven igual.
+   */
+  private async remindDeadlines(now: Date): Promise<number> {
+    const windowMs = REPROGRAM_REMINDER_HOURS * 3_600_000;
+    try {
+      const rows = await this.prisma.appointment.findMany({
+        where: {
+          status: 'A_REPROGRAMAR',
+          reprogram_deadline: {
+            gt: now,
+            lte: new Date(now.getTime() + windowMs),
+          },
+        },
+        select: {
+          id: true,
+          cancelled_at: true,
+          reprogram_deadline: true,
+          notifications: {
+            where: {
+              type: 'PLAZO_REPROGRAMACION_POR_VENCER',
+              channel: 'IN_APP',
+            },
+            select: { sent_at: true },
+          },
+        },
+        orderBy: { reprogram_deadline: 'asc' },
+        take: 200,
+      });
+
+      let reminded = 0;
+      for (const row of rows) {
+        const cancelledAt = row.cancelled_at;
+        const deadline = row.reprogram_deadline;
+        if (!cancelledAt || !deadline) continue;
+        // Si al cancelar ya quedaba poco, el aviso de la cancelación alcanza.
+        if (deadline.getTime() - cancelledAt.getTime() <= windowMs) continue;
+        const yaRecordado = row.notifications.some(
+          (n) => n.sent_at !== null && n.sent_at >= cancelledAt,
+        );
+        if (yaRecordado) continue;
+        await this.notices.reprogramDeadlineSoon(row.id, now);
+        reminded += 1;
+      }
+      return reminded;
+    } catch (err) {
+      this.logger.error(
+        `No se pudieron recordar los plazos para elegir: ${String(err)}`,
+      );
+      return 0;
+    }
   }
 
   private async refundAndNotify(
@@ -425,14 +498,22 @@ export class ProfessionalCancellationService {
     reason: FullRefundReason,
   ): Promise<void> {
     const refund = await this.refunds.refundInFull(appointmentId, now, reason);
+    const cause =
+      reason === 'VENCIMIENTO_REPROGRAMACION' ? 'VENCIDO' : 'ELEGIDO';
     await this.notices.fullRefund(
       appointmentId,
-      {
-        amount: refund.amount,
-        status: refund.status,
-        cause: reason === 'VENCIMIENTO_REPROGRAMACION' ? 'VENCIDO' : 'ELEGIDO',
-      },
+      { amount: refund.amount, status: refund.status, cause },
       now,
+    );
+    // ENG-208: al profesional, una vez por turno (un turno reembolsado no
+    // vuelve a cambiar); si el job lo retoma, el duplicado se ignora.
+    await this.inApp.notifyProfessional(
+      appointmentId,
+      'TURNO_REEMBOLSADO',
+      now,
+      {
+        cause,
+      },
     );
   }
 

@@ -1,8 +1,8 @@
 import { AR_TIMEZONE, toLocalDateTime } from '../common/time/argentina-time';
 
 /**
- * Textos de los avisos al paciente cuando el profesional cancela un turno
- * (ENG-204, ADR-018).
+ * Textos de los avisos al paciente sobre los cambios en su turno (ENG-204,
+ * ENG-208, ADR-018).
  *
  * Una sola fuente para los tres canales —campanita, push y mail—, así dicen lo
  * mismo. Cada campo es opcional: el `payload` de un aviso es JSON libre y, si
@@ -12,7 +12,25 @@ import { AR_TIMEZONE, toLocalDateTime } from '../common/time/argentina-time';
 /** Tipos de aviso de este módulo (enum `notification_type`). */
 export type PatientNoticeType =
   | 'TURNO_CANCELADO_PROFESIONAL'
-  | 'REEMBOLSO_TOTAL';
+  | 'REEMBOLSO_TOTAL'
+  /** Se vence el plazo para elegir (ENG-208, caso 2). */
+  | 'PLAZO_REPROGRAMACION_POR_VENCER'
+  /** Comprobante de la cancelación que hizo el paciente (ENG-208). */
+  | 'CANCELACION_CONFIRMADA'
+  /** Un reembolso pendiente se acreditó o falló (ENG-208, caso 16). */
+  | 'REEMBOLSO_ACTUALIZADO';
+
+/** Los tipos de este módulo, para reconocerlos en la campanita. */
+export const PATIENT_NOTICE_TYPES: readonly PatientNoticeType[] = [
+  'TURNO_CANCELADO_PROFESIONAL',
+  'REEMBOLSO_TOTAL',
+  'PLAZO_REPROGRAMACION_POR_VENCER',
+  'CANCELACION_CONFIRMADA',
+  'REEMBOLSO_ACTUALIZADO',
+];
+
+/** Canal de Android de los avisos de turnos. Lo crea la app mobile. */
+export const APPOINTMENTS_CHANNEL_ID = 'turnos';
 
 /** Qué le pasó al turno cuando lo canceló el profesional. */
 export type ProfessionalCancellationOutcome =
@@ -41,6 +59,8 @@ export interface PatientNoticeData {
   cause?: FullRefundCause;
   /** Estado del reembolso en MercadoPago al momento del aviso. */
   refundStatus?: string;
+  /** Porcentaje devuelto según la política (cancelación del paciente). */
+  percent?: number;
 }
 
 export interface PatientNoticeText {
@@ -81,16 +101,64 @@ export function patientNoticeText(
   }
 
   const amount = formatAmount(data.amount, data.currency);
+
+  if (type === 'PLAZO_REPROGRAMACION_POR_VENCER') {
+    const deadline = formatWhen(data.deadline);
+    return {
+      title: 'Elegí qué hacer con tu turno',
+      body: `${pro} canceló tu turno${del}. Tenés${deadline ? ` hasta el ${deadline}` : ' poco tiempo'} para elegir otro horario sin volver a pagar o pedir el reembolso del 100 %. Si no elegís, te devolvemos el 100 % igual.`,
+    };
+  }
+
+  if (type === 'CANCELACION_CONFIRMADA') {
+    const lead = `Cancelaste tu turno${conPro}${del}.`;
+    if (data.percent === 0) {
+      return {
+        title: 'Cancelaste tu turno',
+        body: `${lead} Con esa anticipación, la política de cancelación del profesional no prevé reembolso.`,
+      };
+    }
+    const pct =
+      typeof data.percent === 'number' ? ` (el ${data.percent} %)` : '';
+    return {
+      title: 'Cancelaste tu turno',
+      body: `${lead} Te devolvemos ${amount ?? 'lo que corresponde según la política'}${pct}.${refundSuffix(data.refundStatus)}`,
+    };
+  }
+
+  if (type === 'REEMBOLSO_ACTUALIZADO') {
+    if (data.refundStatus === 'RECHAZADO') {
+      return {
+        title: 'Hubo un problema con tu reembolso',
+        body: `No pudimos completar la devolución${amount ? ` de ${amount}` : ''} de tu turno${conPro}${del}. Escribinos y lo resolvemos.`,
+      };
+    }
+    return {
+      title: 'Se acreditó tu reembolso',
+      body: `MercadoPago procesó la devolución${amount ? ` de ${amount}` : ''} de tu turno${conPro}${del}. Puede tardar unos días en verse en tu medio de pago.`,
+    };
+  }
+
   const devolvemos = `te devolvemos ${amount ?? 'lo que pagaste'} (el 100 %)`;
   const lead =
     data.cause === 'VENCIDO'
       ? `Venció el plazo para elegir un horario nuevo para tu turno${conPro}${del}, así que ${devolvemos}.`
       : `Pediste el reembolso de tu turno${conPro}${del}: ${devolvemos}.`;
-  const pending =
-    data.refundStatus && data.refundStatus !== 'PROCESADO'
-      ? ' Lo estamos procesando con MercadoPago; si en unos días no lo ves, escribinos.'
-      : ' Puede tardar unos días en verse en tu medio de pago.';
-  return { title: 'Te devolvemos el 100 %', body: `${lead}${pending}` };
+  return {
+    title: 'Te devolvemos el 100 %',
+    body: `${lead}${refundSuffix(data.refundStatus)}`,
+  };
+}
+
+/** Qué pasa con la plata, según el estado del reembolso al momento del aviso. */
+function refundSuffix(status?: string): string {
+  if (status === 'RECHAZADO') {
+    return ' Hubo un problema con el reembolso: escribinos y lo resolvemos.';
+  }
+  if (status && status !== 'PROCESADO') {
+    return ' Lo estamos procesando con MercadoPago; si en unos días no lo ves, escribinos.';
+  }
+  return ' Puede tardar unos días en verse en tu medio de pago.';
 }
 
 /** `lunes 3 de noviembre a las 10:30` en hora de Argentina, o nada. */
@@ -136,5 +204,6 @@ export function noticeDataFromPayload(payload: unknown): PatientNoticeData {
     currency: str(p.currency),
     cause: cause === 'ELEGIDO' || cause === 'VENCIDO' ? cause : undefined,
     refundStatus: str(p.refundStatus),
+    percent: typeof p.percent === 'number' ? p.percent : undefined,
   };
 }

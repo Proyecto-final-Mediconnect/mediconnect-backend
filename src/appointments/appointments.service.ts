@@ -42,6 +42,7 @@ import {
 } from '../professionals/cancellation-policy';
 import { UnpaidReleaseService } from './unpaid-release.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
+import { PatientNoticesService } from '../notifications/patient-notices.service';
 
 /**
  * Ver disponibilidad y reservar un turno (ENG-54).
@@ -230,6 +231,7 @@ export class AppointmentsService {
     private readonly inApp: InAppNotificationsService,
     private readonly policies: CancellationPolicyService,
     private readonly refunds: CancellationRefundService,
+    private readonly notices: PatientNoticesService,
   ) {}
 
   /**
@@ -505,6 +507,19 @@ export class AppointmentsService {
       await this.inApp.notifyProfessional(
         appointmentId,
         'TURNO_CANCELADO',
+        now,
+      );
+    }
+    // ENG-208: al paciente, el comprobante de lo que se le devuelve. Solo si
+    // había un pago: de una reserva sin pagar no hay nada que informar.
+    if (refund.status !== null) {
+      await this.notices.patientCancelled(
+        appointmentId,
+        {
+          percent: refund.percent,
+          amount: refund.amount,
+          status: refund.status,
+        },
         now,
       );
     }

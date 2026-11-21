@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { ConflictException, Logger } from '@nestjs/common';
 import { PrismaClient } from '../generated/prisma';
 import { ProfessionalCancellationService } from '../src/appointments/professional-cancellation.service';
+import type { InAppNotificationsService } from '../src/notifications/in-app-notifications.service';
 import type { PatientNoticesService } from '../src/notifications/patient-notices.service';
 import type { AppointmentPaymentService } from '../src/payments/appointment-payment.service';
 import type { CancellationRefundService } from '../src/payments/cancellation-refund.service';
@@ -114,6 +115,7 @@ describe('Bloqueo con turnos tomados (integration, ENG-206)', () => {
       { expireCheckout: jest.fn() } as unknown as AppointmentPaymentService,
       { refundInFull: jest.fn() } as unknown as CancellationRefundService,
       notices as unknown as PatientNoticesService,
+      { notifyProfessional: jest.fn() } as unknown as InAppNotificationsService,
     );
     schedules = new SchedulesService(
       supabase,

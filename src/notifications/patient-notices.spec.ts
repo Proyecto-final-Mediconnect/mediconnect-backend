@@ -122,3 +122,86 @@ describe('renderInAppNotification con los avisos de ENG-204', () => {
     ).toBe('Te devolvemos el 100 %');
   });
 });
+
+describe('avisos del ciclo del turno (ENG-208)', () => {
+  const base = {
+    professional: 'Ana Pérez',
+    scheduledAt: '2026-11-23T18:00:00.000Z',
+  };
+
+  it('el recordatorio del plazo dice hasta cuándo y qué pasa si no elige', () => {
+    const { title, body } = patientNoticeText(
+      'PLAZO_REPROGRAMACION_POR_VENCER',
+      {
+        ...base,
+        deadline: '2026-11-23T12:00:00.000Z',
+      },
+    );
+    expect(title).toBe('Elegí qué hacer con tu turno');
+    expect(body).toContain('hasta el lunes, 23 de noviembre a las 09:00');
+    expect(body).toContain('te devolvemos el 100 % igual');
+  });
+
+  it('el comprobante de la cancelación dice cuánto se devuelve y el porcentaje', () => {
+    const { title, body } = patientNoticeText('CANCELACION_CONFIRMADA', {
+      ...base,
+      percent: 50,
+      amount: 7500,
+      refundStatus: 'PROCESADO',
+    });
+    expect(title).toBe('Cancelaste tu turno');
+    expect(body).toContain('Te devolvemos $ 7.500 (el 50 %)');
+    expect(body).toContain('Puede tardar unos días');
+  });
+
+  it('sin reembolso, el comprobante lo explica por la política', () => {
+    expect(
+      patientNoticeText('CANCELACION_CONFIRMADA', { ...base, percent: 0 }).body,
+    ).toContain('no prevé reembolso');
+  });
+
+  it('un reembolso que quedó pendiente avisa si está en proceso o si falló', () => {
+    expect(
+      patientNoticeText('CANCELACION_CONFIRMADA', {
+        ...base,
+        percent: 100,
+        amount: 15000,
+        refundStatus: 'PENDIENTE',
+      }).body,
+    ).toContain('Lo estamos procesando');
+    expect(
+      patientNoticeText('CANCELACION_CONFIRMADA', {
+        ...base,
+        percent: 100,
+        amount: 15000,
+        refundStatus: 'RECHAZADO',
+      }).body,
+    ).toContain('escribinos y lo resolvemos');
+  });
+
+  it('el resultado de un reembolso pendiente: acreditado o con problema', () => {
+    expect(
+      patientNoticeText('REEMBOLSO_ACTUALIZADO', {
+        ...base,
+        amount: 15000,
+        refundStatus: 'PROCESADO',
+      }),
+    ).toMatchObject({ title: 'Se acreditó tu reembolso' });
+    expect(
+      patientNoticeText('REEMBOLSO_ACTUALIZADO', {
+        ...base,
+        amount: 15000,
+        refundStatus: 'RECHAZADO',
+      }),
+    ).toMatchObject({ title: 'Hubo un problema con tu reembolso' });
+  });
+
+  it('la campanita usa los mismos textos que el mail y el push', () => {
+    expect(
+      renderInAppNotification('REEMBOLSO_ACTUALIZADO', {
+        ...base,
+        refundStatus: 'RECHAZADO',
+      }).title,
+    ).toBe('Hubo un problema con tu reembolso');
+  });
+});

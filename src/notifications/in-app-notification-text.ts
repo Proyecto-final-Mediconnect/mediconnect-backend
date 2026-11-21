@@ -1,5 +1,10 @@
 import { AR_TIMEZONE, toLocalDateTime } from '../common/time/argentina-time';
-import { noticeDataFromPayload, patientNoticeText } from './patient-notices';
+import {
+  noticeDataFromPayload,
+  patientNoticeText,
+  PATIENT_NOTICE_TYPES,
+  type PatientNoticeType,
+} from './patient-notices';
 
 /** Lo que se le muestra al usuario de un aviso in-app. */
 export interface InAppNotificationText {
@@ -29,22 +34,38 @@ export function renderInAppNotification(
   type: string,
   payload: unknown,
 ): InAppNotificationText {
+  // ENG-204/208: los avisos al paciente dicen lo mismo en la campanita, el push
+  // y el mail (`patient-notices.ts`).
+  if ((PATIENT_NOTICE_TYPES as readonly string[]).includes(type)) {
+    return patientNoticeText(
+      type as PatientNoticeType,
+      noticeDataFromPayload(payload),
+    );
+  }
+
   const p = asRecord(payload);
   const patient = text(p.patient);
   const professional = text(p.professional);
   const when = formatWhen(text(p.scheduledAt));
 
   switch (type) {
-    case 'PAGO_CONFIRMADO':
+    case 'PAGO_CONFIRMADO': {
+      // ENG-208: el aviso de turno asignado dice quién, cuándo, qué tipo de
+      // consulta y que ya está pago. Sin el paciente, el texto viejo.
+      const minutes =
+        typeof p.durationMinutes === 'number' && p.durationMinutes > 0
+          ? ` de ${p.durationMinutes} minutos`
+          : '';
       return patient
         ? {
-            title: 'Turno nuevo confirmado',
-            body: `${patient} reservó y pagó un turno${when ? ` para el ${when}` : ''}.`,
+            title: `Turno nuevo con ${patient}`,
+            body: `Reservó y pagó una videoconsulta${minutes}${when ? ` para el ${when}` : ''}. El pago ya está acreditado.`,
           }
         : {
             title: 'Pago confirmado',
             body: 'Se acreditó el pago y tu turno quedó confirmado.',
           };
+    }
     case 'PAGO_ACREDITADO': {
       // ENG-199: el aviso al paciente. El monto es opcional por si falta el pago.
       const amount = formatAmount(p.amount, text(p.currency));
@@ -65,22 +86,36 @@ export function renderInAppNotification(
         body: `${patient ?? 'Un paciente'} movió su turno${before ? ` del ${before}` : ''}${when ? ` al ${when}` : ''}.`,
       };
     }
-    case 'TURNO_CANCELADO_PROFESIONAL':
-    case 'REEMBOLSO_TOTAL':
-      // ENG-204: el mismo texto que el push y el mail (`patient-notices.ts`).
-      return patientNoticeText(type, noticeDataFromPayload(payload));
+    case 'TURNO_REEMBOLSADO': {
+      // ENG-208: al profesional, cómo terminó un turno que canceló.
+      const quien = patient ?? 'El paciente';
+      const del = when ? ` del ${when}` : '';
+      return p.cause === 'VENCIDO'
+        ? {
+            title: 'Se reembolsó un turno que cancelaste',
+            body: `${quien} no eligió un horario nuevo a tiempo para el turno${del}, así que se le devolvió el 100 %. El turno quedó cancelado.`,
+          }
+        : {
+            title: `${quien} pidió el reembolso`,
+            body: `${quien} eligió el reembolso del 100 % del turno${del} que cancelaste, en vez de reprogramarlo. El turno quedó cancelado.`,
+          };
+    }
     case 'TURNO_RESERVADO':
       return { title: 'Turno reservado', body: 'Tenés un turno reservado.' };
-    case 'RECORDATORIO_24H':
+    case 'RECORDATORIO_24H': {
+      const hora = timeOf(text(p.scheduledAt));
       return {
         title: 'Tu turno es mañana',
-        body: `Mañana tenés turno${withWho(patient, professional)}.`,
+        body: `Mañana${hora ? ` a las ${hora}` : ''} tenés videoconsulta${withWho(patient, professional)}. Si no vas a poder, cancelalo así el horario queda libre.`,
       };
-    case 'RECORDATORIO_1H':
+    }
+    case 'RECORDATORIO_1H': {
+      const hora = timeOf(text(p.scheduledAt));
       return {
         title: 'Tu turno empieza en una hora',
-        body: `En una hora tenés turno${withWho(patient, professional)}.`,
+        body: `En una hora${hora ? `, a las ${hora},` : ''} tenés videoconsulta${withWho(patient, professional)}. Podés entrar unos minutos antes.`,
       };
+    }
     case 'NUEVO_MENSAJE': {
       const from = text(p.from);
       // Un mensaje solo-archivo no tiene texto que mostrar (ENG-102).
@@ -157,6 +192,14 @@ function formatAmount(value: unknown, currency = 'ARS'): string | undefined {
     maximumFractionDigits: 2,
   }).format(value);
   return currency === 'ARS' ? `$ ${number}` : `${currency} ${number}`;
+}
+
+/** `10:30` en hora de Argentina, o nada. */
+function timeOf(iso?: string): string | undefined {
+  if (!iso) return undefined;
+  const instant = new Date(iso);
+  if (Number.isNaN(instant.getTime())) return undefined;
+  return toLocalDateTime(instant).startTime;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
