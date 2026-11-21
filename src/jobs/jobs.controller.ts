@@ -1,8 +1,10 @@
 import {
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Post,
+  ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
 import { AppointmentClosingService } from '../appointments/appointment-closing.service';
@@ -13,15 +15,23 @@ import {
   type SendSummary,
 } from '../notifications/appointment-notifications.service';
 import { JobSecretGuard } from './job-secret.guard';
+import {
+  type JobStatus,
+  JobRunnerService,
+  type SkippedRun,
+} from './job-runner.service';
 
 /**
- * Tareas periódicas que dispara `.github/workflows/scheduled-jobs.yml`.
+ * Tareas periódicas. Las dispara `pg_cron` desde Supabase
+ * (`scripts/scheduler/pg-cron.sql`, ENG-228), con
+ * `.github/workflows/scheduled-jobs.yml` como respaldo.
  *
  * Viven como endpoints y no como un cron dentro de Nest porque el plan gratis
- * de Render duerme el proceso: el request del workflow lo despierta. Cada
- * endpoint tiene que ser **idempotente**, porque GitHub puede demorar una
- * corrida y juntarla con la siguiente, y un reintento de `curl` repite el
- * request.
+ * de Render duerme el proceso: el request del scheduler lo despierta (y, al
+ * llegar cada minuto, no lo deja dormirse). Cada endpoint tiene que ser
+ * **idempotente**: el respaldo de GitHub puede coincidir con `pg_cron`, y un
+ * reintento repite el request. Cada corrida queda en `job_runs` y dos corridas
+ * del mismo job no se pisan (`JobRunnerService`).
  */
 @Controller('internal/jobs')
 @UseGuards(JobSecretGuard)
@@ -31,21 +41,39 @@ export class JobsController {
     private readonly notifications: AppointmentNotificationsService,
     private readonly medipass: MediPassService,
     private readonly closing: AppointmentClosingService,
+    private readonly runner: JobRunnerService,
   ) {}
+
+  /**
+   * Estado de cada job (ENG-228): última corrida, último OK y si está atrasado.
+   * Devuelve 503 si alguno está atrasado, para que un `curl -f` lo detecte.
+   */
+  @Get('status')
+  async status(): Promise<{ healthy: true; jobs: JobStatus[] }> {
+    const jobs = await this.runner.status();
+    if (jobs.some((j) => j.stale)) {
+      throw new ServiceUnavailableException({ healthy: false, jobs });
+    }
+    return { healthy: true, jobs };
+  }
 
   /** ENG-101: libera los turnos que no se pagaron en 15 minutos. */
   @Post('release-unpaid-appointments')
   @HttpCode(HttpStatus.OK)
-  async releaseUnpaidAppointments(): Promise<{ released: number }> {
-    const ids = await this.unpaidRelease.releaseExpired();
-    return { released: ids.length };
+  releaseUnpaidAppointments(): Promise<{ released: number } | SkippedRun> {
+    return this.runner.run('release-unpaid-appointments', async () => {
+      const ids = await this.unpaidRelease.releaseExpired();
+      return { released: ids.length };
+    });
   }
 
   /** ENG-68: confirmaciones pendientes y recordatorios a 24 h y a 1 h. */
   @Post('send-appointment-reminders')
   @HttpCode(HttpStatus.OK)
-  sendAppointmentReminders(): Promise<SendSummary> {
-    return this.notifications.sendDue();
+  sendAppointmentReminders(): Promise<SendSummary | SkippedRun> {
+    return this.runner.run('send-appointment-reminders', () =>
+      this.notifications.sendDue(),
+    );
   }
 
   /**
@@ -54,8 +82,10 @@ export class JobsController {
    */
   @Post('close-expired-medipass-sessions')
   @HttpCode(HttpStatus.OK)
-  async closeExpiredMediPassSessions(): Promise<{ closed: number }> {
-    return { closed: await this.medipass.closeExpiredSessions() };
+  closeExpiredMediPassSessions(): Promise<{ closed: number } | SkippedRun> {
+    return this.runner.run('close-expired-medipass-sessions', async () => ({
+      closed: await this.medipass.closeExpiredSessions(),
+    }));
   }
 
   /**
@@ -64,8 +94,10 @@ export class JobsController {
    */
   @Post('send-review-requests')
   @HttpCode(HttpStatus.OK)
-  sendReviewRequests(): Promise<SendSummary> {
-    return this.notifications.sendReviewRequests();
+  sendReviewRequests(): Promise<SendSummary | SkippedRun> {
+    return this.runner.run('send-review-requests', () =>
+      this.notifications.sendReviewRequests(),
+    );
   }
 
   /**
@@ -74,14 +106,15 @@ export class JobsController {
    */
   @Post('close-finished-appointments')
   @HttpCode(HttpStatus.OK)
-  async closeFinishedAppointments(): Promise<{
-    completed: number;
-    noShow: number;
-  }> {
-    const closed = await this.closing.closeFinished();
-    return {
-      completed: closed.filter((c) => c.status === 'COMPLETADO').length,
-      noShow: closed.filter((c) => c.status === 'NO_ASISTIO').length,
-    };
+  closeFinishedAppointments(): Promise<
+    { completed: number; noShow: number } | SkippedRun
+  > {
+    return this.runner.run('close-finished-appointments', async () => {
+      const closed = await this.closing.closeFinished();
+      return {
+        completed: closed.filter((c) => c.status === 'COMPLETADO').length,
+        noShow: closed.filter((c) => c.status === 'NO_ASISTIO').length,
+      };
+    });
   }
 }

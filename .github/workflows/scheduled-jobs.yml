@@ -1,19 +1,23 @@
-name: Scheduled Jobs
+name: Scheduled Jobs (respaldo)
 
-# Tareas periódicas del backend. Corren como endpoints (`/internal/jobs/*`) y no
-# como un cron dentro de Nest porque Render Free duerme el proceso tras 15 min sin
-# requests: este request lo despierta.
+# RESPALDO del scheduler. El principal es pg_cron en Supabase
+# (`scripts/scheduler/pg-cron.sql`, ENG-228), que dispara cada minuto. Este
+# workflow quedó porque no cuesta nada y cubre el caso de que pg_cron se caiga,
+# pero NO es confiable por sí solo: el 17/11 GitHub lo corrió 3 veces en el día
+# en lugar de cada 5 minutos. Por eso pasó de */5 a */30.
 #
+# Que coincida con pg_cron no rompe nada: los endpoints son idempotentes y el
+# backend no deja correr dos veces el mismo job a la vez (`job_runs`).
+#
+# Tareas (fuente única: `src/jobs/jobs.config.ts`):
 # - release-unpaid-appointments (ENG-101): libera los turnos que no se pagaron
 #   en 15 minutos.
 # - send-appointment-reminders (ENG-68): confirmaciones pendientes y
 #   recordatorios a 24 h y a 1 h por email.
 # - close-expired-medipass-sessions (ENG-104): deja escrito el cierre de los
-#   accesos al MediPass que vencieron (30 min) o se cortaron. Las lecturas ya
-#   los rechazan aunque este job no haya pasado.
+#   accesos al MediPass que vencieron (30 min) o se cortaron.
 # - close-finished-appointments (ENG-189): cierra los turnos confirmados cuya
-#   sala ya cerró: COMPLETADO si entraron los dos, NO_ASISTIO si solo entró el
-#   profesional. Los que el profesional no abrió quedan como están.
+#   sala ya cerró.
 # - send-review-requests (ENG-190): un mail por turno pidiendo la reseña, 3 h
 #   después de que cierra la sala.
 #
@@ -21,14 +25,11 @@ name: Scheduled Jobs
 #   - RENDER_BACKEND_URL  el mismo que usa keepalive.yml.
 #   - JOBS_SECRET         igual al JOBS_SECRET de Render (mínimo 32 caracteres).
 #
-# Ojo con el cron de GitHub: en horas de mucha carga puede demorarse varios
-# minutos, y se deshabilita solo tras 60 días sin actividad en el repo. El
-# backend no depende de la puntualidad: la disponibilidad y la reserva ya ignoran
-# las retenciones vencidas aunque este job no haya pasado.
+# El cron de GitHub se deshabilita solo tras 60 días sin actividad en el repo.
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 # Dos corridas juntas no se pisan (los endpoints son idempotentes), pero

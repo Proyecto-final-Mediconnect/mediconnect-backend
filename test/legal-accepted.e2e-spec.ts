@@ -67,6 +67,8 @@ describe('Aceptación legal exigida en el backend (e2e, ENG-140)', () => {
       .useValue({
         profile: { findUnique: profileFindUnique },
         legalAcceptance: { findUnique: acceptanceFindUnique },
+        // `/health` consulta la base (ENG-228).
+        $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
       })
       // Barrera prendida: es el estado que prueban los casos de este describe.
       // El apagado, que es con el que se despliega, tiene su propio describe al
