@@ -4,6 +4,7 @@ import { PrismaClient } from '../generated/prisma';
 import { AdminService } from '../src/admin/admin.service';
 import type { ProfessionalAccountNoticesService } from '../src/notifications/professional-account-notices.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import type { ProfessionalStatsService } from '../src/professionals/professional-stats.service';
 
 /**
  * La validación de matrículas (ENG-192) contra Postgres de verdad: lo que un
@@ -19,6 +20,7 @@ describe('Matrículas desde el panel del administrador (integration)', () => {
     {
       licenseDecided,
     } as unknown as ProfessionalAccountNoticesService,
+    {} as unknown as ProfessionalStatsService,
   );
 
   const adminId: string = randomUUID();

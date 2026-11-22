@@ -30,6 +30,8 @@ import { ReviewsModule } from '../reviews/reviews.module';
     MyPatientsService,
   ],
   // ENG-65 (reembolsos) necesita la política para saber cuánto devolver.
-  exports: [CancellationPolicyService],
+  // ProfessionalStatsService: el detalle de un profesional en el panel del
+  // administrador (ENG-241) muestra la misma actividad que "Mi actividad".
+  exports: [CancellationPolicyService, ProfessionalStatsService],
 })
 export class ProfessionalsModule {}

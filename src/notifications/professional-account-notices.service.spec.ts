@@ -59,6 +59,36 @@ describe('ProfessionalAccountNoticesService · licenseDecided', () => {
     expect(mensaje.text).toContain('Motivo: No figura en REFEPS.');
   });
 
+  it('al suspender le dice el motivo y qué pasó con sus turnos (ENG-241)', async () => {
+    const now = new Date('2026-11-22T12:00:00.000Z');
+    await service.suspended(
+      PRO,
+      'Denuncia verificada.',
+      { refunded: 2, cancelled: 1 },
+      now,
+    );
+
+    const [mensaje] = email.send.mock.calls[0] as [
+      { subject: string; text: string; idempotencyKey: string },
+    ];
+    expect(mensaje.subject).toBe('Suspendimos tu cuenta de MediConnect');
+    expect(mensaje.text).toContain('Motivo: Denuncia verificada.');
+    expect(mensaje.text).toContain('Cancelamos tus 3 turnos pendientes');
+    expect(mensaje.idempotencyKey).toBe(
+      `suspended:${PRO}:${now.toISOString()}`,
+    );
+  });
+
+  it('al reactivar lo invita a revisar su agenda', async () => {
+    await service.reactivated(PRO, new Date('2026-11-22T12:00:00.000Z'));
+
+    const [mensaje] = email.send.mock.calls[0] as [
+      { subject: string; text: string },
+    ];
+    expect(mensaje.subject).toBe('Reactivamos tu cuenta de MediConnect');
+    expect(mensaje.text).toContain('https://web.test/profesional/agenda');
+  });
+
   it('sin mail configurado no hace nada', async () => {
     email.isConfigured.mockReturnValue(false);
 
