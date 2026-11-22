@@ -40,6 +40,7 @@ describe('Conversations (e2e)', () => {
   const storageUpload = jest.fn();
   const storageRemove = jest.fn();
   const storageSign = jest.fn();
+  const auditCreate = jest.fn();
   let tokenFirmante: string | undefined;
 
   beforeAll(async () => {
@@ -58,7 +59,9 @@ describe('Conversations (e2e)', () => {
       storageUpload,
       storageRemove,
       storageSign,
+      auditCreate,
     ].forEach((fn) => fn.mockReset());
+    auditCreate.mockResolvedValue({});
     storageUpload.mockResolvedValue({ error: null });
     storageRemove.mockResolvedValue({ error: null });
     storageSign.mockResolvedValue({
@@ -91,6 +94,7 @@ describe('Conversations (e2e)', () => {
           .mockResolvedValue({ first_name: 'Julián', last_name: 'Pérez' }),
       },
       notification: { count: notificationCount, create: notificationCreate },
+      auditLog: { create: auditCreate },
     };
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -428,6 +432,24 @@ describe('Conversations (e2e)', () => {
       expect(storageUpload).not.toHaveBeenCalled();
     });
 
+    it('un PDF con JavaScript da 400 y no llega a Storage (ENG-217)', async () => {
+      participante();
+
+      const res = await request(app.getHttpServer())
+        .post(`/conversations/${CONVERSATION_ID}/attachments`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .attach(
+          'file',
+          Buffer.from(
+            '%PDF-1.7\n1 0 obj\n<< /OpenAction << /S /JavaScript /JS (x) >> >>\nendobj\n',
+          ),
+          { filename: 'estudio.pdf', contentType: 'application/pdf' },
+        )
+        .expect(400);
+      expect(res.body.message).toMatch(/contenido activo/);
+      expect(storageUpload).not.toHaveBeenCalled();
+    });
+
     it('pasar el tope de bytes por usuario da 422 y no llega a Storage', async () => {
       participante();
       messageAggregate.mockResolvedValue({
@@ -464,6 +486,7 @@ describe('Conversations (e2e)', () => {
       participante();
       messageFindFirst.mockResolvedValue({
         attachment_url: `${CONVERSATION_ID}/archivo.pdf`,
+        sender_id: '99999999-9999-4999-8999-999999999999',
       });
       const token = await signToken();
 
@@ -477,6 +500,13 @@ describe('Conversations (e2e)', () => {
       expect(res.headers['cache-control']).toBe('no-store');
       expect(res.body.url).toBe('https://storage.test/firmada');
       expect(tokenFirmante).toBe(token);
+      // ENG-217: la apertura queda registrada.
+      expect(auditCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'CHAT_ATTACHMENT_DOWNLOAD',
+          resource_id: MESSAGE_ID,
+        }),
+      });
     });
 
     it('un mensaje sin archivo da 404', async () => {

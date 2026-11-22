@@ -146,6 +146,22 @@ describe('PatientDocumentsService', () => {
       expect(storage.upload).not.toHaveBeenCalled();
     });
 
+    // ENG-217: el PDF con contenido activo no llega a Storage.
+    it('rechaza un PDF con JavaScript, sin subir nada', async () => {
+      await expect(
+        service.upload(
+          PATIENT,
+          file(
+            Buffer.from(
+              '%PDF-1.7\n1 0 obj\n<< /OpenAction << /S /JavaScript /JS (x) >> >>\nendobj\n',
+            ),
+          ),
+          dto,
+        ),
+      ).rejects.toThrow(/contenido activo/);
+      expect(storage.upload).not.toHaveBeenCalled();
+    });
+
     // El Content-Type lo pone el cliente: se mira el contenido.
     it('rechaza un archivo que dice ser PDF y no lo es', async () => {
       await expect(
@@ -334,10 +350,25 @@ describe('PatientDocumentsService', () => {
       expect(storage.createSignedUrl).not.toHaveBeenCalled();
     });
 
-    it('el paciente abre lo suyo sin dejar auditoría de profesional', async () => {
+    it('el paciente abre lo suyo: queda registrado, sin chequeo de profesional (ENG-217)', async () => {
       await service.downloadUrl(PATIENT, TOKEN, DOC);
-      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actor_id: PATIENT,
+          action: 'PATIENT_DOCUMENT_DOWNLOAD',
+          resource_type: 'patient_documents',
+          resource_id: DOC,
+          metadata: { patientId: PATIENT },
+        },
+      });
       expect(records.assertCanReadFor).not.toHaveBeenCalled();
+    });
+
+    it('si no se puede registrar la descarga del paciente, igual le da su archivo', async () => {
+      prisma.auditLog.create.mockRejectedValue(new Error('db caída'));
+      await expect(service.downloadUrl(PATIENT, TOKEN, DOC)).resolves.toEqual(
+        expect.objectContaining({ url: expect.any(String) }),
+      );
     });
 
     it('un documento retirado da 404', async () => {
