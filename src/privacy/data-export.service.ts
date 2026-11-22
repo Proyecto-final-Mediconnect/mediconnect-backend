@@ -1,5 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { ClinicalDataCipher } from '../common/crypto/clinical-data-cipher';
+import { clinicalContentAt } from '../common/crypto/data-encryption';
 
 /** Versión del formato del archivo. Si cambia la forma, se sube. */
 export const DATA_EXPORT_FORMAT = 'mediconnect-datos-personales/1';
@@ -36,7 +38,10 @@ const nombre = (p: { first_name: string; last_name: string } | null) =>
  */
 @Injectable()
 export class DataExportService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cipher: ClinicalDataCipher,
+  ) {}
 
   async export(userId: string, now: Date = new Date()) {
     const profile = await this.prisma.profile.findUnique({
@@ -229,6 +234,9 @@ export class DataExportService {
       }),
     ]);
 
+    // El contenido de la HC se entrega en claro (ENG-216): es del paciente.
+    const openContent = await this.cipher.openerFor(userId);
+
     // Quién leyó la HC: los ids del log, con nombre y matrícula del profesional.
     const lectores = await this.prisma.professional.findMany({
       where: {
@@ -297,7 +305,7 @@ export class DataExportService {
         numero: e.sequence_number.toString(),
         tipo: e.entry_type,
         recursoFhir: e.fhir_resource_type,
-        contenido: e.content,
+        contenido: openContent(clinicalContentAt(e.id), e.content),
         corrigeA: e.corrects_entry_id,
         fecha: iso(e.created_at),
         profesional: nombre(e.professional),

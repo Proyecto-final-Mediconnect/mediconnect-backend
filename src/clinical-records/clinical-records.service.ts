@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -19,6 +20,14 @@ import {
 
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import {
+  ClinicalDataCipher,
+  type PatientOpener,
+} from '../common/crypto/clinical-data-cipher';
+import {
+  clinicalContentAt,
+  DecryptionError,
+} from '../common/crypto/data-encryption';
 import {
   appendEntry,
   chainEntryFromRow,
@@ -230,6 +239,7 @@ export class ClinicalRecordsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly supabase: SupabaseService,
+    private readonly cipher: ClinicalDataCipher,
   ) {}
 
   /**
@@ -258,6 +268,16 @@ export class ClinicalRecordsService {
         entry.professionalId,
       ) ?? null;
 
+    // ENG-216: el id lo pone la aplicación porque el contenido se cifra atado a
+    // su fila (AAD) y eso tiene que pasar antes del INSERT. Es el mismo en cada
+    // reintento: una colisión de secuencia no escribe nada.
+    const entryId = randomUUID();
+    const storedContent = await this.cipher.sealJson(
+      entry.patientId,
+      clinicalContentAt(entryId),
+      entry.content,
+    );
+
     for (let attempt = 1; attempt <= MAX_APPEND_ATTEMPTS; attempt++) {
       const head = await this.headOf(entry.patientId);
 
@@ -277,14 +297,17 @@ export class ClinicalRecordsService {
       );
 
       try {
+        // El hash se calcula sobre el contenido en claro (`sealed`, ADR-020): la
+        // cadena no depende de la clave, y rotarla no la rompe. Se guarda cifrado.
         const row = await this.prisma.clinicalRecordEntry.create({
           data: {
+            id: entryId,
             patient_id: sealed.patientId,
             professional_id: sealed.professionalId,
             sequence_number: sealed.sequenceNumber,
             entry_type: sealed.entryType as ClinicalEntryType,
             fhir_resource_type: sealed.fhirResourceType,
-            content: sealed.content as never,
+            content: storedContent as never,
             consultation_id: sealed.consultationId ?? null,
             corrects_entry_id: sealed.correctsEntryId ?? null,
             created_at: sealed.createdAt,
@@ -294,7 +317,7 @@ export class ClinicalRecordsService {
           select: ENTRY_SELECT,
         });
 
-        return toView(row, author);
+        return toView({ ...row, content: sealed.content }, author);
       } catch (error) {
         if (
           (error as { code?: string }).code !== PRISMA_UNIQUE_VIOLATION &&
@@ -646,7 +669,10 @@ export class ClinicalRecordsService {
       );
     }
 
-    const rows = (data ?? []) as unknown as (ChainEntryRow & { id: string })[];
+    const rows = await this.openRows(
+      patientId,
+      (data ?? []) as unknown as (ChainEntryRow & { id: string })[],
+    );
     const authors = await this.resolveAuthors(
       rows.map((row) => row.professional_id),
     );
@@ -987,9 +1013,60 @@ export class ClinicalRecordsService {
       select: ENTRY_SELECT,
     });
 
-    return verifyChain(
-      rows.map((row) => chainEntryFromRow(row as ChainEntryRow)),
-    );
+    // Un contenido cifrado que no autentica fue alterado: para la cadena es lo
+    // mismo que un contenido cambiado en claro.
+    const openValue = await this.cipher.openerFor(patientId);
+    const entries: ChainEntry[] = [];
+    for (const row of rows) {
+      try {
+        entries.push(
+          chainEntryFromRow({
+            ...(row as ChainEntryRow),
+            content: openValue(clinicalContentAt(row.id), row.content),
+          }),
+        );
+      } catch (error) {
+        if (!(error instanceof DecryptionError)) throw error;
+        return {
+          valid: false,
+          entries: rows.length,
+          failure: {
+            sequenceNumber: Number(row.sequence_number),
+            reason: 'CONTENT_TAMPERED',
+            expected: row.content_hash,
+            found: 'contenido cifrado ilegible',
+          },
+        };
+      }
+    }
+    return verifyChain(entries);
+  }
+
+  /**
+   * Descifra el contenido de las filas de UN paciente (ENG-216). Lo que está en
+   * claro (las entradas de antes del cifrado) pasa igual.
+   *
+   * Si algo no se puede descifrar, la HC no se muestra a medias: falla entera,
+   * con un mensaje para la persona y el detalle (sin contenido) en el log.
+   */
+  private async openRows<T extends { id: string; content: unknown }>(
+    patientId: string,
+    rows: T[],
+  ): Promise<T[]> {
+    try {
+      const openValue: PatientOpener = await this.cipher.openerFor(patientId);
+      return rows.map((row) => ({
+        ...row,
+        content: openValue(clinicalContentAt(row.id), row.content),
+      }));
+    } catch (error) {
+      this.logger.error(
+        `No se pudo descifrar la HC del paciente ${patientId}: ${(error as Error).name}: ${(error as Error).message}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos cargar la historia clínica. Probá de nuevo en unos minutos.',
+      );
+    }
   }
 }
 

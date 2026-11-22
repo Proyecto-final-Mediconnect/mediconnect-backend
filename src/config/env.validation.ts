@@ -192,6 +192,17 @@ class EnvironmentVariables {
   @IsOptional()
   @IsIn(['true', 'false'])
   LEGAL_ENFORCEMENT?: string;
+
+  // Claves maestras del cifrado del contenido clínico (ENG-216, ADR-020):
+  // `k1:<base64 de 32 bytes>`, y para rotar `k1:<...>,k2:<...>` (la última es la
+  // activa). Opcional: sin ella lo nuevo se guarda sin cifrar, como antes. El
+  // formato (kid, 32 bytes, sin repetidos) lo valida `parseKeyring` al crear el
+  // `CryptoModule`, que no deja arrancar con una clave mal formada. Sus mensajes
+  // nunca repiten el valor: es un secreto.
+  @EmptyAsUndefined()
+  @IsOptional()
+  @IsString()
+  DATA_ENCRYPTION_KEYS?: string;
 }
 
 /** Falla rápido al bootear si falta o está mal formada una env var requerida,

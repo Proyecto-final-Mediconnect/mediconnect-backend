@@ -9,6 +9,9 @@ name: Integrity Check
 # Secrets que necesita (Settings → Secrets and variables → Actions):
 #   - DATABASE_URL       connection string de producción (Supabase).
 #   - SLACK_WEBHOOK_URL  Incoming Webhook del canal del equipo.
+#   - DATA_ENCRYPTION_KEYS  las mismas claves maestras que el backend en Render
+#                           (ENG-216). El hash es del contenido en claro: sin
+#                           ellas, una HC con entradas cifradas termina en ERROR.
 #
 # Si falta SLACK_WEBHOOK_URL el job igual verifica y registra: solo no alerta, y
 # lo deja dicho en el log.
@@ -74,6 +77,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DATA_ENCRYPTION_KEYS: ${{ secrets.DATA_ENCRYPTION_KEYS }}
         run: pnpm run verify:integrity
 
       - name: Avisar que el job falló antes de poder verificar

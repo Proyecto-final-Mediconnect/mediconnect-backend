@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { DATA_EXPORT_FORMAT, DataExportService } from './data-export.service';
+import { ClinicalDataCipher } from '../common/crypto/clinical-data-cipher';
 
 const USER = '11111111-1111-4111-8111-111111111111';
 const NOW = new Date('2026-11-04T12:00:00.000Z');
@@ -75,7 +76,10 @@ describe('DataExportService', () => {
         findUnique: jest.fn().mockResolvedValue(null),
       },
     };
-    service = new DataExportService(prisma as unknown as PrismaService);
+    service = new DataExportService(
+      prisma as unknown as PrismaService,
+      new ClinicalDataCipher(prisma as unknown as PrismaService, null),
+    );
   });
 
   it('paciente: cuenta, ficha, datos de emergencia y la HC completa con su hash', async () => {

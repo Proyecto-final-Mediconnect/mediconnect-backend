@@ -15,6 +15,7 @@ import {
 import type { PrismaService } from '../prisma/prisma.service';
 import { computeAnchor } from './chain-anchor';
 import { IntegrityService } from './integrity.service';
+import { ClinicalDataCipher } from '../common/crypto/clinical-data-cipher';
 
 const PROFESSIONAL_ID = '22222222-2222-4222-8222-222222222222';
 const PACIENTE_A = 'aaaaaaaa-1111-4111-8111-111111111111';
@@ -136,7 +137,11 @@ function harness(
   return {
     prisma,
     alerter,
-    service: new IntegrityService(prisma as unknown as PrismaService, alerter),
+    service: new IntegrityService(
+      prisma as unknown as PrismaService,
+      alerter,
+      new ClinicalDataCipher(prisma as unknown as PrismaService, null),
+    ),
   };
 }
 

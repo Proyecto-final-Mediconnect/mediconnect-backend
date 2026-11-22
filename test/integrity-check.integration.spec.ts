@@ -30,6 +30,7 @@ import { IntegrityService } from '../src/integrity/integrity.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import type { IntegrityAlerter } from '../src/integrity/integrity-alerter';
 import type { IntegrityRunResult } from '../src/integrity/integrity.types';
+import { ClinicalDataCipher } from '../src/common/crypto/clinical-data-cipher';
 
 const prisma = new PrismaClient();
 
@@ -161,7 +162,11 @@ describe('Job de verificación de integridad (integration)', () => {
 
   beforeEach(() => {
     alerter = new RecordingAlerter();
-    service = new IntegrityService(prisma as unknown as PrismaService, alerter);
+    service = new IntegrityService(
+      prisma as unknown as PrismaService,
+      alerter,
+      new ClinicalDataCipher(prisma, null),
+    );
   });
 
   afterEach(async () => {
