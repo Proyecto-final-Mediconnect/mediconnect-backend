@@ -1,11 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import type { PrismaService } from '../../prisma/prisma.service';
-import { ClinicalDataCipher } from './clinical-data-cipher';
+import { ClinicalDataCipher, type FileTicket } from './clinical-data-cipher';
 import {
   clinicalContentAt,
   DecryptionError,
   MissingKeyError,
   parseKeyring,
+  storedFileAt,
   type Keyring,
 } from './data-encryption';
 
@@ -169,5 +170,137 @@ describe('ClinicalDataCipher', () => {
     rows.clear();
     const openValue = await cipher.openerFor(PATIENT);
     expect(() => openValue(AT, stored)).toThrow(DecryptionError);
+  });
+
+  describe('archivos (ENG-216, parte 2)', () => {
+    const FILE_AT = storedFileAt('patient-documents', 'obj-1');
+    const PDF = Buffer.from('%PDF-1.7\nEcografía');
+
+    it('cifra con la DEK del paciente (la crea si no estaba) y descifra', async () => {
+      const { store, rows } = fakeStore();
+      const cipher = new ClinicalDataCipher(store, ring('k1'));
+
+      const blob = await cipher.sealFile(PATIENT, FILE_AT, PDF);
+      expect(rows.has(PATIENT)).toBe(true);
+      expect(blob.includes(Buffer.from('Ecografía'))).toBe(false);
+      expect((await cipher.openFile(PATIENT, FILE_AT, blob)).equals(PDF)).toBe(
+        true,
+      );
+    });
+
+    it('la misma DEK sirve para la HC y para los archivos del paciente', async () => {
+      const { store, rows } = fakeStore();
+      const cipher = new ClinicalDataCipher(store, ring('k1'));
+      await cipher.sealJson(PATIENT, AT, CONTENT);
+      await cipher.sealFile(PATIENT, FILE_AT, PDF);
+      expect(rows.size).toBe(1);
+    });
+
+    it('apagado: no cifra ni abre, y lo dice', async () => {
+      const { store } = fakeStore();
+      const off = new ClinicalDataCipher(store, null);
+      await expect(off.sealFile(PATIENT, FILE_AT, PDF)).rejects.toThrow(
+        MissingKeyError,
+      );
+      await expect(off.openFile(PATIENT, FILE_AT, PDF)).rejects.toThrow(
+        MissingKeyError,
+      );
+    });
+
+    it('el archivo de un paciente no abre con la DEK de otro', async () => {
+      const { store } = fakeStore();
+      const cipher = new ClinicalDataCipher(store, ring('k1'));
+      const blob = await cipher.sealFile(PATIENT, FILE_AT, PDF);
+      await cipher.sealFile(OTHER_PATIENT, FILE_AT, PDF);
+      await expect(
+        cipher.openFile(OTHER_PATIENT, FILE_AT, blob),
+      ).rejects.toThrow(DecryptionError);
+    });
+  });
+
+  describe('links de descarga de archivos cifrados', () => {
+    const TICKET: FileTicket = {
+      bucket: 'patient-documents',
+      path: `${PATIENT}/obj-1.pdf.enc`,
+      patientId: PATIENT,
+      mime: 'application/pdf',
+      attachment: true,
+    };
+    const NOW = new Date('2026-11-22T12:00:00.000Z');
+    const later = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
+
+    it('lee lo que firmó, mientras no venza', () => {
+      const cipher = new ClinicalDataCipher(fakeStore().store, ring('k1'));
+      const token = cipher.signFileTicket(TICKET, 300, NOW);
+      expect(cipher.readFileTicket(token, later(299))).toEqual(TICKET);
+      expect(cipher.readFileTicket(token, later(300))).toBeNull();
+    });
+
+    it('no deja ver qué archivo ni de qué paciente es', () => {
+      const cipher = new ClinicalDataCipher(fakeStore().store, ring('k1'));
+      const token = cipher.signFileTicket(TICKET, 300, NOW);
+      expect(token.startsWith('k1.')).toBe(true);
+      const visible = token
+        .split('.')
+        .map((part) => Buffer.from(part, 'base64url').toString('latin1'))
+        .join(' ');
+      expect(visible).not.toContain(PATIENT);
+      expect(visible).not.toContain('patient-documents');
+      expect(token).not.toContain(PATIENT);
+    });
+
+    it('alterado, de otra clave, mal formado o sin cifrado: null', () => {
+      const cipher = new ClinicalDataCipher(fakeStore().store, ring('k1'));
+      const token = cipher.signFileTicket(TICKET, 300, NOW);
+      const parts = token.split('.');
+      const last = Buffer.from(parts[3], 'base64url');
+      last[0] ^= 1;
+      parts[3] = last.toString('base64url');
+
+      expect(cipher.readFileTicket(parts.join('.'), NOW)).toBeNull();
+      expect(
+        new ClinicalDataCipher(fakeStore().store, ring('k1')).readFileTicket(
+          token,
+          NOW,
+        ),
+      ).toBeNull();
+      expect(cipher.readFileTicket('', NOW)).toBeNull();
+      expect(cipher.readFileTicket('k1', NOW)).toBeNull();
+      expect(cipher.readFileTicket('k9.a.b.c', NOW)).toBeNull();
+      expect(cipher.readFileTicket('basura total', NOW)).toBeNull();
+      expect(
+        new ClinicalDataCipher(fakeStore().store, null).readFileTicket(
+          token,
+          NOW,
+        ),
+      ).toBeNull();
+    });
+
+    it('un link de antes de sumar una clave nueva sigue sirviendo hasta que vence', () => {
+      const k1 = ring('k1');
+      const token = new ClinicalDataCipher(
+        fakeStore().store,
+        k1,
+      ).signFileTicket(TICKET, 300, NOW);
+      const both: Keyring = {
+        activeKid: 'k2',
+        keys: new Map([...k1.keys, ...ring('k2').keys]),
+      };
+      expect(
+        new ClinicalDataCipher(fakeStore().store, both).readFileTicket(
+          token,
+          NOW,
+        ),
+      ).toEqual(TICKET);
+    });
+
+    it('sin la clave no se puede firmar', () => {
+      expect(() =>
+        new ClinicalDataCipher(fakeStore().store, null).signFileTicket(
+          TICKET,
+          300,
+        ),
+      ).toThrow(MissingKeyError);
+    });
   });
 });

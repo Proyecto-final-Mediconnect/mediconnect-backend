@@ -109,7 +109,7 @@ interface PersonRow {
   last_name: string;
 }
 
-interface Participants {
+export interface Participants {
   patient_id: string;
   professional_id: string;
 }
@@ -355,13 +355,14 @@ export class ConversationsService {
 
   /**
    * Que `userId` sea participante de la conversación, o 404. Para los adjuntos,
-   * que se validan antes de subir nada a Storage.
+   * que se validan antes de subir nada a Storage. Devuelve los participantes:
+   * el archivo se cifra con la clave del paciente.
    */
   async assertParticipant(
     userId: string,
     conversationId: string,
-  ): Promise<void> {
-    await this.participantsOf(userId, conversationId);
+  ): Promise<Participants> {
+    return this.participantsOf(userId, conversationId);
   }
 
   /** Guarda el mensaje, devuelve el chat a las bandejas y avisa a la otra persona. */

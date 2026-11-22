@@ -7,8 +7,11 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { ClinicalDataCipher } from '../common/crypto/clinical-data-cipher';
 import type { PrismaService } from '../prisma/prisma.service';
+import { StoredFilesService } from '../stored-files/stored-files.service';
 import type { SupabaseService } from '../supabase/supabase.service';
+import { encryptingCipher } from '../../test/memory-key-store';
 import type { ClinicalRecordsService } from './clinical-records.service';
 import {
   DOWNLOAD_URL_TTL_SECONDS,
@@ -24,6 +27,7 @@ const PATIENT = '11111111-1111-4111-8111-111111111111';
 const PRO = '22222222-2222-4222-8222-222222222222';
 const DOC = '33333333-3333-4333-8333-333333333333';
 const TOKEN = 'token';
+const BASE = 'https://api.test';
 
 const PDF = Buffer.from('%PDF-1.7\n...contenido...');
 const ROW = {
@@ -86,13 +90,19 @@ describe('PatientDocumentsService', () => {
     };
     from = jest.fn().mockReturnValue(storage);
     records = { assertCanReadFor: jest.fn().mockResolvedValue(undefined) };
+    const supabase = {
+      getClientForToken: () => ({ storage: { from } }),
+      getServiceClient: () => ({ storage: { from } }),
+    } as unknown as SupabaseService;
     service = new PatientDocumentsService(
       prisma as unknown as PrismaService,
-      {
-        getClientForToken: () => ({ storage: { from } }),
-        getServiceClient: () => ({ storage: { from } }),
-      } as unknown as SupabaseService,
+      supabase,
       records as unknown as ClinicalRecordsService,
+      // Cifrado apagado: como antes de ENG-216. El prendido, en su describe.
+      new StoredFilesService(
+        supabase,
+        new ClinicalDataCipher({} as PrismaService, null),
+      ),
     );
   });
 
@@ -313,7 +323,7 @@ describe('PatientDocumentsService', () => {
 
   describe('downloadUrl', () => {
     it('al profesional con acceso le da una URL firmada corta y lo audita', async () => {
-      const result = await service.downloadUrl(PRO, TOKEN, DOC);
+      const result = await service.downloadUrl(PRO, TOKEN, DOC, BASE);
 
       expect(storage.createSignedUrl).toHaveBeenCalledWith(
         STORED.storage_path,
@@ -334,9 +344,9 @@ describe('PatientDocumentsService', () => {
     it('al profesional sin turno lo frena antes de firmar', async () => {
       records.assertCanReadFor.mockRejectedValue(new ForbiddenException());
 
-      await expect(service.downloadUrl(PRO, TOKEN, DOC)).rejects.toBeInstanceOf(
-        ForbiddenException,
-      );
+      await expect(
+        service.downloadUrl(PRO, TOKEN, DOC, BASE),
+      ).rejects.toBeInstanceOf(ForbiddenException);
       expect(storage.createSignedUrl).not.toHaveBeenCalled();
     });
 
@@ -344,14 +354,14 @@ describe('PatientDocumentsService', () => {
     it('si no se puede auditar, no entrega la URL', async () => {
       prisma.auditLog.create.mockRejectedValue(new Error('db'));
 
-      await expect(service.downloadUrl(PRO, TOKEN, DOC)).rejects.toBeInstanceOf(
-        InternalServerErrorException,
-      );
+      await expect(
+        service.downloadUrl(PRO, TOKEN, DOC, BASE),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
       expect(storage.createSignedUrl).not.toHaveBeenCalled();
     });
 
     it('el paciente abre lo suyo: queda registrado, sin chequeo de profesional (ENG-217)', async () => {
-      await service.downloadUrl(PATIENT, TOKEN, DOC);
+      await service.downloadUrl(PATIENT, TOKEN, DOC, BASE);
       expect(prisma.auditLog.create).toHaveBeenCalledWith({
         data: {
           actor_id: PATIENT,
@@ -366,9 +376,9 @@ describe('PatientDocumentsService', () => {
 
     it('si no se puede registrar la descarga del paciente, igual le da su archivo', async () => {
       prisma.auditLog.create.mockRejectedValue(new Error('db caída'));
-      await expect(service.downloadUrl(PATIENT, TOKEN, DOC)).resolves.toEqual(
-        expect.objectContaining({ url: expect.any(String) }),
-      );
+      await expect(
+        service.downloadUrl(PATIENT, TOKEN, DOC, BASE),
+      ).resolves.toEqual(expect.objectContaining({ url: expect.any(String) }));
     });
 
     it('un documento retirado da 404', async () => {
@@ -377,7 +387,7 @@ describe('PatientDocumentsService', () => {
         withdrawn_at: new Date(),
       });
       await expect(
-        service.downloadUrl(PATIENT, TOKEN, DOC),
+        service.downloadUrl(PATIENT, TOKEN, DOC, BASE),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
@@ -398,6 +408,92 @@ describe('PatientDocumentsService', () => {
       await expect(service.withdraw(PRO, DOC)).rejects.toBeInstanceOf(
         NotFoundException,
       );
+    });
+  });
+
+  describe('con el cifrado prendido (ENG-216)', () => {
+    let files: StoredFilesService;
+
+    beforeEach(() => {
+      const supabase = {
+        getClientForToken: () => ({ storage: { from } }),
+        getServiceClient: () => ({ storage: { from } }),
+      } as unknown as SupabaseService;
+      files = new StoredFilesService(supabase, encryptingCipher());
+      service = new PatientDocumentsService(
+        prisma as unknown as PrismaService,
+        supabase,
+        records as unknown as ClinicalRecordsService,
+        files,
+      );
+    });
+
+    it('sube el archivo cifrado, con .enc, y guarda el SHA-256 del original', async () => {
+      await service.upload(PATIENT, file(), dto);
+
+      const [path, body] = storage.upload.mock.calls[0] as [string, Buffer];
+      expect(path).toMatch(
+        new RegExp(`^${PATIENT}/[0-9a-f-]{36}\\.pdf\\.enc$`),
+      );
+      expect(body.equals(PDF)).toBe(false);
+      expect(body.includes(Buffer.from('contenido'))).toBe(false);
+      expect(prisma.patientDocument.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            storage_path: path,
+            sha256: createHash('sha256').update(PDF).digest('hex'),
+            size_bytes: PDF.length,
+          }),
+        }),
+      );
+    });
+
+    it('un archivo justo en 10 MB no entra: cifrado pasaría el tope del bucket', async () => {
+      const big = Buffer.concat([
+        PDF,
+        Buffer.alloc(10 * 1024 * 1024 - PDF.length),
+      ]);
+      await expect(service.upload(PATIENT, file(big), dto)).rejects.toThrow(
+        'El archivo no puede pasar los 10 MB.',
+      );
+      expect(storage.upload).not.toHaveBeenCalled();
+    });
+
+    it('un documento cifrado se abre con un link del backend, auditado igual', async () => {
+      prisma.patientDocument.findUnique.mockResolvedValue({
+        ...STORED,
+        storage_path: `${PATIENT}/abc.pdf.enc`,
+        mime_type: 'application/pdf',
+      });
+
+      const result = await service.downloadUrl(PRO, TOKEN, DOC, BASE);
+
+      expect(result.url.startsWith(`${BASE}/files?t=`)).toBe(true);
+      expect(storage.createSignedUrl).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'PATIENT_DOCUMENT_DOWNLOAD',
+          }),
+        }),
+      );
+    });
+
+    it('un documento viejo, en claro, se sigue abriendo con la URL de Storage', async () => {
+      const result = await service.downloadUrl(PATIENT, TOKEN, DOC, BASE);
+      expect(result.url).toBe('https://x/signed');
+    });
+
+    it('sin permiso, no hay link', async () => {
+      prisma.patientDocument.findUnique.mockResolvedValue({
+        ...STORED,
+        storage_path: `${PATIENT}/abc.pdf.enc`,
+        mime_type: 'application/pdf',
+      });
+      records.assertCanReadFor.mockRejectedValue(new ForbiddenException());
+      await expect(
+        service.downloadUrl(PRO, TOKEN, DOC, BASE),
+      ).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 });

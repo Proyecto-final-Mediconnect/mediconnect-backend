@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { StoredFilesModule } from '../stored-files/stored-files.module';
 import { ClinicalRecordAccessesController } from './clinical-record-accesses.controller';
 import { ClinicalRecordAccessesService } from './clinical-record-accesses.service';
 import { ClinicalRecordsController } from './clinical-records.controller';
@@ -29,6 +30,7 @@ import { PatientDocumentsService } from './patient-documents.service';
  * las mismas reglas que la HC, pero en su propia tabla y fuera de la cadena.
  */
 @Module({
+  imports: [StoredFilesModule],
   controllers: [
     ClinicalRecordsController,
     PatientDocumentsController,

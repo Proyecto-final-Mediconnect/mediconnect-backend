@@ -19,6 +19,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { publicBaseUrl } from '../common/http/public-base-url';
 import { requireAuth } from '../common/http/require-auth';
 import { ListPatientDocumentsQueryDto } from './dto/list-patient-documents-query.dto';
 import { UploadPatientDocumentDto } from './dto/upload-patient-document.dto';
@@ -106,7 +107,7 @@ export class PatientDocumentsController {
     return this.documents.listFor(userId, patientId, query);
   }
 
-  /** Una URL firmada de cinco minutos para abrir el archivo. */
+  /** Una URL de cinco minutos para abrir el archivo. */
   @Get('patient-documents/:documentId/download')
   download(
     @Req() req: Request,
@@ -114,6 +115,11 @@ export class PatientDocumentsController {
     documentId: string,
   ) {
     const { userId, accessToken } = requireAuth(req);
-    return this.documents.downloadUrl(userId, accessToken, documentId);
+    return this.documents.downloadUrl(
+      userId,
+      accessToken,
+      documentId,
+      publicBaseUrl(req),
+    );
   }
 }

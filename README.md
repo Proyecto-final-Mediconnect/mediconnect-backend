@@ -266,6 +266,26 @@ El contenido de cada entrada **nueva** de la historia clínica se guarda cifrado
   arrancar. Con la variable mal formada, **no arranca**. Leer algo cifrado sin la
   clave falla: nunca se muestra el cifrado como si fuera el contenido.
 
+### Archivos: documentos del paciente y adjuntos del chat
+
+Con la variable cargada, los archivos **nuevos** también se guardan cifrados, con la
+misma DEK del paciente (en el chat, la del paciente de la conversación):
+
+- En Storage quedan como `<carpeta>/<uuid>.<ext>.enc`, en binario: `MCF1` + nonce +
+  etiqueta + texto cifrado (32 bytes más que el original; por eso, con el cifrado
+  prendido, el tope es 10 MB menos 32 bytes). El AAD es el bucket, el UUID del
+  objeto y el paciente: un archivo copiado a otro nombre no se descifra.
+- Se abren igual que antes para la web y el mobile: piden la URL de descarga y
+  reciben un link de cinco minutos. Para un archivo cifrado, ese link es del
+  backend (`GET /files?t=...`) y no de Storage: baja el objeto, lo descifra y lo
+  manda con `Content-Security-Policy: default-src 'none'; sandbox` y `no-store`.
+- El link (`t`) va cifrado y autenticado con una subclave de la KEK: no deja ver qué
+  archivo ni de qué paciente es, no se puede cambiar y vence a los cinco minutos.
+  Va por query porque el log de requests y Sentry descartan el query string.
+- La autorización y el registro en `audit_logs` siguen donde estaban: al pedir la
+  URL. Los archivos de antes, en claro, se siguen abriendo con la URL firmada de
+  Storage.
+
 ### Prender el cifrado
 
 1. En tu máquina: `pnpm run keys:generate` (o

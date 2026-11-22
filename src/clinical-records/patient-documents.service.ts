@@ -7,7 +7,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   allowedExtension,
   MAX_FILE_BYTES,
@@ -17,6 +17,11 @@ import {
   pdfRiskMessage,
 } from '../common/files/pdf-active-content';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  FILE_LINK_TTL_SECONDS,
+  isEncryptedObject,
+  StoredFilesService,
+} from '../stored-files/stored-files.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ClinicalRecordsService, sameUuid } from './clinical-records.service';
 import {
@@ -42,7 +47,7 @@ export const MAX_ACTIVE_DOCUMENTS_PER_PATIENT = 50;
 export const MAX_TOTAL_BYTES_PER_PATIENT = 200 * 1024 * 1024;
 
 /** Cuánto vive una URL de descarga: lo justo para abrirla (Sprint 0 §5.3.1). */
-export const DOWNLOAD_URL_TTL_SECONDS = 5 * 60;
+export const DOWNLOAD_URL_TTL_SECONDS = FILE_LINK_TTL_SECONDS;
 
 /** Lo que Multer adjunta del archivo subido. */
 export interface UploadedDocumentFile {
@@ -115,6 +120,10 @@ function toView(row: DocumentRow): PatientDocumentView {
  * se descargan con una URL firmada de cinco minutos que se arma con el token de
  * quien pide, así que Storage vuelve a chequear el permiso con sus propias
  * políticas (las mismas reglas que la HC).
+ *
+ * Desde ENG-216, con el cifrado prendido, el archivo se sube cifrado con la
+ * clave del paciente y se abre con un link de cinco minutos del backend, que lo
+ * descifra (`StoredFilesService`). Los subidos antes siguen como estaban.
  */
 @Injectable()
 export class PatientDocumentsService {
@@ -124,6 +133,7 @@ export class PatientDocumentsService {
     private readonly prisma: PrismaService,
     private readonly supabase: SupabaseService,
     private readonly records: ClinicalRecordsService,
+    private readonly files: StoredFilesService,
   ) {}
 
   async upload(
@@ -140,7 +150,7 @@ export class PatientDocumentsService {
     if (!ext) {
       throw new BadRequestException('Solo se pueden subir PDF, JPG o PNG.');
     }
-    if (file.size > MAX_DOCUMENT_BYTES) {
+    if (file.size > this.files.maxFileBytes) {
       throw new BadRequestException('El archivo no puede pasar los 10 MB.');
     }
     // ENG-217: un PDF con JavaScript, adjuntos o acciones no entra.
@@ -163,11 +173,20 @@ export class PatientDocumentsService {
 
     await this.assertWithinQuota(patientId, file.size);
 
+    // El hash es del archivo original, no del cifrado: es el que identifica el
+    // documento aunque cambie la clave.
     const sha256 = createHash('sha256').update(file.buffer).digest('hex');
     // Nombre aleatorio y sin el nombre original: el nombre de un archivo puede
     // decir más de lo que hace falta ("VIH_positivo.pdf"). La carpeta es el
-    // paciente, que es lo que miran las políticas de Storage.
-    const storagePath = `${patientId}/${randomUUID()}.${ext}`;
+    // paciente, que es lo que miran las políticas de Storage. Con el cifrado
+    // prendido, el contenido va cifrado y el nombre termina en `.enc`.
+    const { path: storagePath, body } = await this.files.prepareUpload(
+      PATIENT_DOCUMENTS_BUCKET,
+      patientId,
+      patientId,
+      ext,
+      file.buffer,
+    );
 
     // Con service role y no con el token del paciente: el bucket no tiene política
     // de INSERT, así la única forma de subir pasa por acá (firma, rate limit, cuota
@@ -175,7 +194,7 @@ export class PatientDocumentsService {
     const { error } = await this.supabase
       .getServiceClient()
       .storage.from(PATIENT_DOCUMENTS_BUCKET)
-      .upload(storagePath, file.buffer, {
+      .upload(storagePath, body, {
         contentType: file.mimetype,
         upsert: false,
       });
@@ -270,7 +289,8 @@ export class PatientDocumentsService {
   }
 
   /**
-   * Una URL firmada de cinco minutos para ver el archivo.
+   * Una URL de cinco minutos para ver el archivo: firmada por Storage, o un link
+   * del backend si el archivo está cifrado (`baseUrl` es el origen del backend).
    *
    * Cada descarga queda en `audit_logs` (ENG-217). La de un profesional **falla
    * cerrado** como la lectura de la HC: si no se puede registrar, no se entrega
@@ -281,6 +301,7 @@ export class PatientDocumentsService {
     viewerId: string,
     accessToken: string,
     documentId: string,
+    baseUrl: string,
   ): Promise<{ url: string; expiresAt: string }> {
     const doc = await this.prisma.patientDocument.findUnique({
       where: { id: documentId },
@@ -288,6 +309,7 @@ export class PatientDocumentsService {
         id: true,
         patient_id: true,
         storage_path: true,
+        mime_type: true,
         withdrawn_at: true,
       },
     });
@@ -306,6 +328,16 @@ export class PatientDocumentsService {
       );
     } else {
       await this.auditOwnDownload(viewerId, doc.id);
+    }
+
+    if (isEncryptedObject(doc.storage_path)) {
+      return this.files.link(baseUrl, {
+        bucket: PATIENT_DOCUMENTS_BUCKET,
+        path: doc.storage_path,
+        patientId: doc.patient_id,
+        mime: doc.mime_type,
+        attachment: true,
+      });
     }
 
     const { data, error } = await this.supabase

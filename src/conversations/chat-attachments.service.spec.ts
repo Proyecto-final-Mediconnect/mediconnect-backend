@@ -5,7 +5,10 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { encryptingCipher } from '../../test/memory-key-store';
+import { ClinicalDataCipher } from '../common/crypto/clinical-data-cipher';
 import type { PrismaService } from '../prisma/prisma.service';
+import { StoredFilesService } from '../stored-files/stored-files.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import {
   ATTACHMENT_URL_TTL_SECONDS,
@@ -22,6 +25,8 @@ const USER = '11111111-1111-4111-8111-111111111111';
 const OTRO = '44444444-4444-4444-8444-444444444444';
 const CONVERSATION = '22222222-2222-4222-8222-222222222222';
 const MESSAGE = '33333333-3333-4333-8333-333333333333';
+const PATIENT = '55555555-5555-4555-8555-555555555555';
+const BASE = 'https://api.test';
 
 const PDF = Buffer.from('%PDF-1.7 contenido');
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
@@ -54,7 +59,9 @@ describe('ChatAttachmentsService', () => {
 
   beforeEach(() => {
     conversations = {
-      assertParticipant: jest.fn().mockResolvedValue(undefined),
+      assertParticipant: jest
+        .fn()
+        .mockResolvedValue({ patient_id: PATIENT, professional_id: USER }),
       sendWithAttachment: jest.fn().mockResolvedValue(ENVIADO),
     };
     prisma = {
@@ -90,6 +97,11 @@ describe('ChatAttachmentsService', () => {
       prisma as unknown as PrismaService,
       supabase,
       conversations as unknown as ConversationsService,
+      // Cifrado apagado: como antes de ENG-216. El prendido, en su describe.
+      new StoredFilesService(
+        supabase,
+        new ClinicalDataCipher({} as PrismaService, null),
+      ),
     );
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
   });
@@ -279,6 +291,7 @@ describe('ChatAttachmentsService', () => {
         'token-del-usuario',
         CONVERSATION,
         MESSAGE,
+        BASE,
       );
 
       expect(tokenUsado).toBe('token-del-usuario');
@@ -305,7 +318,7 @@ describe('ChatAttachmentsService', () => {
         attachment_mime: 'application/pdf',
       });
 
-      await service.url(USER, 'token', CONVERSATION, MESSAGE);
+      await service.url(USER, 'token', CONVERSATION, MESSAGE, BASE);
 
       expect(userBucket.createSignedUrl).toHaveBeenCalledWith(
         `${CONVERSATION}/archivo.pdf`,
@@ -318,7 +331,7 @@ describe('ChatAttachmentsService', () => {
       prisma.message.findFirst.mockResolvedValue(null);
 
       await expect(
-        service.url(USER, 'token', CONVERSATION, MESSAGE),
+        service.url(USER, 'token', CONVERSATION, MESSAGE, BASE),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(userBucket.createSignedUrl).not.toHaveBeenCalled();
     });
@@ -329,7 +342,7 @@ describe('ChatAttachmentsService', () => {
       );
 
       await expect(
-        service.url(USER, 'token', CONVERSATION, MESSAGE),
+        service.url(USER, 'token', CONVERSATION, MESSAGE, BASE),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(prisma.message.findFirst).not.toHaveBeenCalled();
     });
@@ -344,7 +357,7 @@ describe('ChatAttachmentsService', () => {
       it('registra quién abrió el archivo', async () => {
         prisma.message.findFirst.mockResolvedValue(delOtro);
 
-        await service.url(USER, 'token', CONVERSATION, MESSAGE);
+        await service.url(USER, 'token', CONVERSATION, MESSAGE, BASE);
 
         expect(prisma.auditLog.create).toHaveBeenCalledWith({
           data: {
@@ -362,7 +375,7 @@ describe('ChatAttachmentsService', () => {
         prisma.auditLog.create.mockRejectedValue(new Error('db caída'));
 
         await expect(
-          service.url(USER, 'token', CONVERSATION, MESSAGE),
+          service.url(USER, 'token', CONVERSATION, MESSAGE, BASE),
         ).rejects.toBeInstanceOf(InternalServerErrorException);
         expect(userBucket.createSignedUrl).not.toHaveBeenCalled();
       });
@@ -375,7 +388,7 @@ describe('ChatAttachmentsService', () => {
         prisma.auditLog.create.mockRejectedValue(new Error('db caída'));
 
         await expect(
-          service.url(USER, 'token', CONVERSATION, MESSAGE),
+          service.url(USER, 'token', CONVERSATION, MESSAGE, BASE),
         ).resolves.toEqual(
           expect.objectContaining({ url: 'https://storage/firmada' }),
         );
@@ -390,8 +403,75 @@ describe('ChatAttachmentsService', () => {
       });
 
       await expect(
-        service.url(USER, 'token', CONVERSATION, MESSAGE),
+        service.url(USER, 'token', CONVERSATION, MESSAGE, BASE),
       ).rejects.toBeInstanceOf(InternalServerErrorException);
+    });
+  });
+
+  describe('con el cifrado prendido (ENG-216)', () => {
+    beforeEach(() => {
+      const supabase = {
+        getServiceClient: () => ({ storage: { from: fromService } }),
+        getClientForToken: (token: string) => {
+          tokenUsado = token;
+          return { storage: { from: () => userBucket } };
+        },
+      } as unknown as SupabaseService;
+      service = new ChatAttachmentsService(
+        prisma as unknown as PrismaService,
+        supabase,
+        conversations as unknown as ConversationsService,
+        new StoredFilesService(supabase, encryptingCipher()),
+      );
+    });
+
+    it('sube el archivo cifrado con la clave del paciente de la conversación', async () => {
+      await service.send(
+        USER,
+        CONVERSATION,
+        archivo(PDF, 'application/pdf'),
+        '',
+      );
+
+      const [path, body] = serviceBucket.upload.mock.calls[0] as [
+        string,
+        Buffer,
+      ];
+      expect(path).toMatch(
+        new RegExp(`^${CONVERSATION}/[0-9a-f-]{36}\\.pdf\\.enc$`),
+      );
+      expect(body.includes(Buffer.from('contenido'))).toBe(false);
+      expect(conversations.sendWithAttachment).toHaveBeenCalledWith(
+        USER,
+        CONVERSATION,
+        expect.objectContaining({ path, size: PDF.length }),
+        expect.any(Date),
+      );
+    });
+
+    it('un archivo cifrado se abre con un link del backend, auditado igual', async () => {
+      prisma.message.findFirst.mockResolvedValue({
+        attachment_url: `${CONVERSATION}/archivo.png.enc`,
+        attachment_mime: 'image/png',
+        sender_id: OTRO,
+      });
+
+      const res = await service.url(USER, 'token', CONVERSATION, MESSAGE, BASE);
+
+      expect(res.url.startsWith(`${BASE}/files?t=`)).toBe(true);
+      expect(res.expiraEl).toEqual(expect.any(String));
+      expect(userBucket.createSignedUrl).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).toHaveBeenCalled();
+    });
+
+    it('uno viejo, en claro, se sigue abriendo con la URL de Storage', async () => {
+      prisma.message.findFirst.mockResolvedValue({
+        attachment_url: `${CONVERSATION}/archivo.png`,
+        attachment_mime: 'image/png',
+        sender_id: OTRO,
+      });
+      const res = await service.url(USER, 'token', CONVERSATION, MESSAGE, BASE);
+      expect(res.url).toBe('https://storage/firmada');
     });
   });
 });
