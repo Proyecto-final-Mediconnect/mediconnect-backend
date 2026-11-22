@@ -18,6 +18,9 @@ describe('Administración (e2e)', () => {
   let publicKey: CryptoKey;
   let privateKey: CryptoKey;
   const findUnique = jest.fn();
+  const professionalFindMany = jest.fn();
+  const professionalUpdateMany = jest.fn();
+  const auditCreate = jest.fn();
 
   beforeAll(async () => {
     ({ publicKey, privateKey } = await generateKeyPair('ES256'));
@@ -25,6 +28,23 @@ describe('Administración (e2e)', () => {
 
   beforeEach(async () => {
     findUnique.mockReset();
+    professionalFindMany.mockReset().mockResolvedValue([]);
+    professionalUpdateMany.mockReset().mockResolvedValue({ count: 1 });
+    auditCreate.mockReset().mockResolvedValue({});
+    const prismaMock = {
+      ...legalAcceptedPrismaMock(),
+      profile: { findUnique },
+      professional: {
+        findMany: professionalFindMany,
+        updateMany: professionalUpdateMany,
+        findUnique: jest.fn(),
+      },
+      auditLog: {
+        create: auditCreate,
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      $transaction: (cb: (tx: unknown) => unknown) => cb(prismaMock),
+    };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
@@ -35,7 +55,7 @@ describe('Administración (e2e)', () => {
         getIssuer: () => ISSUER,
       })
       .overrideProvider(PrismaService)
-      .useValue({ ...legalAcceptedPrismaMock(), profile: { findUnique } })
+      .useValue(prismaMock)
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -116,6 +136,85 @@ describe('Administración (e2e)', () => {
       .get('/admin/me')
       .set('Authorization', `Bearer ${token}`)
       .expect(403);
+  });
+
+  describe('matrículas (ENG-192)', () => {
+    const PRO = '22222222-2222-4222-8222-222222222222';
+
+    it('el administrador ve la cola de pendientes', async () => {
+      findUnique.mockResolvedValue(perfil('ADMINISTRADOR'));
+
+      await request(app.getHttpServer())
+        .get('/admin/professionals/licenses')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(200)
+        .expect([]);
+      expect(professionalFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: 'PENDIENTE_VALIDACION_MATRICULA',
+          }),
+        }),
+      );
+    });
+
+    it('un estado que no es de la cola da 400', async () => {
+      findUnique.mockResolvedValue(perfil('ADMINISTRADOR'));
+
+      await request(app.getHttpServer())
+        .get('/admin/professionals/licenses?status=SUSPENDIDO')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(400);
+    });
+
+    it('rechazar sin motivo da 400 y no toca nada', async () => {
+      findUnique.mockResolvedValue(perfil('ADMINISTRADOR'));
+
+      await request(app.getHttpServer())
+        .patch(`/admin/professionals/${PRO}/license`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({ decision: 'RECHAZADO' })
+        .expect(400);
+      expect(professionalUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('validar responde el estado nuevo y queda auditado', async () => {
+      findUnique.mockResolvedValue(perfil('ADMINISTRADOR'));
+
+      await request(app.getHttpServer())
+        .patch(`/admin/professionals/${PRO}/license`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({ decision: 'VALIDADO' })
+        .expect(200)
+        .expect({ id: PRO, status: 'VALIDADO' });
+      expect(auditCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          actor_id: SUB,
+          action: 'PROFESSIONAL_LICENSE_VALIDATED',
+        }),
+      });
+    });
+
+    it('un profesional no puede validarse a sí mismo: 403', async () => {
+      findUnique.mockResolvedValue(perfil('PROFESIONAL'));
+
+      await request(app.getHttpServer())
+        .patch(`/admin/professionals/${PRO}/license`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({ decision: 'VALIDADO' })
+        .expect(403);
+      expect(professionalUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('un id que no es UUID da 400', async () => {
+      findUnique.mockResolvedValue(perfil('ADMINISTRADOR'));
+
+      await request(app.getHttpServer())
+        .patch('/admin/professionals/no-es-un-id/license')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({ decision: 'VALIDADO' })
+        .expect(400);
+    });
   });
 
   it('sin sesión da 401 y no mira la base', async () => {

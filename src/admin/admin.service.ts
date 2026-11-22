@@ -1,5 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { ProfessionalAccountNoticesService } from '../notifications/professional-account-notices.service';
 import { PrismaService } from '../prisma/prisma.service';
+import type { DecideLicenseDto } from './dto/decide-license.dto';
+import type { LicenseQueueStatus } from './dto/license-queue-query.dto';
 
 /** El administrador que entra al panel. */
 export interface AdminProfile {
@@ -8,15 +15,52 @@ export interface AdminProfile {
   role: 'ADMINISTRADOR';
 }
 
+/** Un profesional en la cola de matrículas (ENG-192). */
+export interface LicenseQueueItem {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  licenseNumber: string;
+  specialties: string[];
+  /** ISO-8601: cuándo se registró. */
+  registeredAt: string;
+  status: LicenseQueueStatus;
+  /**
+   * La última decisión sobre la matrícula, leída de `audit_logs`. `null` en un
+   * pendiente, o en uno que se validó antes de que existiera el panel (por SQL o
+   * por el seed).
+   */
+  decision: { at: string; reason: string | null } | null;
+}
+
+/** Acciones de auditoría de la matrícula. `origin` dice quién decidió. */
+export const LICENSE_AUDIT_ACTIONS = {
+  VALIDADO: 'PROFESSIONAL_LICENSE_VALIDATED',
+  RECHAZADO: 'PROFESSIONAL_LICENSE_REJECTED',
+} as const;
+
 /**
- * Lógica del panel del administrador (ENG-220). Por ahora solo identifica a
- * quién entra; la validación de matrículas (ENG-192), el listado y la
- * suspensión de profesionales (ENG-241) y el panel de plataforma (ENG-195) se
- * suman acá.
+ * Quién decidió. Hoy siempre el administrador; la validación automática
+ * (ENG-218) va a sumar `'AUTOMATICA'`, y esta cola queda como respaldo de lo
+ * que la automática no pueda resolver.
+ */
+export const LICENSE_DECISION_ORIGIN = 'ADMINISTRADOR';
+
+/** Tope de la cola: es un equipo chico revisando altas, no un listado masivo. */
+export const LICENSE_QUEUE_LIMIT = 200;
+
+/**
+ * Lógica del panel del administrador (ENG-220). Por ahora: quién entra
+ * (ENG-240) y la validación de matrículas (ENG-192). El listado y la suspensión
+ * de profesionales (ENG-241) y el panel de plataforma (ENG-195) se suman acá.
  */
 @Injectable()
 export class AdminService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notices: ProfessionalAccountNoticesService,
+  ) {}
 
   async profile(userId: string): Promise<AdminProfile> {
     const profile = await this.prisma.profile.findUnique({
@@ -28,5 +72,150 @@ export class AdminService {
       throw new NotFoundException('No se encontró el perfil del usuario.');
     }
     return { id: profile.id, email: profile.email, role: 'ADMINISTRADOR' };
+  }
+
+  /**
+   * Los profesionales en un estado de matrícula. Los pendientes, del más viejo
+   * al más nuevo: el que más esperó va primero. Los decididos, de la decisión
+   * más nueva a la más vieja.
+   */
+  async licenseQueue(status: LicenseQueueStatus): Promise<LicenseQueueItem[]> {
+    const pending = status === 'PENDIENTE_VALIDACION_MATRICULA';
+    const rows = await this.prisma.professional.findMany({
+      where: { status, profile: { deleted_at: null } },
+      select: {
+        profile_id: true,
+        first_name: true,
+        last_name: true,
+        license_number: true,
+        created_at: true,
+        status: true,
+        profile: { select: { email: true } },
+        specialties: { select: { specialty: { select: { name: true } } } },
+      },
+      orderBy: [
+        { created_at: pending ? 'asc' : 'desc' },
+        { profile_id: 'asc' },
+      ],
+      take: LICENSE_QUEUE_LIMIT,
+    });
+
+    const decisions = pending
+      ? new Map<string, LicenseQueueItem['decision']>()
+      : await this.lastDecisions(
+          rows.map((r) => r.profile_id),
+          status,
+        );
+
+    const items: LicenseQueueItem[] = rows.map((row) => ({
+      id: row.profile_id,
+      firstName: row.first_name,
+      lastName: row.last_name,
+      email: row.profile.email,
+      licenseNumber: row.license_number,
+      specialties: row.specialties.map((s) => s.specialty.name).sort(),
+      registeredAt: row.created_at.toISOString(),
+      status: row.status as LicenseQueueStatus,
+      decision: decisions.get(row.profile_id) ?? null,
+    }));
+
+    if (!pending) {
+      // La decisión más nueva primero; los que no tienen (validados por SQL o por
+      // el seed) quedan al final, por fecha de alta.
+      items.sort((a, b) => {
+        if (a.decision && b.decision) {
+          return b.decision.at.localeCompare(a.decision.at);
+        }
+        if (a.decision) return -1;
+        if (b.decision) return 1;
+        return b.registeredAt.localeCompare(a.registeredAt);
+      });
+    }
+    return items;
+  }
+
+  /**
+   * Valida o rechaza la matrícula de un profesional pendiente.
+   *
+   * Un `updateMany` condicionado al estado pendiente es el árbitro: si dos
+   * administradores deciden a la vez, uno gana y el otro recibe 409, y nunca
+   * quedan dos decisiones. El cambio y la auditoría van en la misma
+   * transacción. El mail sale después y no deshace la decisión si falla.
+   */
+  async decideLicense(
+    adminId: string,
+    professionalId: string,
+    dto: DecideLicenseDto,
+    now: Date = new Date(),
+  ): Promise<{ id: string; status: 'VALIDADO' | 'RECHAZADO' }> {
+    const reason = dto.reason?.trim() || null;
+
+    await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.professional.updateMany({
+        where: {
+          profile_id: professionalId,
+          status: 'PENDIENTE_VALIDACION_MATRICULA',
+          profile: { deleted_at: null },
+        },
+        data: { status: dto.decision, updated_at: now },
+      });
+      if (count === 0) {
+        const exists = await tx.professional.findUnique({
+          where: { profile_id: professionalId },
+          select: { status: true },
+        });
+        if (!exists) {
+          throw new NotFoundException('No encontramos ese profesional.');
+        }
+        throw new ConflictException(
+          'La matrícula de ese profesional ya tiene una decisión.',
+        );
+      }
+
+      await tx.auditLog.create({
+        data: {
+          actor_id: adminId,
+          action: LICENSE_AUDIT_ACTIONS[dto.decision],
+          resource_type: 'professionals',
+          resource_id: professionalId,
+          metadata: {
+            origin: LICENSE_DECISION_ORIGIN,
+            previousStatus: 'PENDIENTE_VALIDACION_MATRICULA',
+            ...(reason ? { reason } : {}),
+          },
+        },
+      });
+    });
+
+    await this.notices.licenseDecided(professionalId, dto.decision, reason);
+    return { id: professionalId, status: dto.decision };
+  }
+
+  /** La decisión más reciente de cada profesional, de `audit_logs`. */
+  private async lastDecisions(
+    professionalIds: string[],
+    status: 'VALIDADO' | 'RECHAZADO',
+  ): Promise<Map<string, LicenseQueueItem['decision']>> {
+    const decisions = new Map<string, LicenseQueueItem['decision']>();
+    if (professionalIds.length === 0) return decisions;
+
+    const logs = await this.prisma.auditLog.findMany({
+      where: {
+        resource_type: 'professionals',
+        resource_id: { in: professionalIds },
+        action: LICENSE_AUDIT_ACTIONS[status],
+      },
+      select: { resource_id: true, created_at: true, metadata: true },
+      orderBy: { created_at: 'desc' },
+    });
+    for (const log of logs) {
+      if (!log.resource_id || decisions.has(log.resource_id)) continue;
+      const metadata = log.metadata as { reason?: unknown } | null;
+      decisions.set(log.resource_id, {
+        at: log.created_at.toISOString(),
+        reason: typeof metadata?.reason === 'string' ? metadata.reason : null,
+      });
+    }
+    return decisions;
   }
 }

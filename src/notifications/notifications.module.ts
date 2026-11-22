@@ -5,6 +5,7 @@ import { InAppNotificationsService } from './in-app-notifications.service';
 import { NotificationsController } from './notifications.controller';
 import { PushTokensController } from './push-tokens.controller';
 import { PatientNoticesService } from './patient-notices.service';
+import { ProfessionalAccountNoticesService } from './professional-account-notices.service';
 import { PushService } from './push.service';
 
 /**
@@ -23,12 +24,14 @@ import { PushService } from './push.service';
     AppointmentNotificationsService,
     InAppNotificationsService,
     PatientNoticesService,
+    ProfessionalAccountNoticesService,
     PushService,
   ],
   exports: [
     AppointmentNotificationsService,
     InAppNotificationsService,
     PatientNoticesService,
+    ProfessionalAccountNoticesService,
     PushService,
   ],
 })
