@@ -61,6 +61,23 @@ describe('patientNoticeText (ENG-204)', () => {
     expect(body).toContain('Lo estamos procesando');
   });
 
+  it('reembolso porque el profesional fue suspendido (ENG-241)', () => {
+    const { title, body } = patientNoticeText('REEMBOLSO_TOTAL', {
+      professional: 'Ana Pérez',
+      amount: 15000,
+      cause: 'SUSPENDIDO',
+      refundStatus: 'PROCESADO',
+    });
+
+    expect(title).toBe('Te devolvemos el 100 %');
+    expect(body).toContain('Ana Pérez dejó de atender por MediConnect');
+    expect(body).toContain('te devolvemos $ 15.000 (el 100 %)');
+    // La causa sobrevive al guardarse en el payload del aviso.
+    expect(noticeDataFromPayload({ cause: 'SUSPENDIDO' }).cause).toBe(
+      'SUSPENDIDO',
+    );
+  });
+
   it('sin datos sale un texto genérico, nunca "undefined"', () => {
     for (const type of [
       'TURNO_CANCELADO_PROFESIONAL',

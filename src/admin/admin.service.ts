@@ -3,10 +3,21 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import type { Prisma } from '../../generated/prisma/client';
 import { ProfessionalAccountNoticesService } from '../notifications/professional-account-notices.service';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  DEFAULT_STATS_MONTHS,
+  ProfessionalStatsService,
+  type ProfessionalStats,
+} from '../professionals/professional-stats.service';
 import type { DecideLicenseDto } from './dto/decide-license.dto';
 import type { LicenseQueueStatus } from './dto/license-queue-query.dto';
+import {
+  ADMIN_PROFESSIONALS_PAGE_SIZE,
+  type ListProfessionalsAdminQueryDto,
+  type ProfessionalStatus,
+} from './dto/list-professionals-query.dto';
 
 /** El administrador que entra al panel. */
 export interface AdminProfile {
@@ -34,6 +45,60 @@ export interface LicenseQueueItem {
   decision: { at: string; reason: string | null } | null;
 }
 
+/** Un profesional en el listado del administrador (ENG-241). */
+export interface AdminProfessionalRow {
+  id: string;
+  firstName: string;
+  lastName: string;
+  licenseNumber: string;
+  specialties: string[];
+  status: ProfessionalStatus;
+  /** ISO-8601: cuándo se registró. */
+  registeredAt: string;
+  /**
+   * La actividad de los últimos `DEFAULT_STATS_MONTHS` meses, como en "Mi
+   * actividad", y la calificación de todas sus reseñas publicadas.
+   */
+  activity: {
+    completed: number;
+    /** Cancelaciones, ausencias y fallas técnicas (ENG-237). */
+    incidents: number;
+    rating: number | null;
+    reviews: number;
+  };
+}
+
+export interface AdminProfessionalPage {
+  items: AdminProfessionalRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+/** El detalle de un profesional para el administrador (ENG-241). */
+export interface AdminProfessionalDetail {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  licenseNumber: string;
+  specialties: string[];
+  status: ProfessionalStatus;
+  registeredAt: string;
+  /** Lo que el paciente ve en el catálogo: sin precio no se le puede reservar. */
+  consultationPrice: number | null;
+  currency: string;
+  /** La misma actividad que el profesional ve en "Mi actividad". */
+  stats: ProfessionalStats;
+}
+
+/** Las acciones de auditoría que cuentan como incidencias, como en "Mi actividad". */
+const INCIDENT_ACTIONS = [
+  'APPOINTMENT_CANCELLED_BY_PROFESSIONAL',
+  'APPOINTMENT_PROFESSIONAL_NO_SHOW',
+  'APPOINTMENT_TECHNICAL_FAILURE',
+];
+
 /** Acciones de auditoría de la matrícula. `origin` dice quién decidió. */
 export const LICENSE_AUDIT_ACTIONS = {
   VALIDADO: 'PROFESSIONAL_LICENSE_VALIDATED',
@@ -51,15 +116,16 @@ export const LICENSE_DECISION_ORIGIN = 'ADMINISTRADOR';
 export const LICENSE_QUEUE_LIMIT = 200;
 
 /**
- * Lógica del panel del administrador (ENG-220). Por ahora: quién entra
- * (ENG-240) y la validación de matrículas (ENG-192). El listado y la suspensión
- * de profesionales (ENG-241) y el panel de plataforma (ENG-195) se suman acá.
+ * Lógica del panel del administrador (ENG-220): quién entra (ENG-240), la
+ * validación de matrículas (ENG-192) y el listado y el detalle de los
+ * profesionales (ENG-241). La suspensión vive en `ProfessionalSuspensionService`.
  */
 @Injectable()
 export class AdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notices: ProfessionalAccountNoticesService,
+    private readonly stats: ProfessionalStatsService,
   ) {}
 
   async profile(userId: string): Promise<AdminProfile> {
@@ -189,6 +255,172 @@ export class AdminService {
 
     await this.notices.licenseDecided(professionalId, dto.decision, reason);
     return { id: professionalId, status: dto.decision };
+  }
+
+  /**
+   * El listado de profesionales (ENG-241): por estado, buscando por nombre o
+   * matrícula, de a `ADMIN_PROFESSIONALS_PAGE_SIZE`, ordenado por apellido. La
+   * actividad se calcula para la página entera de una vez, no profesional por
+   * profesional. Nunca devuelve datos de pacientes.
+   */
+  async listProfessionals(
+    query: ListProfessionalsAdminQueryDto,
+    now: Date = new Date(),
+  ): Promise<AdminProfessionalPage> {
+    const page = query.page ?? 1;
+    const q = query.q?.trim();
+    const where: Prisma.ProfessionalWhereInput = {
+      profile: { deleted_at: null },
+      ...(query.status ? { status: query.status } : {}),
+      ...(q
+        ? {
+            OR: [
+              { first_name: { contains: q, mode: 'insensitive' } },
+              { last_name: { contains: q, mode: 'insensitive' } },
+              { license_number: { contains: q, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+
+    const [total, rows] = await Promise.all([
+      this.prisma.professional.count({ where }),
+      this.prisma.professional.findMany({
+        where,
+        select: {
+          profile_id: true,
+          first_name: true,
+          last_name: true,
+          license_number: true,
+          status: true,
+          created_at: true,
+          specialties: { select: { specialty: { select: { name: true } } } },
+        },
+        orderBy: [
+          { last_name: 'asc' },
+          { first_name: 'asc' },
+          { profile_id: 'asc' },
+        ],
+        skip: (page - 1) * ADMIN_PROFESSIONALS_PAGE_SIZE,
+        take: ADMIN_PROFESSIONALS_PAGE_SIZE,
+      }),
+    ]);
+
+    const activity = await this.activityOf(
+      rows.map((r) => r.profile_id),
+      now,
+    );
+    return {
+      items: rows.map((row) => ({
+        id: row.profile_id,
+        firstName: row.first_name,
+        lastName: row.last_name,
+        licenseNumber: row.license_number,
+        specialties: row.specialties.map((sp) => sp.specialty.name).sort(),
+        status: row.status,
+        registeredAt: row.created_at.toISOString(),
+        activity: activity.get(row.profile_id) ?? {
+          completed: 0,
+          incidents: 0,
+          rating: null,
+          reviews: 0,
+        },
+      })),
+      total,
+      page,
+      pageSize: ADMIN_PROFESSIONALS_PAGE_SIZE,
+    };
+  }
+
+  /** El detalle de un profesional, con la misma actividad que "Mi actividad". */
+  async professionalDetail(
+    professionalId: string,
+    now: Date = new Date(),
+  ): Promise<AdminProfessionalDetail> {
+    const row = await this.prisma.professional.findUnique({
+      where: { profile_id: professionalId },
+      select: {
+        profile_id: true,
+        first_name: true,
+        last_name: true,
+        license_number: true,
+        status: true,
+        created_at: true,
+        consultation_price: true,
+        currency: true,
+        profile: { select: { email: true, deleted_at: true } },
+        specialties: { select: { specialty: { select: { name: true } } } },
+      },
+    });
+    if (!row || row.profile.deleted_at) {
+      throw new NotFoundException('No encontramos ese profesional.');
+    }
+    return {
+      id: row.profile_id,
+      firstName: row.first_name,
+      lastName: row.last_name,
+      email: row.profile.email,
+      licenseNumber: row.license_number,
+      specialties: row.specialties.map((sp) => sp.specialty.name).sort(),
+      status: row.status,
+      registeredAt: row.created_at.toISOString(),
+      consultationPrice:
+        row.consultation_price === null ? null : Number(row.consultation_price),
+      currency: row.currency,
+      stats: await this.stats.get(professionalId, {}, now),
+    };
+  }
+
+  /** La actividad de varios profesionales en tres consultas, no en N. */
+  private async activityOf(
+    ids: string[],
+    now: Date,
+  ): Promise<Map<string, AdminProfessionalRow['activity']>> {
+    const result = new Map<string, AdminProfessionalRow['activity']>();
+    if (ids.length === 0) return result;
+    const from = new Date(now);
+    from.setUTCMonth(from.getUTCMonth() - DEFAULT_STATS_MONTHS);
+
+    const [completed, incidents, reviews] = await Promise.all([
+      this.prisma.appointment.groupBy({
+        by: ['professional_id'],
+        where: {
+          professional_id: { in: ids },
+          status: 'COMPLETADO',
+          scheduled_at: { gte: from, lte: now },
+        },
+        _count: { _all: true },
+      }),
+      this.prisma.$queryRaw<{ professional_id: string; n: number }[]>`
+        select a.professional_id, count(*)::int as n
+          from public.audit_logs l
+          join public.appointments a on a.id = l.resource_id
+         where l.resource_type = 'appointments'
+           and l.action = any(${INCIDENT_ACTIONS}::text[])
+           and l.created_at >= ${from}
+           and a.professional_id = any(${ids}::uuid[])
+         group by a.professional_id`,
+      this.prisma.review.groupBy({
+        by: ['professional_id'],
+        where: { professional_id: { in: ids }, status: 'APROBADA' },
+        _avg: { rating: true },
+        _count: { _all: true },
+      }),
+    ]);
+
+    for (const id of ids) {
+      const done = completed.find((c) => c.professional_id === id);
+      const inc = incidents.find((i) => i.professional_id === id);
+      const rev = reviews.find((r) => r.professional_id === id);
+      const avg = rev?._avg.rating;
+      result.set(id, {
+        completed: done?._count._all ?? 0,
+        incidents: inc?.n ?? 0,
+        rating: avg == null ? null : Math.round(avg * 10) / 10,
+        reviews: rev?._count._all ?? 0,
+      });
+    }
+    return result;
   }
 
   /** La decisión más reciente de cada profesional, de `audit_logs`. */

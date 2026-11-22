@@ -20,6 +20,7 @@ describe('Administración (e2e)', () => {
   const findUnique = jest.fn();
   const professionalFindMany = jest.fn();
   const professionalUpdateMany = jest.fn();
+  const professionalCount = jest.fn();
   const auditCreate = jest.fn();
 
   beforeAll(async () => {
@@ -30,6 +31,7 @@ describe('Administración (e2e)', () => {
     findUnique.mockReset();
     professionalFindMany.mockReset().mockResolvedValue([]);
     professionalUpdateMany.mockReset().mockResolvedValue({ count: 1 });
+    professionalCount.mockReset().mockResolvedValue(0);
     auditCreate.mockReset().mockResolvedValue({});
     const prismaMock = {
       ...legalAcceptedPrismaMock(),
@@ -38,6 +40,7 @@ describe('Administración (e2e)', () => {
         findMany: professionalFindMany,
         updateMany: professionalUpdateMany,
         findUnique: jest.fn(),
+        count: professionalCount,
       },
       auditLog: {
         create: auditCreate,
@@ -214,6 +217,61 @@ describe('Administración (e2e)', () => {
         .set('Authorization', `Bearer ${await signToken()}`)
         .send({ decision: 'VALIDADO' })
         .expect(400);
+    });
+  });
+
+  describe('profesionales y suspensión (ENG-241)', () => {
+    const PRO = '22222222-2222-4222-8222-222222222222';
+
+    it('el listado responde la página, y "licenses" no se confunde con un id', async () => {
+      findUnique.mockResolvedValue(perfil('ADMINISTRADOR'));
+      professionalCount.mockResolvedValue(0);
+
+      await request(app.getHttpServer())
+        .get('/admin/professionals?status=SUSPENDIDO&q=ana&page=1')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(200)
+        .expect({ items: [], total: 0, page: 1, pageSize: 20 });
+      await request(app.getHttpServer())
+        .get('/admin/professionals/licenses')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(200);
+    });
+
+    it('una página que no es un número da 400', async () => {
+      findUnique.mockResolvedValue(perfil('ADMINISTRADOR'));
+
+      await request(app.getHttpServer())
+        .get('/admin/professionals?page=cero')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(400);
+    });
+
+    it('suspender sin motivo da 400 y no toca nada', async () => {
+      findUnique.mockResolvedValue(perfil('ADMINISTRADOR'));
+
+      await request(app.getHttpServer())
+        .patch(`/admin/professionals/${PRO}/suspension`)
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({ reason: 'corto' })
+        .expect(400);
+      expect(professionalUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('un paciente no puede suspender ni ver el listado: 403', async () => {
+      findUnique.mockResolvedValue(perfil('PACIENTE'));
+      const token = await signToken();
+
+      await request(app.getHttpServer())
+        .get('/admin/professionals')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+      await request(app.getHttpServer())
+        .patch(`/admin/professionals/${PRO}/suspension`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ reason: 'Un motivo cualquiera de prueba.' })
+        .expect(403);
+      expect(professionalUpdateMany).not.toHaveBeenCalled();
     });
   });
 

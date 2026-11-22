@@ -44,7 +44,9 @@ export type FullRefundCause =
   /** El paciente eligió el reembolso. */
   | 'ELEGIDO'
   /** Venció el plazo para elegir (caso 2). */
-  | 'VENCIDO';
+  | 'VENCIDO'
+  /** El administrador suspendió al profesional (ENG-241): ya no atiende. */
+  | 'SUSPENDIDO';
 
 export interface PatientNoticeData {
   professional?: string;
@@ -164,7 +166,9 @@ export function patientNoticeText(
   const lead =
     data.cause === 'VENCIDO'
       ? `Venció el plazo para elegir un horario nuevo para tu turno${conPro}${del}, así que ${devolvemos}.`
-      : `Pediste el reembolso de tu turno${conPro}${del}: ${devolvemos}.`;
+      : data.cause === 'SUSPENDIDO'
+        ? `${data.professional ?? 'El profesional'} dejó de atender por MediConnect, así que cancelamos tu turno${del} y ${devolvemos}.`
+        : `Pediste el reembolso de tu turno${conPro}${del}: ${devolvemos}.`;
   return {
     title: 'Te devolvemos el 100 %',
     body: `${lead}${refundSuffix(data.refundStatus)}`,
@@ -223,7 +227,10 @@ export function noticeDataFromPayload(payload: unknown): PatientNoticeData {
     deadline: str(p.deadline),
     amount: typeof p.amount === 'number' ? p.amount : undefined,
     currency: str(p.currency),
-    cause: cause === 'ELEGIDO' || cause === 'VENCIDO' ? cause : undefined,
+    cause:
+      cause === 'ELEGIDO' || cause === 'VENCIDO' || cause === 'SUSPENDIDO'
+        ? cause
+        : undefined,
     refundStatus: str(p.refundStatus),
     percent: typeof p.percent === 'number' ? p.percent : undefined,
     reprogramCause:
