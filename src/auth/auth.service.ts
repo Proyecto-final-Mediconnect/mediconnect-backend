@@ -37,15 +37,27 @@ export const RECOVERY_LINK_CONSUMED_CODE = 'RECOVERY_LINK_CONSUMED';
 
 const NEW_LINK_HINT = 'Por seguridad, este enlace ya no sirve: pedí uno nuevo.';
 
+/** La web, sin la barra final. */
+function webOrigin(): string {
+  return (process.env.WEB_ORIGIN ?? 'http://localhost:5173').replace(
+    /\/+$/,
+    '',
+  );
+}
+
 /** Adónde lleva el enlace del mail de recuperación. El template de Supabase
  *  arma `{{ .RedirectTo }}?token_hash=…&type=recovery` sobre esta URL, que
  *  tiene que estar en las Redirect URLs del proyecto. */
 function passwordResetRedirectUrl(): string {
-  const webOrigin = (process.env.WEB_ORIGIN ?? 'http://localhost:5173').replace(
-    /\/+$/,
-    '',
-  );
-  return `${webOrigin}/restablecer-contrasena`;
+  return `${webOrigin()}/restablecer-contrasena`;
+}
+
+/** Adónde vuelve el link del mail de verificación del registro: al ingreso de
+ *  la web. Sin esto Supabase usa la "Site URL" del proyecto, y si quedó en
+ *  localhost el link verifica la cuenta pero termina en una página que no
+ *  carga. Tiene que estar en las Redirect URLs del proyecto. */
+function signupRedirectUrl(): string {
+  return `${webOrigin()}/ingresar`;
 }
 
 @Injectable()
@@ -148,6 +160,7 @@ export class AuthService {
     const { data, error } = await this.supabase.getClient().auth.signUp({
       email: dto.email,
       password: dto.password,
+      options: { emailRedirectTo: signupRedirectUrl() },
     });
 
     if (error) {
@@ -186,6 +199,7 @@ export class AuthService {
       email: dto.email,
       password: dto.password,
       options: {
+        emailRedirectTo: signupRedirectUrl(),
         data: {
           role: 'PROFESIONAL',
           first_name: dto.firstName,
