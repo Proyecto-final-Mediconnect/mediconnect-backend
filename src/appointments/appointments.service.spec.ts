@@ -86,6 +86,7 @@ describe('AppointmentsService', () => {
     professional: { findFirst: jest.Mock; findMany: jest.Mock };
     patient: { findMany: jest.Mock };
     refund: { findMany: jest.Mock };
+    cancellationPolicy: { findMany: jest.Mock };
     scheduleRule: { findMany: jest.Mock };
     scheduleBlock: { findMany: jest.Mock };
     appointment: { findMany: jest.Mock; update: jest.Mock; create: jest.Mock };
@@ -134,6 +135,7 @@ describe('AppointmentsService', () => {
         ]),
       },
       refund: { findMany: jest.fn().mockResolvedValue([]) },
+      cancellationPolicy: { findMany: jest.fn().mockResolvedValue([]) },
       scheduleRule: { findMany: jest.fn().mockResolvedValue([RULE_ROW]) },
       scheduleBlock: { findMany: jest.fn().mockResolvedValue([]) },
       appointment: {
@@ -520,6 +522,86 @@ describe('AppointmentsService', () => {
   });
 
   describe('listMine', () => {
+    // ENG-229: los plazos vienen calculados, así web y mobile no repiten reglas.
+    describe('plazos del turno', () => {
+      it('uno sin pagar trae hasta cuándo pagarlo, la sala y el cierre manual', async () => {
+        results = [
+          {
+            data: [{ ...INSERTED_ROW, created_at: '2026-08-17T10:00:00.000Z' }],
+            error: null,
+          },
+        ];
+
+        const [view] = await service.listMine(TOKEN, PATIENT_ID);
+
+        expect(view).toMatchObject({
+          paymentDueAt: '2026-08-17T10:15:00.000Z',
+          joinOpensAt: '2026-08-17T12:50:00.000Z',
+          // 13:00 + 30 min de turno + 15 de tolerancia.
+          joinClosesAt: '2026-08-17T13:45:00.000Z',
+          manualCloseUntil: '2026-08-18T13:30:00.000Z',
+          fullRefundUntil: null,
+        });
+      });
+
+      it('uno confirmado no tiene plazo de pago y trae la devolución total con su política congelada', async () => {
+        results = [
+          {
+            data: [
+              {
+                ...INSERTED_ROW,
+                status: 'CONFIRMADO',
+                created_at: '2026-08-17T10:00:00.000Z',
+                policy_hours_full_refund: 20,
+                policy_hours_partial_refund: 12,
+                policy_partial_refund_percent: 50,
+              },
+            ],
+            error: null,
+          },
+        ];
+
+        const [view] = await service.listMine(TOKEN, PATIENT_ID);
+
+        expect(view.paymentDueAt).toBeNull();
+        expect(view.fullRefundUntil).toBe('2026-08-16T17:00:00.000Z');
+        expect(prisma.cancellationPolicy.findMany).not.toHaveBeenCalled();
+      });
+
+      it('uno confirmado de antes de ENG-65 usa la política vigente del profesional', async () => {
+        results = [
+          { data: [{ ...INSERTED_ROW, status: 'CONFIRMADO' }], error: null },
+        ];
+        prisma.cancellationPolicy.findMany.mockResolvedValue([
+          {
+            professional_id: PRO_ID,
+            hours_full_refund: 12,
+            hours_partial_refund: 6,
+            partial_refund_percent: 50,
+          },
+        ]);
+
+        const [view] = await service.listMine(TOKEN, PATIENT_ID);
+
+        expect(view.fullRefundUntil).toBe('2026-08-17T01:00:00.000Z');
+        expect(prisma.cancellationPolicy.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { professional_id: { in: [PRO_ID] } },
+          }),
+        );
+      });
+
+      it('sin política propia ni congelada, la del default (24 h)', async () => {
+        results = [
+          { data: [{ ...INSERTED_ROW, status: 'CONFIRMADO' }], error: null },
+        ];
+
+        const [view] = await service.listMine(TOKEN, PATIENT_ID);
+
+        expect(view.fullRefundUntil).toBe('2026-08-16T13:00:00.000Z');
+      });
+    });
+
     it('devuelve los turnos con los nombres resueltos', async () => {
       results = [{ data: [INSERTED_ROW], error: null }];
 

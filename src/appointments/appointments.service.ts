@@ -38,9 +38,14 @@ import { holdExpiresAt, UNPAID_HOLD_MS } from './unpaid-hold';
 import { CancellationPolicyService } from '../professionals/cancellation-policy.service';
 import {
   CancellationPolicy,
+  DEFAULT_CANCELLATION_POLICY,
+  fullRefundUntil,
   refundPercentFor,
   resolvePolicy,
 } from '../professionals/cancellation-policy';
+import { joinWindowFor } from '../video/consultation.config';
+import { MANUAL_CLOSE_HOURS_AFTER } from './manual-close';
+import { PLATFORM_CURRENCY } from '../common/currency';
 import { UnpaidReleaseService } from './unpaid-release.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { PatientNoticesService } from '../notifications/patient-notices.service';
@@ -121,6 +126,28 @@ interface FrozenPolicyColumns {
   policy_partial_refund_percent: number | null;
 }
 
+/** Las columnas de la política congelada de un turno leído con Prisma. */
+function frozenPolicyOf(row: FrozenPolicyColumns): FrozenPolicyColumns {
+  return {
+    policy_hours_full_refund: row.policy_hours_full_refund,
+    policy_hours_partial_refund: row.policy_hours_partial_refund,
+    policy_partial_refund_percent: row.policy_partial_refund_percent,
+  };
+}
+
+/** La política congelada en la fila, si el turno la tiene (ENG-65). */
+function frozenPolicy(row: {
+  policy_hours_full_refund?: number | null;
+  policy_hours_partial_refund?: number | null;
+  policy_partial_refund_percent?: number | null;
+}) {
+  return resolvePolicy({
+    hours_full_refund: row.policy_hours_full_refund ?? null,
+    hours_partial_refund: row.policy_hours_partial_refund ?? null,
+    partial_refund_percent: row.policy_partial_refund_percent ?? null,
+  });
+}
+
 /** Datos del profesional que ve el paciente en la pantalla de reserva. */
 export interface BookableProfessional {
   id: string;
@@ -188,6 +215,29 @@ export interface AppointmentView {
    * parcial, uno pendiente o uno rechazado no se veían.
    */
   refundState: AppointmentRefundState | null;
+  /**
+   * ENG-229: los plazos del turno, calculados acá para que la web y la app no
+   * repitan las reglas. Todos en ISO-8601.
+   *
+   * Hasta cuándo se puede pagar un turno `RESERVADO_SIN_PAGAR` antes de que se
+   * libere el horario (ENG-101); `null` en cualquier otro estado.
+   */
+  paymentDueAt: string | null;
+  /** Desde y hasta cuándo se puede entrar a la videoconsulta (ENG-56). */
+  joinOpensAt: string;
+  joinClosesAt: string;
+  /**
+   * Hasta cuándo el profesional puede cerrar el turno a mano o informar una
+   * falla técnica (ENG-189, ENG-237).
+   */
+  manualCloseUntil: string;
+  /**
+   * Hasta cuándo cancelar devuelve el 100 %: un turno `CONFIRMADO` se puede
+   * reprogramar hasta acá (ENG-66). Con la política congelada al reservar, o la
+   * vigente del profesional si el turno es anterior. `null` si el turno no está
+   * confirmado.
+   */
+  fullRefundUntil: string | null;
 }
 
 /** El reembolso de un turno, tal como quedó registrado. */
@@ -219,13 +269,15 @@ interface AppointmentRow {
   cancellation_reason?: string | null;
   reprogram_deadline?: string | null;
   reprogram_cause?: string | null;
+  policy_hours_full_refund?: number | null;
+  policy_hours_partial_refund?: number | null;
+  policy_partial_refund_percent?: number | null;
 }
 
 /** Estados en los que un turno pago puede haber tenido un reembolso (ENG-174). */
 const ESTADOS_CON_REEMBOLSO = new Set(['CANCELADO', 'LIBERADO']);
 
-const APPOINTMENT_SELECT =
-  'id, patient_id, professional_id, scheduled_at, duration_minutes, price, status, created_at, cancelled_at, rescheduled_at, cancelled_by, cancellation_reason, reprogram_deadline, reprogram_cause';
+const APPOINTMENT_SELECT = `id, patient_id, professional_id, scheduled_at, duration_minutes, price, status, created_at, cancelled_at, rescheduled_at, cancelled_by, cancellation_reason, reprogram_deadline, reprogram_cause, ${FROZEN_POLICY_COLUMNS}`;
 
 @Injectable()
 export class AppointmentsService {
@@ -366,6 +418,8 @@ export class AppointmentsService {
       // `Decimal` no es `string | number`; `toString()` conserva los decimales.
       price: created.price.toString(),
       status: created.status,
+      created_at: created.created_at.toISOString(),
+      ...frozenPolicyOf(created),
     };
 
     const [view] = await this.toViews([data], userId);
@@ -481,6 +535,7 @@ export class AppointmentsService {
             reprogram_cause: updated.reprogram_cause,
             reprogram_deadline:
               updated.reprogram_deadline?.toISOString() ?? null,
+            ...frozenPolicyOf(updated),
           },
         ],
         userId,
@@ -665,7 +720,7 @@ export class AppointmentsService {
 
     const { data, error } = await client
       .from('appointments')
-      .select(`${APPOINTMENT_SELECT}, created_at, ${FROZEN_POLICY_COLUMNS}`)
+      .select(APPOINTMENT_SELECT)
       .eq('id', appointmentId)
       .maybeSingle();
 
@@ -876,11 +931,13 @@ export class AppointmentsService {
           duration_minutes: updated.duration_minutes,
           price: updated.price.toString(),
           status: updated.status,
+          created_at: row.created_at ?? null,
           rescheduled_at: updated.rescheduled_at?.toISOString() ?? null,
           cancelled_by: updated.cancelled_by,
           cancellation_reason: updated.cancellation_reason,
           reprogram_cause: updated.reprogram_cause,
           reprogram_deadline: updated.reprogram_deadline?.toISOString() ?? null,
+          ...frozenPolicyOf(updated),
         },
       ],
       userId,
@@ -923,11 +980,7 @@ export class AppointmentsService {
   private async policyOf(
     row: Pick<AppointmentRow, 'professional_id'> & FrozenPolicyColumns,
   ): Promise<CancellationPolicy> {
-    const frozen = resolvePolicy({
-      hours_full_refund: row.policy_hours_full_refund ?? null,
-      hours_partial_refund: row.policy_hours_partial_refund ?? null,
-      partial_refund_percent: row.policy_partial_refund_percent ?? null,
-    });
+    const frozen = frozenPolicy(row);
     return frozen.configured
       ? frozen.policy
       : this.policies.policyFor(row.professional_id);
@@ -1246,34 +1299,66 @@ export class AppointmentsService {
       )
       .map((row) => row.id);
 
-    const [professionals, patients, refunds] = await Promise.all([
-      this.prisma.professional.findMany({
-        where: { profile_id: { in: professionalIds } },
-        select: {
-          profile_id: true,
-          first_name: true,
-          last_name: true,
-          currency: true,
-        },
-      }),
-      this.prisma.patient.findMany({
-        where: { profile_id: { in: patientIds } },
-        select: { profile_id: true, first_name: true, last_name: true },
-      }),
-      caidos.length === 0
-        ? Promise.resolve([])
-        : this.prisma.refund.findMany({
-            where: { payment: { appointment_id: { in: caidos } } },
-            select: {
-              amount: true,
-              status: true,
-              payment: { select: { appointment_id: true } },
-            },
-            // `refunds.payment_id` está indexado (ENG-174) y `caidos` ya es solo
-            // lo que se está listando; el `id` desempata filas del mismo instante.
-            orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
-          }),
-    ]);
+    // La devolución total de un turno confirmado (`fullRefundUntil`) sale de la
+    // política congelada; los turnos anteriores a ENG-65 no la tienen y usan la
+    // vigente del profesional, igual que `policyOf`.
+    const sinPoliticaCongelada = [
+      ...new Set(
+        rows
+          .filter(
+            (row) =>
+              row.status === 'CONFIRMADO' && !frozenPolicy(row).configured,
+          )
+          .map((row) => row.professional_id),
+      ),
+    ];
+
+    const [professionals, patients, refunds, currentPolicies] =
+      await Promise.all([
+        this.prisma.professional.findMany({
+          where: { profile_id: { in: professionalIds } },
+          select: {
+            profile_id: true,
+            first_name: true,
+            last_name: true,
+            currency: true,
+          },
+        }),
+        this.prisma.patient.findMany({
+          where: { profile_id: { in: patientIds } },
+          select: { profile_id: true, first_name: true, last_name: true },
+        }),
+        caidos.length === 0
+          ? Promise.resolve([])
+          : this.prisma.refund.findMany({
+              where: { payment: { appointment_id: { in: caidos } } },
+              select: {
+                amount: true,
+                status: true,
+                payment: { select: { appointment_id: true } },
+              },
+              // `refunds.payment_id` está indexado (ENG-174) y `caidos` ya es solo
+              // lo que se está listando; el `id` desempata filas del mismo instante.
+              orderBy: [{ created_at: 'desc' }, { id: 'desc' }],
+            }),
+        sinPoliticaCongelada.length === 0
+          ? Promise.resolve([])
+          : this.prisma.cancellationPolicy.findMany({
+              where: { professional_id: { in: sinPoliticaCongelada } },
+              select: {
+                professional_id: true,
+                hours_full_refund: true,
+                hours_partial_refund: true,
+                partial_refund_percent: true,
+              },
+            }),
+      ]);
+    const currentPolicyById = new Map(
+      currentPolicies.map((row) => [
+        row.professional_id,
+        resolvePolicy(row).policy,
+      ]),
+    );
 
     // Con más de un reembolso por turno (parciales, ENG-144) se suma lo devuelto.
     // El estado agregado es el que todavía requiere atención: un pendiente manda
@@ -1332,6 +1417,13 @@ export class AppointmentsService {
     return rows.map((row) => {
       const scheduledAt = new Date(row.scheduled_at);
       const { date, startTime } = toLocalDateTime(scheduledAt);
+      const join = joinWindowFor(scheduledAt, row.duration_minutes);
+      const end = scheduledAt.getTime() + row.duration_minutes * 60_000;
+      const frozen = frozenPolicy(row);
+      const policy = frozen.configured
+        ? frozen.policy
+        : (currentPolicyById.get(row.professional_id) ??
+          DEFAULT_CANCELLATION_POLICY);
 
       return {
         id: row.id,
@@ -1340,7 +1432,7 @@ export class AppointmentsService {
         startTime,
         durationMinutes: row.duration_minutes,
         price: Number(row.price),
-        currency: currencyById.get(row.professional_id) ?? 'ARS',
+        currency: currencyById.get(row.professional_id) ?? PLATFORM_CURRENCY,
         status: row.status,
         professional: professionalById.get(row.professional_id) ?? null,
         patient: patientById.get(row.patient_id) ?? null,
@@ -1357,6 +1449,19 @@ export class AppointmentsService {
             ? isoOrNull(row.reprogram_deadline)
             : null,
         refundState: refundById.get(row.id) ?? null,
+        paymentDueAt:
+          row.status === 'RESERVADO_SIN_PAGAR' && row.created_at
+            ? holdExpiresAt(new Date(row.created_at)).toISOString()
+            : null,
+        joinOpensAt: join.opensAt.toISOString(),
+        joinClosesAt: join.closesAt.toISOString(),
+        manualCloseUntil: new Date(
+          end + MANUAL_CLOSE_HOURS_AFTER * 3_600_000,
+        ).toISOString(),
+        fullRefundUntil:
+          row.status === 'CONFIRMADO'
+            ? fullRefundUntil(policy, scheduledAt).toISOString()
+            : null,
       };
     });
   }

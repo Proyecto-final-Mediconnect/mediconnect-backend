@@ -10,6 +10,7 @@ import type { appointment_status } from '../../generated/prisma';
 import { Prisma } from '../../generated/prisma/client';
 import { APPOINTMENT_SELECT, type AppointmentRow } from './appointment-row';
 import { resetAttendance } from './attendance-reset';
+import { MANUAL_CLOSE_HOURS_AFTER } from './manual-close';
 import { reprogramDeadlineAfterMissed } from './professional-cancellation.service';
 import { InAppNotificationsService } from '../notifications/in-app-notifications.service';
 import { PatientNoticesService } from '../notifications/patient-notices.service';
@@ -44,9 +45,7 @@ import {
 export const PROFESSIONAL_NO_SHOW_REASON =
   'El profesional no se conectó a la consulta.';
 
-/** Cuánto después del final del turno el profesional todavía puede cerrarlo a
- *  mano. Pasado eso, el turno lo cerró el job o queda como está. */
-export const MANUAL_CLOSE_HOURS_AFTER = 24;
+export { MANUAL_CLOSE_HOURS_AFTER } from './manual-close';
 
 export type ClosedStatus = 'COMPLETADO' | 'NO_ASISTIO';
 
