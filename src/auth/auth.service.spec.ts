@@ -222,8 +222,33 @@ describe('AuthService', () => {
     expect(signUp).toHaveBeenCalledWith({
       email: dto.email,
       password: dto.password,
+      options: { emailRedirectTo: 'http://localhost:5173/ingresar' },
     });
     expect(result.message).toContain('Revisá tu email');
+  });
+
+  it('el link del mail de verificación vuelve a la web de WEB_ORIGIN, no a la Site URL de Supabase', async () => {
+    const anterior = process.env.WEB_ORIGIN;
+    process.env.WEB_ORIGIN = 'https://mediconnect.example.com/';
+    try {
+      signUp.mockResolvedValue({
+        data: { user: { identities: [{ id: 'abc' }] } },
+        error: null,
+      });
+
+      await service.registerPatient(dto, ctx);
+
+      expect(signUp).toHaveBeenCalledWith(
+        expect.objectContaining({
+          options: {
+            emailRedirectTo: 'https://mediconnect.example.com/ingresar',
+          },
+        }),
+      );
+    } finally {
+      if (anterior === undefined) delete process.env.WEB_ORIGIN;
+      else process.env.WEB_ORIGIN = anterior;
+    }
   });
 
   it('devuelve el MISMO mensaje si el email ya existe (identities vacío, sin filtrar info)', async () => {
@@ -283,6 +308,7 @@ describe('AuthService', () => {
       email: proDto.email,
       password: proDto.password,
       options: {
+        emailRedirectTo: 'http://localhost:5173/ingresar',
         data: {
           role: 'PROFESIONAL',
           first_name: proDto.firstName,
