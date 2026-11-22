@@ -14,6 +14,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { requireAuth } from '../common/http/require-auth';
+import { PeriodQueryDto } from '../common/time/period.dto';
 import {
   AdminService,
   type AdminProfessionalDetail,
@@ -25,6 +26,10 @@ import { AccountReasonDto } from './dto/account-reason.dto';
 import { DecideLicenseDto } from './dto/decide-license.dto';
 import { LicenseQueueQueryDto } from './dto/license-queue-query.dto';
 import { ListProfessionalsAdminQueryDto } from './dto/list-professionals-query.dto';
+import {
+  PlatformStatsService,
+  type PlatformStats,
+} from './platform-stats.service';
 import {
   ProfessionalSuspensionService,
   type SuspensionImpact,
@@ -42,6 +47,7 @@ export class AdminController {
   constructor(
     private readonly admin: AdminService,
     private readonly suspension: ProfessionalSuspensionService,
+    private readonly platform: PlatformStatsService,
   ) {}
 
   /**
@@ -51,6 +57,15 @@ export class AdminController {
   @Get('me')
   me(@Req() req: Request): Promise<AdminProfile> {
     return this.admin.profile(requireAuth(req).userId);
+  }
+
+  /**
+   * `GET /admin/stats?from=&to=` (ENG-195): las métricas de la plataforma y la
+   * última verificación de integridad de la historia clínica. Solo agregados.
+   */
+  @Get('stats')
+  stats(@Query() query: PeriodQueryDto): Promise<PlatformStats> {
+    return this.platform.get(query);
   }
 
   /**
