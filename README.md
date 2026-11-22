@@ -155,8 +155,8 @@ es qué significa "manual", y eso es lo que documenta esta sección.
 > **Rol administrador (ENG-240).** El valor `MODERADOR` de `user_role` se renombró a
 > `ADMINISTRADOR`: es el equipo de MediConnect, que administra a los profesionales
 > (ENG-220). Nadie se registra con ese rol; se asigna con
-> `scripts/grant-admin.ts` (dry run y `--apply`). La validación de matrículas desde el
-> panel llega con ENG-192: hasta entonces sigue este procedimiento manual. Las reseñas
+> `scripts/grant-admin.ts` (dry run y `--apply`). Desde ENG-192 la validación de
+> matrículas se hace desde el panel del administrador (ver abajo). Las reseñas
 > se siguen publicando en el acto, con el filtro de lenguaje de ENG-107 como única
 > barrera: no hay moderación.
 >
@@ -196,64 +196,44 @@ plataforma. Revisarla en la daily acota la espera a 24 horas hábiles.
 
 #### El procedimiento
 
-Se corre con el **SQL Editor de Supabase** (Dashboard → SQL Editor) con una cuenta
-del equipo con acceso al proyecto. No hay endpoint ni script: son tres consultas y
-dejarlas a mano evita construir un camino de escritura sobre `professionals.status`
-que hoy nadie más necesita.
+Desde ENG-192 se hace **desde el panel del administrador** de la web (`/admin`,
+pestaña "Matrículas"), con una cuenta `ADMINISTRADOR`:
 
-**1. Listar las pendientes.** Es el disparador del procedimiento:
+1. **La cola de pendientes** (`GET /admin/professionals/licenses`): del más viejo al
+   más nuevo, con nombre, especialidades, matrícula, mail y fecha de alta, y un link
+   al registro público para verificarla.
+2. **Validar o rechazar** (`PATCH /admin/professionals/:id/license`). Rechazar pide
+   un motivo de al menos 10 caracteres, que le llega al profesional por mail.
 
-```sql
-select profile_id, first_name, last_name, license_number, created_at
-from public.professionals
-where status = 'PENDIENTE_VALIDACION_MATRICULA'
-order by created_at;
-```
+Lo que antes cuidaba el SQL a mano ahora lo hace el backend:
 
-**2. Aprobar**, una vez verificada la matrícula en el registro del colegio:
+- La decisión va por `profile_id` y **solo sobre un pendiente**: un `updateMany`
+  condicionado al estado es el árbitro, así que si dos administradores deciden a la
+  vez, uno gana y el otro recibe 409. Nunca se da vuelta una decisión ya tomada.
+- Queda en `audit_logs` (`PROFESSIONAL_LICENSE_VALIDATED` o `…_REJECTED`) con el
+  administrador, el motivo y `origin: 'ADMINISTRADOR'`. La validación automática de
+  ENG-218 se va a sumar con otro origen, y este panel queda como respaldo de lo que
+  no pueda resolver.
+- `updated_at` se actualiza en la misma escritura.
 
-```sql
-update public.professionals
-set status = 'VALIDADO', updated_at = now()
-where profile_id = '<profile_id de la consulta 1>'
-  and status = 'PENDIENTE_VALIDACION_MATRICULA';
-```
-
-**3. Rechazar**, si la matrícula no existe, está vencida o el nombre no coincide:
-
-```sql
-update public.professionals
-set status = 'RECHAZADO', updated_at = now()
-where profile_id = '<profile_id de la consulta 1>'
-  and status = 'PENDIENTE_VALIDACION_MATRICULA';
-```
-
-Las dos escrituras van acotadas por `profile_id`, copiado de la consulta 1, y no por
-`license_number`: la matrícula **no tiene unique** (`varchar(30)`) y dos colegios
-provinciales pueden emitir el mismo número, así que un `where` por matrícula puede
-validar de un saque a alguien que nadie miró — y "confirmar después que afectó una
-fila" llega tarde, porque el `update` ya cambió las dos. Por la misma razón no se
-filtra por especialidad ni por fecha.
-
-El `and status = 'PENDIENTE_VALIDACION_MATRICULA'` evita pisar una decisión ya
-tomada: si otro miembro del equipo la resolvió en el medio, el `update` afecta
-**cero** filas en vez de dar vuelta un rechazo. El SQL Editor muestra cuántas filas
-cambió: tiene que ser **una**.
-
-`updated_at` se pone a mano porque la columna tiene `default now()` solo en el
-INSERT: sin esto, la ficha queda diciendo que no se tocó desde el registro.
+**Si el panel no está disponible**, el respaldo sigue siendo el SQL Editor de
+Supabase, con la misma regla: por `profile_id` y `and status =
+'PENDIENTE_VALIDACION_MATRICULA'` (la matrícula no es única: dos colegios pueden
+emitir el mismo número), y confirmando que cambió **una** fila. Así no queda
+auditado ni se avisa por mail, así que es solo para emergencias.
 
 #### Verificación
 
-- Registrar un profesional nuevo y confirmar que aparece en la consulta de pendientes.
-- Aplicar el SQL de aprobación y confirmar que `GET /professionals/me` devuelve
+- Registrar un profesional nuevo y confirmar que aparece en la cola de pendientes del
+  panel.
+- Validarlo desde el panel y confirmar que `GET /professionals/me` devuelve
   `status: "VALIDADO"`.
 - Confirmar que recién ahí aparece en el catálogo público (`GET /catalog/professionals`,
   ENG-49) y que su perfil público responde (`GET /professionals/:id`, ENG-50). Antes
   de aprobar, las dos cosas lo ignoran: los dos caminos filtran por
   `status = 'VALIDADO'`.
-- Aplicar el SQL de rechazo sobre otro profesional y confirmar que **no** aparece en
-  el catálogo.
+- Rechazar a otro profesional con un motivo y confirmar que **no** aparece en el
+  catálogo y que le llega el mail con el motivo.
 
 #### Antecedente
 
