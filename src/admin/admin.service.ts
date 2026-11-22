@@ -118,7 +118,8 @@ export const LICENSE_QUEUE_LIMIT = 200;
 /**
  * Lógica del panel del administrador (ENG-220): quién entra (ENG-240), la
  * validación de matrículas (ENG-192) y el listado y el detalle de los
- * profesionales (ENG-241). La suspensión vive en `ProfessionalSuspensionService`.
+ * profesionales (ENG-241). La suspensión vive en `ProfessionalSuspensionService`
+ * y las métricas de la plataforma (ENG-195), en `PlatformStatsService`.
  */
 @Injectable()
 export class AdminService {

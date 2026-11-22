@@ -275,6 +275,26 @@ describe('Administración (e2e)', () => {
     });
   });
 
+  describe('panel de plataforma (ENG-195)', () => {
+    it('un profesional no ve las métricas de la plataforma: 403', async () => {
+      findUnique.mockResolvedValue(perfil('PROFESIONAL'));
+
+      await request(app.getHttpServer())
+        .get('/admin/stats')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(403);
+    });
+
+    it('una fecha con otro formato da 400', async () => {
+      findUnique.mockResolvedValue(perfil('ADMINISTRADOR'));
+
+      await request(app.getHttpServer())
+        .get('/admin/stats?from=01/09/2026')
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .expect(400);
+    });
+  });
+
   it('sin sesión da 401 y no mira la base', async () => {
     await request(app.getHttpServer()).get('/admin/me').expect(401);
     expect(findUnique).not.toHaveBeenCalled();

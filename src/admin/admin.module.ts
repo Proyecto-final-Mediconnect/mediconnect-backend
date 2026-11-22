@@ -5,6 +5,7 @@ import { PaymentsModule } from '../payments/payments.module';
 import { ProfessionalsModule } from '../professionals/professionals.module';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
+import { PlatformStatsService } from './platform-stats.service';
 import { ProfessionalSuspensionService } from './professional-suspension.service';
 
 @Module({
@@ -18,6 +19,10 @@ import { ProfessionalSuspensionService } from './professional-suspension.service
     ProfessionalsModule,
   ],
   controllers: [AdminController],
-  providers: [AdminService, ProfessionalSuspensionService],
+  providers: [
+    AdminService,
+    ProfessionalSuspensionService,
+    PlatformStatsService,
+  ],
 })
 export class AdminModule {}
