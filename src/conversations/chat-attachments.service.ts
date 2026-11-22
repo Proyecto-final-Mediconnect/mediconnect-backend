@@ -11,6 +11,10 @@ import {
   allowedExtension,
   MAX_FILE_BYTES,
 } from '../common/files/file-signature';
+import {
+  findPdfActiveContent,
+  pdfRiskMessage,
+} from '../common/files/pdf-active-content';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
@@ -53,6 +57,9 @@ export interface UploadedChatFile {
  * - **Abrir:** con una URL firmada de cinco minutos que se arma **con el token
  *   de quien pide**. Storage vuelve a chequear con su propia política que sea
  *   participante de la conversación, la misma regla que la de `messages`.
+ *   Cada apertura queda en `audit_logs` (ENG-217).
+ * - **PDF con contenido activo** (JavaScript, adjuntos, acciones): se rechazan
+ *   al subir (`pdf-active-content.ts`).
  */
 @Injectable()
 export class ChatAttachmentsService {
@@ -81,6 +88,12 @@ export class ChatAttachmentsService {
     }
     if (file.size > MAX_FILE_BYTES) {
       throw new BadRequestException('El archivo no puede pasar los 10 MB.');
+    }
+    // ENG-217: un PDF con JavaScript, adjuntos o acciones no entra.
+    const risk = ext === 'pdf' ? findPdfActiveContent(file.buffer) : null;
+    if (risk) {
+      this.logger.warn(`PDF rechazado (${risk}) en el chat, de ${userId}`);
+      throw new BadRequestException(pdfRiskMessage(risk));
     }
 
     // Antes de subir nada: un archivo de una conversación ajena no llega a Storage.
@@ -152,6 +165,11 @@ export class ChatAttachmentsService {
    *
    * Un mensaje ajeno, sin archivo o inexistente dan el mismo 404: un 403
    * confirmaría que existe.
+   *
+   * Cada apertura queda en `audit_logs` (ENG-217). La de un archivo que mandó
+   * el otro **falla cerrado**, como la descarga de un documento del paciente:
+   * un estudio puede viajar por el chat. La del propio archivo se registra igual,
+   * pero si el registro falla no se le niega a quien lo mandó.
    */
   async url(
     userId: string,
@@ -167,11 +185,13 @@ export class ChatAttachmentsService {
         conversation_id: conversationId,
         attachment_url: { not: null },
       },
-      select: { attachment_url: true, attachment_mime: true },
+      select: { attachment_url: true, attachment_mime: true, sender_id: true },
     });
     if (!message?.attachment_url) {
       throw new NotFoundException('No encontramos ese archivo.');
     }
+
+    await this.auditOpen(userId, conversationId, messageId, message.sender_id);
 
     const { data, error } = await this.supabase
       .getClientForToken(accessToken)
@@ -199,5 +219,35 @@ export class ChatAttachmentsService {
         Date.now() + ATTACHMENT_URL_TTL_SECONDS * 1000,
       ).toISOString(),
     };
+  }
+
+  /** Registra quién abrió el archivo. Ver `url` para cuándo falla cerrado. */
+  private async auditOpen(
+    userId: string,
+    conversationId: string,
+    messageId: string,
+    senderId: string,
+  ) {
+    const own = userId === senderId;
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actor_id: userId,
+          action: 'CHAT_ATTACHMENT_DOWNLOAD',
+          resource_type: 'messages',
+          resource_id: messageId,
+          metadata: { conversationId, own },
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `No se pudo auditar la apertura del adjunto ${messageId} por ${userId}: ${String(err)}`,
+      );
+      if (!own) {
+        throw new InternalServerErrorException(
+          'No pudimos registrar el acceso al archivo, así que no lo mostramos. Probá de nuevo en unos minutos.',
+        );
+      }
+    }
   }
 }

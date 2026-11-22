@@ -12,6 +12,10 @@ import {
   allowedExtension,
   MAX_FILE_BYTES,
 } from '../common/files/file-signature';
+import {
+  findPdfActiveContent,
+  pdfRiskMessage,
+} from '../common/files/pdf-active-content';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ClinicalRecordsService, sameUuid } from './clinical-records.service';
@@ -139,6 +143,12 @@ export class PatientDocumentsService {
     if (file.size > MAX_DOCUMENT_BYTES) {
       throw new BadRequestException('El archivo no puede pasar los 10 MB.');
     }
+    // ENG-217: un PDF con JavaScript, adjuntos o acciones no entra.
+    const risk = ext === 'pdf' ? findPdfActiveContent(file.buffer) : null;
+    if (risk) {
+      this.logger.warn(`PDF rechazado (${risk}) del paciente ${patientId}`);
+      throw new BadRequestException(pdfRiskMessage(risk));
+    }
 
     // La fila cuelga de `patients`: sin perfil completo no hay a quién colgarla.
     const patient = await this.prisma.patient.findUnique({
@@ -262,8 +272,10 @@ export class PatientDocumentsService {
   /**
    * Una URL firmada de cinco minutos para ver el archivo.
    *
-   * Cada descarga de un profesional queda en `audit_logs`, y **falla cerrado**
-   * como la lectura de la HC: si no se puede registrar, no se entrega la URL.
+   * Cada descarga queda en `audit_logs` (ENG-217). La de un profesional **falla
+   * cerrado** como la lectura de la HC: si no se puede registrar, no se entrega
+   * la URL. La del propio paciente se registra igual, pero si el registro falla
+   * no se le niega su archivo.
    */
   async downloadUrl(
     viewerId: string,
@@ -292,6 +304,8 @@ export class PatientDocumentsService {
         doc.id,
         { patientId: doc.patient_id },
       );
+    } else {
+      await this.auditOwnDownload(viewerId, doc.id);
     }
 
     const { data, error } = await this.supabase
@@ -352,6 +366,25 @@ export class PatientDocumentsService {
     if ((_sum.size_bytes ?? 0) + incomingBytes > MAX_TOTAL_BYTES_PER_PATIENT) {
       throw new UnprocessableEntityException(
         `Tus documentos no pueden pasar los ${MAX_TOTAL_BYTES_PER_PATIENT / 1024 / 1024} MB en total. Retirá alguno para subir otro.`,
+      );
+    }
+  }
+
+  /** La descarga del propio paciente: se registra, pero sin negarle su archivo. */
+  private async auditOwnDownload(patientId: string, documentId: string) {
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actor_id: patientId,
+          action: 'PATIENT_DOCUMENT_DOWNLOAD',
+          resource_type: 'patient_documents',
+          resource_id: documentId,
+          metadata: { patientId },
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo auditar la descarga de ${documentId} por su paciente: ${String(err)}`,
       );
     }
   }

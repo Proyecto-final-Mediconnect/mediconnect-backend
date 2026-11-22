@@ -198,6 +198,24 @@ describe('Documentos del paciente (e2e)', () => {
     expect(upload).not.toHaveBeenCalled();
   });
 
+  it('un PDF con JavaScript da 400 y no sube nada (ENG-217)', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/patients/me/documents')
+      .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+      .field('type', 'ESTUDIO')
+      .field('title', 'Hemograma')
+      .attach(
+        'file',
+        Buffer.from(
+          '%PDF-1.7\n1 0 obj\n<< /OpenAction << /S /JavaScript /JS (x) >> >>\nendobj\n',
+        ),
+        { filename: 'a.pdf', contentType: 'application/pdf' },
+      )
+      .expect(400);
+    expect(res.body.message).toMatch(/contenido activo/);
+    expect(upload).not.toHaveBeenCalled();
+  });
+
   it('sin archivo da 400', async () => {
     await request(app.getHttpServer())
       .post('/patients/me/documents')

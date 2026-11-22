@@ -19,6 +19,7 @@ import type {
 } from './conversations.service';
 
 const USER = '11111111-1111-4111-8111-111111111111';
+const OTRO = '44444444-4444-4444-8444-444444444444';
 const CONVERSATION = '22222222-2222-4222-8222-222222222222';
 const MESSAGE = '33333333-3333-4333-8333-333333333333';
 
@@ -42,7 +43,10 @@ describe('ChatAttachmentsService', () => {
     assertParticipant: jest.Mock;
     sendWithAttachment: jest.Mock;
   };
-  let prisma: { message: { findFirst: jest.Mock; aggregate: jest.Mock } };
+  let prisma: {
+    message: { findFirst: jest.Mock; aggregate: jest.Mock };
+    auditLog: { create: jest.Mock };
+  };
   let serviceBucket: { upload: jest.Mock; remove: jest.Mock };
   let userBucket: { createSignedUrl: jest.Mock };
   let fromService: jest.Mock;
@@ -60,6 +64,7 @@ describe('ChatAttachmentsService', () => {
           .fn()
           .mockResolvedValue({ _sum: { attachment_size: null } }),
       },
+      auditLog: { create: jest.fn().mockResolvedValue({}) },
     };
     serviceBucket = {
       upload: jest.fn().mockResolvedValue({ error: null }),
@@ -173,6 +178,23 @@ describe('ChatAttachmentsService', () => {
           undefined,
         ),
       ).rejects.toThrow('El archivo no puede pasar los 10 MB.');
+      expect(serviceBucket.upload).not.toHaveBeenCalled();
+    });
+
+    it('rechaza un PDF con JavaScript, sin subir nada (ENG-217)', async () => {
+      await expect(
+        service.send(
+          USER,
+          CONVERSATION,
+          archivo(
+            Buffer.from(
+              '%PDF-1.7\n1 0 obj\n<< /OpenAction << /S /JavaScript /JS (x) >> >>\nendobj\n',
+            ),
+            'application/pdf',
+          ),
+          undefined,
+        ),
+      ).rejects.toThrow(/contenido activo/);
       expect(serviceBucket.upload).not.toHaveBeenCalled();
     });
 
@@ -310,6 +332,54 @@ describe('ChatAttachmentsService', () => {
         service.url(USER, 'token', CONVERSATION, MESSAGE),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(prisma.message.findFirst).not.toHaveBeenCalled();
+    });
+
+    describe('cada apertura queda registrada (ENG-217)', () => {
+      const delOtro = {
+        attachment_url: `${CONVERSATION}/archivo.pdf`,
+        attachment_mime: 'application/pdf',
+        sender_id: OTRO,
+      };
+
+      it('registra quién abrió el archivo', async () => {
+        prisma.message.findFirst.mockResolvedValue(delOtro);
+
+        await service.url(USER, 'token', CONVERSATION, MESSAGE);
+
+        expect(prisma.auditLog.create).toHaveBeenCalledWith({
+          data: {
+            actor_id: USER,
+            action: 'CHAT_ATTACHMENT_DOWNLOAD',
+            resource_type: 'messages',
+            resource_id: MESSAGE,
+            metadata: { conversationId: CONVERSATION, own: false },
+          },
+        });
+      });
+
+      it('si no se puede registrar, el archivo del otro no se entrega', async () => {
+        prisma.message.findFirst.mockResolvedValue(delOtro);
+        prisma.auditLog.create.mockRejectedValue(new Error('db caída'));
+
+        await expect(
+          service.url(USER, 'token', CONVERSATION, MESSAGE),
+        ).rejects.toBeInstanceOf(InternalServerErrorException);
+        expect(userBucket.createSignedUrl).not.toHaveBeenCalled();
+      });
+
+      it('el propio archivo se entrega igual aunque no se pueda registrar', async () => {
+        prisma.message.findFirst.mockResolvedValue({
+          ...delOtro,
+          sender_id: USER,
+        });
+        prisma.auditLog.create.mockRejectedValue(new Error('db caída'));
+
+        await expect(
+          service.url(USER, 'token', CONVERSATION, MESSAGE),
+        ).resolves.toEqual(
+          expect.objectContaining({ url: 'https://storage/firmada' }),
+        );
+      });
     });
 
     it('si Storage no firma, da 500', async () => {
