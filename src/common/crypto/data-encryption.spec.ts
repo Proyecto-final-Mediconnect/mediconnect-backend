@@ -2,14 +2,19 @@ import { randomBytes } from 'node:crypto';
 import {
   clinicalContentAt,
   DecryptionError,
+  deriveKey,
+  ENCRYPTED_FILE_OVERHEAD,
   fieldAad,
   generateKeyEntry,
   isEncryptedJson,
   open,
+  openBytes,
   openJson,
   parseKeyring,
   seal,
+  sealBytes,
   sealJson,
+  storedFileAt,
 } from './data-encryption';
 
 const key = () => randomBytes(32).toString('base64');
@@ -139,6 +144,65 @@ describe('data-encryption', () => {
       expect(() =>
         openJson(k, { $enc: stored.$enc.replace(/^v1\./, 'v9.') }, aad),
       ).toThrow(DecryptionError);
+    });
+  });
+
+  describe('archivos (ENG-216, parte 2)', () => {
+    const k = randomBytes(32);
+    const at = storedFileAt('patient-documents', 'aaaa-1');
+    const aad = fieldAad(PATIENT, at);
+    const pdf = Buffer.from('%PDF-1.7\nHemograma completo');
+
+    it('descifra lo que cifró y suma exactamente ENCRYPTED_FILE_OVERHEAD bytes', () => {
+      const blob = sealBytes(k, pdf, aad);
+      expect(blob.length).toBe(pdf.length + ENCRYPTED_FILE_OVERHEAD);
+      expect(blob.includes(Buffer.from('Hemograma'))).toBe(false);
+      expect(openBytes(k, blob, aad).equals(pdf)).toBe(true);
+    });
+
+    it('un archivo vacío también va y vuelve', () => {
+      expect(
+        openBytes(k, sealBytes(k, Buffer.alloc(0), aad), aad),
+      ).toHaveLength(0);
+    });
+
+    it('un byte cambiado, otro objeto, otro bucket u otro paciente no descifran', () => {
+      const blob = sealBytes(k, pdf, aad);
+      const alterado = Buffer.from(blob);
+      alterado[alterado.length - 1] ^= 1;
+      expect(() => openBytes(k, alterado, aad)).toThrow(DecryptionError);
+      expect(() =>
+        openBytes(
+          k,
+          blob,
+          fieldAad(PATIENT, storedFileAt('patient-documents', 'bbbb-2')),
+        ),
+      ).toThrow(DecryptionError);
+      expect(() =>
+        openBytes(
+          k,
+          blob,
+          fieldAad(PATIENT, storedFileAt('chat-attachments', 'aaaa-1')),
+        ),
+      ).toThrow(DecryptionError);
+      expect(() => openBytes(k, blob, fieldAad(OTHER_PATIENT, at))).toThrow(
+        DecryptionError,
+      );
+    });
+
+    it('un archivo en claro (sin la cabecera) o cortado falla con DecryptionError', () => {
+      expect(() => openBytes(k, pdf, aad)).toThrow(DecryptionError);
+      expect(() =>
+        openBytes(k, sealBytes(k, pdf, aad).subarray(0, 10), aad),
+      ).toThrow(DecryptionError);
+    });
+
+    it('deriveKey da una clave distinta por uso y nunca la misma clave maestra', () => {
+      const a = deriveKey(k, 'file-ticket:v1');
+      expect(a).toHaveLength(32);
+      expect(a.equals(k)).toBe(false);
+      expect(a.equals(deriveKey(k, 'otro-uso'))).toBe(false);
+      expect(a.equals(deriveKey(k, 'file-ticket:v1'))).toBe(true);
     });
   });
 });

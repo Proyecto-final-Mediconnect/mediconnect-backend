@@ -19,6 +19,7 @@
 import {
   createCipheriv,
   createDecipheriv,
+  hkdfSync,
   randomBytes,
   timingSafeEqual,
 } from 'node:crypto';
@@ -121,27 +122,25 @@ export function generateDataKey(): Buffer {
   return randomBytes(KEY_BYTES);
 }
 
-/** Cifra y devuelve `<nonce>.<etiqueta>.<texto>` en base64url. */
-export function seal(key: Buffer, plaintext: Buffer, aad: string): string {
+/** AES-256-GCM con un nonce al azar. */
+function encrypt(key: Buffer, plaintext: Buffer, aad: string) {
   const nonce = randomBytes(NONCE_BYTES);
   const cipher = createCipheriv(ALGORITHM, key, nonce, {
     authTagLength: TAG_BYTES,
   });
   cipher.setAAD(Buffer.from(aad, 'utf8'));
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  return [nonce, cipher.getAuthTag(), ciphertext]
-    .map((part) => part.toString('base64url'))
-    .join('.');
+  return { nonce, tag: cipher.getAuthTag(), ciphertext };
 }
 
-/** Descifra lo que dejó `seal`. Cualquier diferencia termina en `DecryptionError`. */
-export function open(key: Buffer, token: string, aad: string): Buffer {
-  const parts = token.split('.');
-  if (parts.length !== 3)
-    throw new DecryptionError('Formato cifrado inválido.');
-  const [nonce, tag, ciphertext] = parts.map((p) =>
-    Buffer.from(p, 'base64url'),
-  );
+/** El inverso de `encrypt`. Cualquier diferencia termina en `DecryptionError`. */
+function decrypt(
+  key: Buffer,
+  nonce: Buffer,
+  tag: Buffer,
+  ciphertext: Buffer,
+  aad: string,
+): Buffer {
   if (nonce.length !== NONCE_BYTES || tag.length !== TAG_BYTES) {
     throw new DecryptionError('Formato cifrado inválido.');
   }
@@ -155,6 +154,69 @@ export function open(key: Buffer, token: string, aad: string): Buffer {
   } catch {
     throw new DecryptionError();
   }
+}
+
+/** Cifra y devuelve `<nonce>.<etiqueta>.<texto>` en base64url. */
+export function seal(key: Buffer, plaintext: Buffer, aad: string): string {
+  const { nonce, tag, ciphertext } = encrypt(key, plaintext, aad);
+  return [nonce, tag, ciphertext]
+    .map((part) => part.toString('base64url'))
+    .join('.');
+}
+
+/** Descifra lo que dejó `seal`. Cualquier diferencia termina en `DecryptionError`. */
+export function open(key: Buffer, token: string, aad: string): Buffer {
+  const parts = token.split('.');
+  if (parts.length !== 3)
+    throw new DecryptionError('Formato cifrado inválido.');
+  const [nonce, tag, ciphertext] = parts.map((p) =>
+    Buffer.from(p, 'base64url'),
+  );
+  return decrypt(key, nonce, tag, ciphertext, aad);
+}
+
+/**
+ * Cabecera de un archivo cifrado. Un archivo se guarda en binario y no en
+ * base64: `MCF1` + nonce + etiqueta + texto cifrado.
+ */
+const FILE_MAGIC = Buffer.from('MCF1', 'ascii');
+
+/** Cuántos bytes suma el cifrado a un archivo. */
+export const ENCRYPTED_FILE_OVERHEAD =
+  FILE_MAGIC.length + NONCE_BYTES + TAG_BYTES;
+
+/** Cifra un archivo entero. */
+export function sealBytes(key: Buffer, plaintext: Buffer, aad: string): Buffer {
+  const { nonce, tag, ciphertext } = encrypt(key, plaintext, aad);
+  return Buffer.concat([FILE_MAGIC, nonce, tag, ciphertext]);
+}
+
+/** Descifra lo que dejó `sealBytes`. */
+export function openBytes(key: Buffer, blob: Buffer, aad: string): Buffer {
+  if (
+    blob.length < ENCRYPTED_FILE_OVERHEAD ||
+    !blob.subarray(0, FILE_MAGIC.length).equals(FILE_MAGIC)
+  ) {
+    throw new DecryptionError('Formato de archivo cifrado inválido.');
+  }
+  const nonceEnd = FILE_MAGIC.length + NONCE_BYTES;
+  return decrypt(
+    key,
+    blob.subarray(FILE_MAGIC.length, nonceEnd),
+    blob.subarray(nonceEnd, ENCRYPTED_FILE_OVERHEAD),
+    blob.subarray(ENCRYPTED_FILE_OVERHEAD),
+    aad,
+  );
+}
+
+/**
+ * Una subclave derivada de una KEK para otro uso (HKDF-SHA256). Así una misma
+ * clave maestra no se usa directo para dos cosas distintas.
+ */
+export function deriveKey(kek: Buffer, purpose: string): Buffer {
+  return Buffer.from(
+    hkdfSync('sha256', kek, Buffer.alloc(0), `mediconnect:${purpose}`, 32),
+  );
 }
 
 /** AAD de la DEK envuelta: la ata a su paciente y a la KEK que la envolvió. */
@@ -175,6 +237,15 @@ export interface FieldLocation {
  */
 export function clinicalContentAt(entryId: string): FieldLocation {
   return { table: 'clinical_record_entries', rowId: entryId, field: 'content' };
+}
+
+/**
+ * Dónde vive un archivo: su bucket y el nombre del objeto (el UUID al azar con
+ * que se sube). Un archivo cifrado copiado a otro nombre o a otro bucket no se
+ * descifra.
+ */
+export function storedFileAt(bucket: string, objectId: string): FieldLocation {
+  return { table: `storage.${bucket}`, rowId: objectId, field: 'file' };
 }
 
 export function fieldAad(patientId: string, at: FieldLocation): string {

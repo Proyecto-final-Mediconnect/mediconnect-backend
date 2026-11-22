@@ -22,6 +22,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MAX_FILE_BYTES } from '../common/files/file-signature';
+import { publicBaseUrl } from '../common/http/public-base-url';
 import { requireAuth } from '../common/http/require-auth';
 import {
   ChatAttachmentsService,
@@ -148,7 +149,7 @@ export class ConversationsController {
   }
 
   /**
-   * Una URL firmada de cinco minutos para abrir el archivo de un mensaje.
+   * Una URL de cinco minutos para abrir el archivo de un mensaje.
    * `no-store`: la URL es la credencial.
    */
   @Get(':id/messages/:messageId/attachment')
@@ -159,7 +160,13 @@ export class ConversationsController {
     @Param('messageId', new ParseUUIDPipe()) messageId: string,
   ) {
     const { userId, accessToken } = requireAuth(req);
-    return this.attachments.url(userId, accessToken, id, messageId);
+    return this.attachments.url(
+      userId,
+      accessToken,
+      id,
+      messageId,
+      publicBaseUrl(req),
+    );
   }
 
   /** Marca como leído lo que mandó la otra persona. */

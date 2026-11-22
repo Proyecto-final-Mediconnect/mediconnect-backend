@@ -6,16 +6,17 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
-import {
-  allowedExtension,
-  MAX_FILE_BYTES,
-} from '../common/files/file-signature';
+import { allowedExtension } from '../common/files/file-signature';
 import {
   findPdfActiveContent,
   pdfRiskMessage,
 } from '../common/files/pdf-active-content';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  FILE_LINK_TTL_SECONDS,
+  isEncryptedObject,
+  StoredFilesService,
+} from '../stored-files/stored-files.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   ConversationsService,
@@ -25,7 +26,7 @@ import {
 export const CHAT_ATTACHMENTS_BUCKET = 'chat-attachments';
 
 /** Cuánto vive la URL para abrir un archivo: lo justo para abrirlo. */
-export const ATTACHMENT_URL_TTL_SECONDS = 5 * 60;
+export const ATTACHMENT_URL_TTL_SECONDS = FILE_LINK_TTL_SECONDS;
 
 /**
  * Tope de archivos que puede haber mandado una persona en el chat, sumando todas
@@ -60,6 +61,10 @@ export interface UploadedChatFile {
  *   Cada apertura queda en `audit_logs` (ENG-217).
  * - **PDF con contenido activo** (JavaScript, adjuntos, acciones): se rechazan
  *   al subir (`pdf-active-content.ts`).
+ * - **Cifrado (ENG-216):** con `DATA_ENCRYPTION_KEYS`, el archivo se sube
+ *   cifrado con la clave de datos del paciente de la conversación, y se abre
+ *   con un link de cinco minutos del backend que lo descifra
+ *   (`StoredFilesService`). Los mandados antes siguen como estaban.
  */
 @Injectable()
 export class ChatAttachmentsService {
@@ -69,6 +74,7 @@ export class ChatAttachmentsService {
     private readonly prisma: PrismaService,
     private readonly supabase: SupabaseService,
     private readonly conversations: ConversationsService,
+    private readonly files: StoredFilesService,
   ) {}
 
   /** Manda un mensaje con un archivo y, opcionalmente, un texto que lo acompaña. */
@@ -86,7 +92,7 @@ export class ChatAttachmentsService {
     if (!ext) {
       throw new BadRequestException('Solo se pueden mandar PDF, JPG o PNG.');
     }
-    if (file.size > MAX_FILE_BYTES) {
+    if (file.size > this.files.maxFileBytes) {
       throw new BadRequestException('El archivo no puede pasar los 10 MB.');
     }
     // ENG-217: un PDF con JavaScript, adjuntos o acciones no entra.
@@ -97,16 +103,23 @@ export class ChatAttachmentsService {
     }
 
     // Antes de subir nada: un archivo de una conversación ajena no llega a Storage.
-    await this.conversations.assertParticipant(userId, conversationId);
+    const { patient_id: patientId } =
+      await this.conversations.assertParticipant(userId, conversationId);
 
     await this.assertWithinQuota(userId, file.size);
 
-    const path = `${conversationId}/${randomUUID()}.${ext}`;
+    const { path, body } = await this.files.prepareUpload(
+      CHAT_ATTACHMENTS_BUCKET,
+      conversationId,
+      patientId,
+      ext,
+      file.buffer,
+    );
     const storage = this.supabase
       .getServiceClient()
       .storage.from(CHAT_ATTACHMENTS_BUCKET);
 
-    const { error } = await storage.upload(path, file.buffer, {
+    const { error } = await storage.upload(path, body, {
       contentType: file.mimetype,
       upsert: false,
     });
@@ -161,7 +174,9 @@ export class ChatAttachmentsService {
   }
 
   /**
-   * Una URL firmada de cinco minutos para abrir el archivo de un mensaje.
+   * Una URL de cinco minutos para abrir el archivo de un mensaje: firmada por
+   * Storage, o un link del backend si el archivo está cifrado (`baseUrl` es el
+   * origen del backend).
    *
    * Un mensaje ajeno, sin archivo o inexistente dan el mismo 404: un 403
    * confirmaría que existe.
@@ -176,8 +191,10 @@ export class ChatAttachmentsService {
     accessToken: string,
     conversationId: string,
     messageId: string,
+    baseUrl: string,
   ): Promise<{ url: string; expiraEl: string }> {
-    await this.conversations.assertParticipant(userId, conversationId);
+    const { patient_id: patientId } =
+      await this.conversations.assertParticipant(userId, conversationId);
 
     const message = await this.prisma.message.findFirst({
       where: {
@@ -192,6 +209,19 @@ export class ChatAttachmentsService {
     }
 
     await this.auditOpen(userId, conversationId, messageId, message.sender_id);
+
+    if (isEncryptedObject(message.attachment_url)) {
+      const { url, expiresAt } = this.files.link(baseUrl, {
+        bucket: CHAT_ATTACHMENTS_BUCKET,
+        path: message.attachment_url,
+        patientId,
+        // `attachment_mime` va de la mano del archivo (CHECK de `messages`).
+        mime: message.attachment_mime ?? 'application/octet-stream',
+        // Como abajo: un PDF de la contraparte se baja, no se renderiza.
+        attachment: message.attachment_mime === 'application/pdf',
+      });
+      return { url, expiraEl: expiresAt };
+    }
 
     const { data, error } = await this.supabase
       .getClientForToken(accessToken)
