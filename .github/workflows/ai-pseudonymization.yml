@@ -44,6 +44,10 @@ jobs:
     env:
       # Dónde queda el modelo bajado de Hugging Face, para cachearlo.
       HF_CACHE_DIR: ${{ github.workspace }}/ai-pipeline/.model-cache
+      # En Linux x64, el `postinstall` de onnxruntime-node intenta bajar los
+      # binarios de CUDA (GPU), que el runner no tiene y que dan 404. El modelo
+      # corre en CPU con los binarios que ya trae el paquete.
+      ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 
     steps:
       - name: Checkout
