@@ -152,12 +152,13 @@ El Sprint 0 (criterios de HU-02) decidió que durante el MVP la validación es
 **manual, hecha por el equipo y no automatizada**. Lo que nunca se había definido
 es qué significa "manual", y eso es lo que documenta esta sección.
 
-> **No hay rol moderador en la práctica, y es deliberado.** El enum `user_role`
-> conserva `MODERADOR` (sacarlo es una migración destructiva), pero no hay pantallas
-> ni endpoints que lo usen: la validación de matrículas es manual (Sprint 0) y las
-> reseñas se publican en el acto, con el filtro de lenguaje de ENG-107 como única
-> barrera. Si en algún momento el volumen lo pide, la moderación entra como historia
-> propia y con su release asignado — no como un agregado de este procedimiento.
+> **Rol administrador (ENG-240).** El valor `MODERADOR` de `user_role` se renombró a
+> `ADMINISTRADOR`: es el equipo de MediConnect, que administra a los profesionales
+> (ENG-220). Nadie se registra con ese rol; se asigna con
+> `scripts/grant-admin.ts` (dry run y `--apply`). La validación de matrículas desde el
+> panel llega con ENG-192: hasta entonces sigue este procedimiento manual. Las reseñas
+> se siguen publicando en el acto, con el filtro de lenguaje de ENG-107 como única
+> barrera: no hay moderación.
 >
 > **Bajar una reseña abusiva.** No hay endpoint para eso: soporte lo hace a mano por
 > SQL (`UPDATE reviews SET status = 'RECHAZADA', moderation_reason = '<motivo>',
