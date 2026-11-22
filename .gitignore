@@ -50,3 +50,6 @@ Thumbs.db
 
 # TypeScript build incremental - se regenera en cada build
 *.tsbuildinfo
+
+# Modelo de reconocimiento de entidades bajado por el pipeline de IA (ENG-215)
+ai-pipeline/.model-cache/

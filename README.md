@@ -311,6 +311,17 @@ misma DEK del paciente (en el chat, la del paciente de la conversación):
 3. Cuando el dry run diga `Nada para rotar`, sacar `k1` de la variable en los dos
    lugares.
 
+## Seudonimización para la IA (ENG-215)
+
+Antes de mandar una transcripción a un modelo de IA, `src/ai/pseudonymization/`
+reemplaza todo lo que identifica a alguien por marcadores (`[PACIENTE]`,
+`[PERSONA_1]`, `[DNI_1]`…) en tres capas, y después reidentifica la respuesta de
+nuestro lado. La capa 3 (un modelo local de reconocimiento de entidades) vive en
+`ai-pipeline/`, un proyecto aparte que corre en GitHub Actions y no se instala con
+el backend (ADR-020, opción A). Qué se tapa, cómo se mide y sus límites: ver
+`src/ai/pseudonymization/README.md`. El workflow `ai-pseudonymization.yml` la evalúa
+con el modelo real en cada PR que la toca.
+
 ## Tareas periódicas (ENG-228)
 
 Las tareas periódicas (liberar turnos sin pagar, recordatorios, cierre de accesos

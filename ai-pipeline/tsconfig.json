@@ -1,0 +1,19 @@
+{
+  // El pipeline de IA (ENG-215, ADR-020 opción A) corre con tsx en GitHub
+  // Actions: ESM, sin compilar. Este tsconfig es solo para el typecheck
+  // (`npm run typecheck`), que incluye el núcleo de `src/ai/` que importa.
+  "compilerOptions": {
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["*.ts", "../src/ai/**/*.ts"],
+  "exclude": ["node_modules", "../src/**/*.spec.ts"]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "mediconnect-ai-pipeline",
+  "private": true,
+  "type": "module",
+  "description": "Pipeline de IA de MediConnect (ADR-020, opción A): corre en GitHub Actions, fuera del backend de Render.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "eval:pseudonymization": "node --import tsx eval-pseudonymization.ts"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "3.8.1",
+    "tsx": "4.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.2",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "sharp": "0.35.5"
+  }
+}

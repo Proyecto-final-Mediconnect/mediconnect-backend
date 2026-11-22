@@ -1,0 +1,76 @@
+name: Seudonimización (IA)
+
+# ENG-215 — Evalúa la seudonimización con el modelo real de reconocimiento de
+# entidades, sobre las consultas FICTICIAS de
+# `src/ai/pseudonymization/fixtures.ts`.
+#
+# Los tests unitarios (CI normal) prueban las capas 1 y 2 con un reconocedor de
+# mentira. Este job prueba las tres capas juntas con el modelo de verdad, que no
+# entra en el CI normal ni en Render (~1,4 GB de dependencias): falla si algún
+# identificador queda a la vista o si se tapa un dato clínico.
+#
+# No usa secrets ni datos reales.
+
+on:
+  pull_request:
+    paths:
+      - 'src/ai/**'
+      - 'ai-pipeline/**'
+      - '.github/workflows/ai-pseudonymization.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/ai/**'
+      - 'ai-pipeline/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ai-pseudonymization-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    name: Evaluar con el modelo real
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: ai-pipeline
+
+    env:
+      # Dónde queda el modelo bajado de Hugging Face, para cachearlo.
+      HF_CACHE_DIR: ${{ github.workspace }}/ai-pipeline/.model-cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: ai-pipeline/package-lock.json
+
+      - name: Instalar dependencias
+        run: npm ci --no-audit --no-fund
+
+      # Mismo criterio que el backend (security.yml): nada alto en producción.
+      - name: Auditoría de dependencias
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Caché del modelo
+        uses: actions/cache@v5
+        with:
+          path: ai-pipeline/.model-cache
+          key: ner-model-distilbert-multilingual-cased-ner-hrl-q8
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Evaluar la seudonimización
+        run: npm run eval:pseudonymization

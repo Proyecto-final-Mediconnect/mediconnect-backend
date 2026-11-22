@@ -18,5 +18,8 @@
     "strict": true,
     "forceConsistentCasingInFileNames": true,
     "noFallthroughCasesInSwitch": true
-  }
+  },
+  // `ai-pipeline/` es otro proyecto (ESM, con sus dependencias y su tsconfig):
+  // corre en GitHub Actions y no entra en la app (ENG-215).
+  "exclude": ["node_modules", "dist", "ai-pipeline"]
 }
