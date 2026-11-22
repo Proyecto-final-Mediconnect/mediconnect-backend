@@ -103,7 +103,7 @@ export class JwtAuthGuard implements CanActivate {
       email: payload.email as string | undefined,
       // `role` es el rol de Postgres que asigna Supabase Auth (siempre
       // "authenticated" para un usuario logueado) — NO el rol de dominio
-      // (PACIENTE/PROFESIONAL/MODERADOR, que vive en `profiles`). No usar
+      // (PACIENTE/PROFESIONAL/ADMINISTRADOR, que vive en `profiles`; ver `RolesGuard`). No usar
       // este campo para autorización basada en roles (ver ENG-37).
       role: payload.role as string | undefined,
     };

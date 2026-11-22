@@ -200,7 +200,10 @@ describe('GET /me (e2e)', () => {
     findUnique.mockResolvedValue(patientRow);
     // ...aunque el atacante infle user_metadata/role en su token.
     const token = await signToken({
-      extraClaims: { user_metadata: { role: 'MODERADOR' }, role: 'MODERADOR' },
+      extraClaims: {
+        user_metadata: { role: 'ADMINISTRADOR' },
+        role: 'ADMINISTRADOR',
+      },
     });
 
     return request(app.getHttpServer())

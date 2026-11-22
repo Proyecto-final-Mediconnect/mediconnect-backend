@@ -69,11 +69,11 @@ describe('UserService', () => {
     expect(result.lastName).toBe('Ruiz');
   });
 
-  it('devuelve nombre null para un perfil sin fila asociada (ej. MODERADOR)', async () => {
+  it('devuelve nombre null para un perfil sin fila asociada (ej. ADMINISTRADOR)', async () => {
     findUnique.mockResolvedValue({
       id: 'uid',
-      email: 'mod@test.com',
-      role: 'MODERADOR',
+      email: 'admin@test.com',
+      role: 'ADMINISTRADOR',
       patient: null,
       professional: null,
       legal_acceptances: [],
@@ -81,8 +81,8 @@ describe('UserService', () => {
 
     await expect(service.getProfile('uid')).resolves.toEqual({
       id: 'uid',
-      email: 'mod@test.com',
-      role: 'MODERADOR',
+      email: 'admin@test.com',
+      role: 'ADMINISTRADOR',
       firstName: null,
       lastName: null,
       legalAccepted: false,

@@ -167,7 +167,7 @@ export class VideoConsultationService {
   /**
    * `appointments_select_own` ya garantiza que quien llegó acá participa del
    * turno, así que esta excepción no debería alcanzarse nunca. Se deja explícita
-   * en vez de asumirla: si algún día se ampliara la policy (un moderador viendo
+   * en vez de asumirla: si algún día se ampliara la policy (un administrador viendo
    * turnos ajenos, por ejemplo), el resultado sería un 403 y no un ingreso
    * silencioso a la consulta médica de otras dos personas.
    */

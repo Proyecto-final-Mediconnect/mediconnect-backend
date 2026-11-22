@@ -524,7 +524,7 @@ export class ConversationsService {
     return conversation;
   }
 
-  /** El chat es entre paciente y profesional: un moderador o un perfil a medias no tiene bandeja. */
+  /** El chat es entre paciente y profesional: un administrador o un perfil a medias no tiene bandeja. */
   private async chatRole(userId: string): Promise<ChatRole> {
     const profile = await this.prisma.profile.findUnique({
       where: { id: userId },

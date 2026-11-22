@@ -1,0 +1,13 @@
+-- EP-01 · Rol administrador de la plataforma (ENG-240, ENG-220)
+--
+-- `MODERADOR` se creó para moderar reseñas (HU-44/45) y quedó sin uso cuando
+-- la moderación se sacó (backend #130). La gestión de médicos (ENG-220) necesita
+-- un rol del equipo que administre a los profesionales: se renombra el valor en
+-- lugar de agregar otro, así no queda un rol muerto en el enum.
+--
+-- `RENAME VALUE` no toca filas ni políticas: Postgres guarda el valor del enum
+-- por OID. Ninguna función compara con el literal 'MODERADOR':
+-- `handle_new_user` solo acepta PACIENTE y PROFESIONAL en el alta y degrada a
+-- PACIENTE cualquier otro rol pedido (20260711000000_harden_signup_role), así
+-- que nadie puede registrarse como administrador.
+ALTER TYPE "user_role" RENAME VALUE 'MODERADOR' TO 'ADMINISTRADOR';
