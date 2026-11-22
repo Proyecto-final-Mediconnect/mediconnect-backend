@@ -10,6 +10,7 @@ import { SentryGlobalFilter, SentryModule } from '@sentry/nestjs/setup';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { AdminModule } from './admin/admin.module';
 import { AppointmentsModule } from './appointments/appointments.module';
 import { AuthModule } from './auth/auth.module';
 import { CatalogModule } from './catalog/catalog.module';
@@ -63,6 +64,7 @@ import { VideoModule } from './video/video.module';
     ProfessionalsModule,
     PatientsModule,
     VideoModule,
+    AdminModule,
     SchedulesModule,
     AppointmentsModule,
     ClinicalRecordsModule,

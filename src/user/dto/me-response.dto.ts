@@ -12,7 +12,7 @@ export interface MeResponseDto {
   email: string;
   role: user_role;
   /** Nombre/apellido viven en `patients`/`professionals`; null para perfiles
-   *  sin fila asociada (ej. MODERADOR). */
+   *  sin fila asociada (ej. ADMINISTRADOR). */
   firstName: string | null;
   lastName: string | null;
   /** Si aceptó la versión vigente de los textos legales (ENG-140). En `false`,

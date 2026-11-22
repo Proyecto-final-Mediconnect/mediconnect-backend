@@ -3,12 +3,13 @@ import { AuthMobileController } from './auth-mobile.controller';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RolesGuard } from './guards/roles.guard';
 import { MfaController } from './mfa.controller';
 import { MfaService } from './mfa.service';
 
 @Module({
   controllers: [AuthController, AuthMobileController, MfaController],
-  providers: [AuthService, JwtAuthGuard, MfaService],
-  exports: [JwtAuthGuard],
+  providers: [AuthService, JwtAuthGuard, RolesGuard, MfaService],
+  exports: [JwtAuthGuard, RolesGuard],
 })
 export class AuthModule {}

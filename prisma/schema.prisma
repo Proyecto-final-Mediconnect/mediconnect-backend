@@ -18,10 +18,12 @@ enum legal_acceptance_source {
   REACCEPT
 }
 
+/// ADMINISTRADOR es el equipo de MediConnect: administra a los profesionales
+/// (ENG-220). Nadie se registra con ese rol: se asigna por script (ENG-240).
 enum user_role {
   PACIENTE
   PROFESIONAL
-  MODERADOR
+  ADMINISTRADOR
 }
 
 /// Estado de validación de un profesional. Al registrarse queda en

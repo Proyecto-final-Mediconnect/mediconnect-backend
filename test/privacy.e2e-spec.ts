@@ -41,7 +41,7 @@ describe('Derechos ARCO (e2e)', () => {
     ].forEach((fn) => fn.mockReset());
     profileFindUnique.mockResolvedValue({
       email: 'marina@test.com',
-      role: 'MODERADOR',
+      role: 'ADMINISTRADOR',
       created_at: new Date('2026-07-01T10:00:00.000Z'),
       deleted_at: null,
       email_reminders: true,

@@ -264,8 +264,8 @@ describe('ConversationsService', () => {
       expect(prisma.$queryRaw).not.toHaveBeenCalled();
     });
 
-    it('un moderador o un perfil inexistente no tiene chat (409)', async () => {
-      for (const role of ['MODERADOR', null]) {
+    it('un administrador o un perfil inexistente no tiene chat (409)', async () => {
+      for (const role of ['ADMINISTRADOR', null]) {
         asRole(role);
         await expect(service.listMine('x')).rejects.toBeInstanceOf(
           ConflictException,
