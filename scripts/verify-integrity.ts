@@ -25,6 +25,7 @@
 import { PrismaService } from '../src/prisma/prisma.service';
 import { SlackIntegrityAlerter } from '../src/integrity/integrity-alerter';
 import { IntegrityService } from '../src/integrity/integrity.service';
+import { ClinicalDataCipher } from '../src/common/crypto/clinical-data-cipher';
 import type { IntegrityRunResult } from '../src/integrity/integrity.types';
 import { appendFileSync } from 'node:fs';
 
@@ -115,7 +116,12 @@ async function main(): Promise<number> {
   const prisma = new PrismaService();
 
   try {
-    const result = await new IntegrityService(prisma, alerter).run();
+    // ENG-216: el hash es del contenido en claro, así que el job necesita la
+    // misma DATA_ENCRYPTION_KEYS que el backend. Sin ella, una HC con entradas
+    // cifradas termina en ERROR (nunca en un OK que no verificó nada). Los
+    // mensajes de error no llevan el valor de la clave.
+    const cipher = ClinicalDataCipher.fromEnv(prisma);
+    const result = await new IntegrityService(prisma, alerter, cipher).run();
     writeStepSummary(summarize(result));
 
     if (result.status === 'OK') {

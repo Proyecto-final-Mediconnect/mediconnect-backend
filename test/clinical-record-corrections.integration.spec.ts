@@ -11,6 +11,7 @@ import type { PrismaService } from '../src/prisma/prisma.service';
 import type { SupabaseService } from '../src/supabase/supabase.service';
 import { ClinicalRecordsService } from '../src/clinical-records/clinical-records.service';
 import { CORRECTION_REASON_EXTENSION } from '../src/clinical-records/clinical-entry.fhir';
+import { ClinicalDataCipher } from '../src/common/crypto/clinical-data-cipher';
 
 /**
  * Corregir una entrada de HC, contra Postgres real (ENG-100).
@@ -112,6 +113,7 @@ describe('Corregir una entrada de HC (integration)', () => {
     service = new ClinicalRecordsService(
       prisma as unknown as PrismaService,
       supabase,
+      new ClinicalDataCipher(prisma, null),
     );
   }, 60_000);
 

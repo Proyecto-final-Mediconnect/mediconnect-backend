@@ -27,6 +27,7 @@ import { LegalModule } from './legal/legal.module';
 import { MediPassModule } from './medipass/medipass.module';
 import { PatientsModule } from './patients/patients.module';
 import { PaymentsModule } from './payments/payments.module';
+import { CryptoModule } from './common/crypto/crypto.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { PrivacyModule } from './privacy/privacy.module';
 import { ProfessionalsModule } from './professionals/professionals.module';
@@ -54,6 +55,7 @@ import { VideoModule } from './video/video.module';
       canjeGlobalThrottler,
     ]),
     PrismaModule,
+    CryptoModule,
     SupabaseModule,
     LegalModule,
     AuthModule,

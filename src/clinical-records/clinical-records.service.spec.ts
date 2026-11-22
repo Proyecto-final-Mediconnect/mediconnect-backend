@@ -15,6 +15,7 @@ import {
   ClinicalRecordsService,
   type NewClinicalEntry,
 } from './clinical-records.service';
+import { ClinicalDataCipher } from '../common/crypto/clinical-data-cipher';
 
 /**
  * Escritura y lectura de la HC (ENG-57).
@@ -121,6 +122,7 @@ describe('ClinicalRecordsService', () => {
     service = new ClinicalRecordsService(
       prisma as unknown as PrismaService,
       supabase,
+      new ClinicalDataCipher(prisma as unknown as PrismaService, null),
     );
   });
 

@@ -17,6 +17,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ChainEntry } from '../common/hash-chain/hash-chain';
+import { ClinicalDataCipher } from '../common/crypto/clinical-data-cipher';
+import {
+  clinicalContentAt,
+  DecryptionError,
+} from '../common/crypto/data-encryption';
 import {
   anchorRegressed,
   computeAnchor,
@@ -38,6 +43,7 @@ const MAX_FAILURES_IN_DETAILS = 50;
 
 /** Fila de `clinical_record_entries` con lo necesario para rehashear. */
 interface EntryRow {
+  id: string;
   patient_id: string;
   professional_id: string;
   sequence_number: bigint;
@@ -58,6 +64,7 @@ export class IntegrityService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly alerter: IntegrityAlerter,
+    private readonly cipher: ClinicalDataCipher,
   ) {}
 
   async run(): Promise<IntegrityRunResult> {
@@ -74,6 +81,7 @@ export class IntegrityService {
           where: { patient_id: patientId },
           orderBy: { sequence_number: 'asc' },
           select: {
+            id: true,
             patient_id: true,
             professional_id: true,
             sequence_number: true,
@@ -95,9 +103,24 @@ export class IntegrityService {
 
       entriesChecked += rows.length;
 
+      // ENG-216: el hash es del contenido en claro, así que se descifra antes de
+      // recalcularlo. Un contenido cifrado que no autentica fue alterado (o
+      // copiado de otra fila): es una inconsistencia de esta cadena, igual que
+      // un contenido cambiado en claro. Si falta la clave, `openerFor` o el
+      // opener tiran `MissingKeyError` y la corrida termina en ERROR: no se
+      // puede afirmar nada de una cadena que no se pudo leer.
+      const opened = await this.openRows(patientId, rows);
+      if (!opened.ok) {
+        failures.push(opened.failure);
+        this.logger.error(
+          `Cadena inconsistente · paciente ${patientId} · seq ${opened.failure.sequenceNumber} · contenido cifrado ilegible`,
+        );
+        continue;
+      }
+
       const audit = auditPatientChain(
         patientId,
-        rows.map((row) => toChainEntry(row as EntryRow)),
+        opened.rows.map((row) => toChainEntry(row)),
         snapshot
           ? {
               headHash: snapshot.head_hash,
@@ -321,6 +344,43 @@ export class IntegrityService {
         updated_at: now,
       },
     });
+  }
+
+  /**
+   * Descifra el contenido de la cadena de un paciente (ENG-216). Lo que está en
+   * claro pasa igual. La primera entrada que no autentica corta la cadena con
+   * `CONTENT_TAMPERED`: `expected` es el hash sellado y `found` no lleva nada
+   * del contenido, porque termina en `integrity_checks` y en Slack.
+   */
+  private async openRows(
+    patientId: string,
+    rows: EntryRow[],
+  ): Promise<
+    { ok: true; rows: EntryRow[] } | { ok: false; failure: IntegrityFailure }
+  > {
+    const openValue = await this.cipher.openerFor(patientId);
+    const opened: EntryRow[] = [];
+    for (const row of rows) {
+      try {
+        opened.push({
+          ...row,
+          content: openValue(clinicalContentAt(row.id), row.content),
+        });
+      } catch (error) {
+        if (!(error instanceof DecryptionError)) throw error;
+        return {
+          ok: false,
+          failure: {
+            patientId,
+            sequenceNumber: Number(row.sequence_number),
+            reason: 'CONTENT_TAMPERED',
+            expected: row.content_hash,
+            found: 'contenido cifrado ilegible',
+          },
+        };
+      }
+    }
+    return { ok: true, rows: opened };
   }
 }
 

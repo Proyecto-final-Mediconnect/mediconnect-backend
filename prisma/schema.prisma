@@ -229,6 +229,7 @@ model Patient {
   medipass_sessions        MediPassSession[]
   medipass_access_logs     MediPassAccessLog[]
   medipass_emergency_cards MediPassEmergencyCard[]
+  data_key                 PatientDataKey?
 
   @@map("patients")
 }
@@ -911,6 +912,26 @@ model IntegrityCheck {
 
   @@index([run_at])
   @@map("integrity_checks")
+}
+
+/// Clave de datos (DEK) del paciente, envuelta con la clave maestra (ENG-216,
+/// ADR-020 punto 8). Con ella se cifra su contenido clínico.
+///
+/// La DEK nunca está en claro en la base: `wrapped_dek` es la DEK cifrada con la
+/// KEK `kid`, que vive solo en la variable de entorno `DATA_ENCRYPTION_KEYS`.
+/// Rotar la KEK re-envuelve esta fila (`scripts/rotate-data-keys.ts`); los datos
+/// del paciente no se tocan. RLS sin políticas: solo la lee el backend.
+model PatientDataKey {
+  patient_id  String    @id @db.Uuid
+  kid         String
+  wrapped_dek String
+  created_at  DateTime  @default(now()) @db.Timestamptz(6)
+  rotated_at  DateTime? @db.Timestamptz(6)
+
+  patient Patient @relation(fields: [patient_id], references: [profile_id])
+
+  @@index([kid])
+  @@map("patient_data_keys")
 }
 
 /// Bitácora de las tareas periódicas (ENG-228): una fila por corrida.

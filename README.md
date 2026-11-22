@@ -243,6 +243,54 @@ ENG-49 — un parche puntual, sin verificar ninguna matrícula contra ningún re
 sin procedimiento detrás. Esta sección es lo que faltaba para que el próximo que se
 registre no dependa de que alguien se acuerde.
 
+## Cifrado del contenido clínico (ENG-216)
+
+El contenido de cada entrada **nueva** de la historia clínica se guarda cifrado
+(ADR-020, punto 8; probado antes en el spike ENG-239):
+
+- **AES-256-GCM** con una **clave de datos (DEK) por paciente**, en
+  `patient_data_keys`. La DEK está guardada **envuelta** (cifrada) con una **clave
+  maestra (KEK)**: la base nunca tiene una DEK en claro.
+- La KEK vive solo en la variable `DATA_ENCRYPTION_KEYS`: en Render (backend) y en
+  el secret del repo con el mismo nombre (job de integridad). Nunca en el código, el
+  repo, un log ni la base.
+- El contenido queda en la columna como `{"$enc": "v1.<nonce>.<etiqueta>.<texto>"}`.
+  El lugar del dato (tabla, id de la entrada, campo y paciente) va como AAD: un
+  contenido cifrado copiado a otra fila no se descifra, y el job de integridad lo
+  reporta como `CONTENT_TAMPERED`.
+- **La cadena de hash se calcula sobre el contenido en claro.** Rotar la clave no la
+  rompe, y el job de integridad descifra para verificarla.
+- **Las entradas viejas quedan en claro** (versión 0): la HC es append-only y
+  reescribirlas violaría esa regla. El backend lee los dos formatos.
+- Sin la variable, el backend guarda en claro como antes y lo avisa en el log al
+  arrancar. Con la variable mal formada, **no arranca**. Leer algo cifrado sin la
+  clave falla: nunca se muestra el cifrado como si fuera el contenido.
+
+### Prender el cifrado
+
+1. En tu máquina: `pnpm run keys:generate` (o
+   `node --import tsx scripts/generate-data-key.ts`). Imprime una línea
+   `k1:<clave>`. **Es un secreto:** no se pega en chats, mails ni commits.
+2. Guardar un respaldo fuera de Render, en un lugar al que accedan dos personas
+   (por ejemplo, el gestor de contraseñas del equipo). **Sin la clave, lo cifrado
+   no se puede leer nunca más.**
+3. Cargarla en Render (backend → Environment) como `DATA_ENCRYPTION_KEYS`.
+4. Cargar el mismo valor en GitHub (repo backend → Settings → Secrets and
+   variables → Actions) como `DATA_ENCRYPTION_KEYS`. Sin esto, el job semanal de
+   integridad termina en ERROR apenas haya una entrada cifrada.
+5. Verificar en el log del deploy: `Cifrado del contenido clínico activo (clave
+   maestra k1).`
+
+### Rotar la clave maestra
+
+1. `pnpm run keys:generate k2` y agregarla **al final** de la variable, en Render y
+   en GitHub: `DATA_ENCRYPTION_KEYS=k1:<...>,k2:<...>`. Desde ese deploy, las DEK
+   nuevas se envuelven con `k2` y las viejas se siguen abriendo con `k1`.
+2. Re-envolver las DEK existentes (los datos no se tocan): dry run con
+   `pnpm run keys:rotate` y, si da OK, `pnpm run keys:rotate -- --apply`.
+3. Cuando el dry run diga `Nada para rotar`, sacar `k1` de la variable en los dos
+   lugares.
+
 ## Tareas periódicas (ENG-228)
 
 Las tareas periódicas (liberar turnos sin pagar, recordatorios, cierre de accesos

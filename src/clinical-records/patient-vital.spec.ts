@@ -6,6 +6,7 @@ import {
 import type { PrismaService } from '../prisma/prisma.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import { ClinicalRecordsService } from './clinical-records.service';
+import { ClinicalDataCipher } from '../common/crypto/clinical-data-cipher';
 
 const PATIENT = '11111111-1111-4111-8111-111111111111';
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
@@ -46,6 +47,7 @@ describe('ClinicalRecordsService.readPatientVital', () => {
     service = new ClinicalRecordsService(
       prisma as unknown as PrismaService,
       {} as SupabaseService,
+      new ClinicalDataCipher(prisma as unknown as PrismaService, null),
     );
   });
 
