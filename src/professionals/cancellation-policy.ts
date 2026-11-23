@@ -185,6 +185,25 @@ export function refundPercentFor(
 }
 
 /**
+ * El último instante en que cancelar devuelve el 100 % (ENG-229). Es la misma
+ * regla que `refundPercentFor`, dicha como fecha: hasta acá un turno pagado se
+ * puede reprogramar, y después no.
+ *
+ * Un parcial del 100 % es en realidad una devolución total con menos
+ * anticipación: ahí manda el plazo del parcial.
+ */
+export function fullRefundUntil(
+  policy: CancellationPolicy,
+  scheduledAt: Date,
+): Date {
+  const hours =
+    policy.partialRefundPercent === MAX_REFUND_PERCENT
+      ? Math.min(policy.hoursFullRefund, policy.hoursPartialRefund)
+      : policy.hoursFullRefund;
+  return new Date(scheduledAt.getTime() - hours * 3_600_000);
+}
+
+/**
  * Por qué una política no es válida, o `null` si lo es.
  *
  * Devuelve el mensaje y no un booleano porque es el texto que ve el profesional:

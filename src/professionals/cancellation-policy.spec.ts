@@ -1,5 +1,6 @@
 import {
   DEFAULT_CANCELLATION_POLICY,
+  fullRefundUntil,
   refundPercentFor,
   resolvePolicy,
   validatePolicy,
@@ -107,6 +108,34 @@ describe('refundPercentFor', () => {
       // Y uno pasado sigue dando 0.
       expect(refundPercentFor(todoReembolsable, enHoras(-1), AHORA)).toBe(0);
     });
+  });
+});
+
+describe('fullRefundUntil (ENG-229)', () => {
+  const START = new Date('2026-12-01T13:00:00.000Z');
+  const POLICIES: CancellationPolicy[] = [
+    { hoursFullRefund: 24, hoursPartialRefund: 12, partialRefundPercent: 50 },
+    { hoursFullRefund: 0, hoursPartialRefund: 0, partialRefundPercent: 30 },
+    { hoursFullRefund: 24, hoursPartialRefund: 6, partialRefundPercent: 100 },
+    { hoursFullRefund: 8, hoursPartialRefund: 8, partialRefundPercent: 100 },
+    { hoursFullRefund: 1, hoursPartialRefund: 0, partialRefundPercent: 30 },
+  ];
+
+  it.each(POLICIES)(
+    'dice lo mismo que refundPercentFor: $hoursFullRefund h / $hoursPartialRefund h / $partialRefundPercent %',
+    (policy) => {
+      const until = fullRefundUntil(policy, START);
+      expect(refundPercentFor(policy, START, until)).toBe(100);
+      expect(
+        refundPercentFor(policy, START, new Date(until.getTime() + 1)),
+      ).toBeLessThan(100);
+    },
+  );
+
+  it('con el default, 24 h antes del turno', () => {
+    expect(fullRefundUntil(DEFAULT_CANCELLATION_POLICY, START)).toEqual(
+      new Date('2026-11-30T13:00:00.000Z'),
+    );
   });
 });
 
