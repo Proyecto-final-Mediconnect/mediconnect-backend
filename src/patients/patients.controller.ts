@@ -1,23 +1,18 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Get,
-  HttpCode,
-  Post,
   Put,
   Query,
   Req,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
-import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PeriodQueryDto } from '../common/time/period.dto';
 import { UpdatePatientProfileDto } from './dto/update-patient-profile.dto';
 import { UpdateVitalInfoDto } from './dto/update-vital-info.dto';
-import { InvalidIpsError, readIps } from './ips/read-ips';
 import { PatientSummaryService } from './patient-summary.service';
 import { PatientsService } from './patients.service';
 
@@ -79,47 +74,6 @@ export class PatientsController {
    * Devuelve el perfil completo, igual que `PUT me`, para que la pantalla se
    * quede con lo que quedó guardado sin pedirlo de nuevo.
    */
-  /**
-   * Lee un resumen de salud IPS de Argentina que trae el paciente y propone qué
-   * cargar en su MediPass (ENG-246, ADR-022). **No guarda nada:** el paciente
-   * elige qué confirmar y eso se guarda con `PUT me/vital`.
-   *
-   * El cuerpo es el documento FHIR tal cual (JSON, hasta el límite de 100 kB del
-   * body parser). No se valida con un DTO: es un recurso externo, y `readIps`
-   * lee lo que entiende e ignora el resto.
-   *
-   * Devuelve si el DNI del documento coincide con el del paciente, y no el DNI:
-   * la pantalla solo necesita saber si avisar.
-   */
-  @Post('me/ips/preview')
-  @HttpCode(200)
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
-  async previewIps(@Req() req: Request, @Body() body: unknown) {
-    const { userId, accessToken } = requireAuth(req);
-    let preview;
-    try {
-      preview = readIps(body);
-    } catch (error) {
-      if (error instanceof InvalidIpsError) {
-        throw new BadRequestException(error.message);
-      }
-      throw new BadRequestException(
-        'No pudimos leer el archivo. Revisá que sea un resumen de salud IPS.',
-      );
-    }
-    const perfil = await this.patients.getMyProfile(accessToken, userId);
-    const { dni, ...documento } = preview.documento;
-    return {
-      ...preview,
-      documento: {
-        ...documento,
-        // `null`: el documento no trae DNI o el paciente todavía no cargó el suyo.
-        dniCoincide:
-          dni && perfil.dni ? dni === perfil.dni.replace(/\D/g, '') : null,
-      },
-    };
-  }
-
   @Put('me/vital')
   updateMyVitalInfo(@Req() req: Request, @Body() dto: UpdateVitalInfoDto) {
     const { userId, accessToken } = requireAuth(req);

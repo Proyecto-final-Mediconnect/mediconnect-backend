@@ -2,21 +2,24 @@ import type {
   VitalAllergyDto,
   VitalConditionDto,
   VitalMedicationDto,
-} from '../dto/update-vital-info.dto';
+} from '../../patients/dto/update-vital-info.dto';
 
 /**
- * Lee un resumen de paciente IPS de Argentina (ENG-246, ADR-022) y propone lo
- * que se cargaría en el MediPass.
+ * Lee un resumen de paciente IPS de Argentina (ENG-246, ADR-022).
  *
  * El IPS-AR es FHIR R4: un `Bundle` de tipo `document` con una `Composition` y
  * los recursos de las secciones del piloto nacional (problemas, medicamentos,
  * alergias y vacunas), codificados con SNOMED CT. Es lo que el paciente trae de
- * otro sistema ("intercambio mediado por el paciente").
+ * otro sistema ("intercambio mediado por el paciente") y sube como un documento
+ * más de los que aporta (ENG-164).
  *
- * **Función pura:** no guarda nada ni llama a nadie. Lo que devuelve es una
- * propuesta, que el paciente confirma ítem por ítem antes de que se guarde con
- * el `PUT /patients/me/vital` de siempre. Nada de esto entra a la historia
- * clínica: no lo escribió un profesional de MediConnect.
+ * Sirve para dos cosas: mostrarle el resumen ordenado al profesional y al
+ * paciente, y proponerle al paciente sumar las alergias, la medicación y las
+ * condiciones a su MediPass, con los topes de `UpdateVitalInfoDto` para que se
+ * puedan guardar tal cual.
+ *
+ * **Función pura:** no guarda nada ni llama a nadie. Nada de esto entra a la
+ * historia clínica firmada: no lo escribió un profesional de MediConnect.
  *
  * Lo que no conoce lo ignora y lo informa, sin fallar: un documento "casi IPS"
  * de otro sistema igual aporta lo que se puede leer.
