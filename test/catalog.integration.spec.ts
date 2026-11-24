@@ -319,6 +319,87 @@ describe('Catálogo público (integration)', () => {
     expect(result.meta.total).toBe(0);
   });
 
+  describe('búsqueda por texto (ENG-233)', () => {
+    function nombres(result: { data: { firstName: string }[] }): string[] {
+      return result.data.map((c) => c.firstName);
+    }
+
+    it('encuentra por apellido sin tildes ni mayúsculas', async () => {
+      const result = await service.listProfessionals(
+        query({ search: 'ALVAREZ', limit: 50 }),
+      );
+
+      expect(nombres(result)).toEqual(['Ana', 'Bruno']);
+      expect(result.meta.total).toBe(2);
+    });
+
+    it('encuentra por especialidad, escrita sin tilde', async () => {
+      const result = await service.listProfessionals(
+        query({ search: 'pediatria', limit: 50 }),
+      );
+
+      expect(nombres(result)).toEqual(['Bruno', 'Elena']);
+    });
+
+    it('con varias palabras exige todas, en cualquier orden', async () => {
+      const result = await service.listProfessionals(
+        query({ search: 'clínica benitez', limit: 50 }),
+      );
+
+      expect(nombres(result)).toEqual(['Carla']);
+    });
+
+    it('encuentra a alguien que no está en la primera página', async () => {
+      // Sin búsqueda, Elena es la última: con limit 2 está en la página 3.
+      const result = await service.listProfessionals(
+        query({ search: 'elena', page: 1, limit: 2 }),
+      );
+
+      expect(nombres(result)).toEqual(['Elena']);
+      expect(result.meta).toMatchObject({ total: 1, hasNextPage: false });
+    });
+
+    it('pagina y cuenta solo las coincidencias', async () => {
+      const result = await service.listProfessionals(
+        query({ search: 'cardiologia', page: 2, limit: 1 }),
+      );
+
+      expect(nombres(result)).toEqual(['Carla']);
+      expect(result.meta).toMatchObject({ total: 2, totalPages: 2 });
+    });
+
+    it('se combina con los filtros de especialidad y precio', async () => {
+      const result = await service.listProfessionals(
+        query({
+          search: 'alvarez',
+          specialtyId: [specialtyIds['Pediatría']],
+          maxPrice: 20000,
+          limit: 50,
+        }),
+      );
+
+      expect(nombres(result)).toEqual(['Bruno']);
+    });
+
+    it('no encuentra a profesionales sin la matrícula validada', async () => {
+      const result = await service.listProfessionals(
+        query({ search: 'aaaaa', limit: 50 }),
+      );
+
+      expect(result.data).toEqual([]);
+      expect(result.meta.total).toBe(0);
+    });
+
+    it('los comodines de LIKE se buscan como texto', async () => {
+      // Sin escaparlos, "%" coincidiría con todos.
+      const result = await service.listProfessionals(
+        query({ search: '%', limit: 50 }),
+      );
+
+      expect(result.data).toEqual([]);
+    });
+  });
+
   it('no expone campos privados del profesional en la tarjeta', async () => {
     const [card] = (await service.listProfessionals(query())).data;
 
