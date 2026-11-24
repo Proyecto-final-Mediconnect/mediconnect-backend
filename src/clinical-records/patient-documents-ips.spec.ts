@@ -210,7 +210,7 @@ describe('PatientDocumentsService — resumen de salud IPS (ENG-246)', () => {
         fecha: '2018-01-26T14:30:00-03:00',
       });
       expect(resumen.propuesta.allergies).toEqual([
-        { que: 'alergia a la penicilina', gravedad: 'Grave' },
+        { que: 'Penicilina', gravedad: 'Grave' },
       ]);
       expect(JSON.stringify(resumen)).not.toContain('99999999');
       expect(records.assertCanReadFor).not.toHaveBeenCalled();
@@ -314,7 +314,7 @@ describe('PatientDocumentsService — resumen de salud IPS (ENG-246)', () => {
 
       const resumen = await servicio.ipsSummary(PATIENT, DOC);
       expect(resumen.propuesta.conditions).toEqual([
-        { nombre: 'asma', codigo: 'SNOMED 195967001' },
+        { nombre: 'Asma', codigo: 'SNOMED 195967001' },
       ]);
     });
   });

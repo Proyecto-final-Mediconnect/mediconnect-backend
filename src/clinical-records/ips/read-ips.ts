@@ -109,6 +109,35 @@ function nombreDe(concepto: unknown): string {
   return crudo.replace(/\s*\([^()]*\)\s*$/, '').trim();
 }
 
+/** Con la primera letra en mayúscula, como lo escribiría el paciente: "Asma". */
+function conMayuscula(nombre: string): string {
+  return nombre
+    ? nombre[0].toLocaleUpperCase('es-AR') + nombre.slice(1)
+    : nombre;
+}
+
+/**
+ * Lo que va en "A qué" de una alergia: la sustancia, no el trastorno. SNOMED
+ * dice "alergia a la penicilina"; el paciente escribe "Penicilina", y así se
+ * reconoce como la misma y no se suma dos veces.
+ */
+function sustanciaDeAlergia(nombre: string): string {
+  return conMayuscula(
+    nombre.replace(/^alergia (?:al|a la|a el|a los|a las|a) /i, ''),
+  );
+}
+
+/**
+ * El nombre de una vacuna sin el comienzo genérico de SNOMED: "producto que
+ * contiene solamente antígeno de virus de la influenza" pasa a "Antígeno de
+ * virus de la influenza".
+ */
+function nombreDeVacuna(nombre: string): string {
+  return conMayuscula(
+    nombre.replace(/^producto que contiene (?:solamente |exactamente )?/i, ''),
+  );
+}
+
 function codigoSnomed(concepto: unknown): string | undefined {
   const c = codings(concepto).find((x) => SNOMED.test(texto(x.system) ?? ''));
   const code = texto(c?.code);
@@ -194,7 +223,7 @@ export function readIps(bundle: unknown): IpsPreview {
               ? 'Leve'
               : undefined;
         return {
-          que: recortar(nombreDe(r.code), MAX.que),
+          que: recortar(sustanciaDeAlergia(nombreDe(r.code)), MAX.que),
           ...(gravedad ? { gravedad } : {}),
         };
       })
@@ -216,7 +245,9 @@ export function readIps(bundle: unknown): IpsPreview {
           .filter(esObjeto)
           .filter((i) => i.isActive !== false)
           .map((i) => {
-            const nombre = nombreDe(i.itemCodeableConcept ?? i.code);
+            const nombre = conMayuscula(
+              nombreDe(i.itemCodeableConcept ?? i.code),
+            );
             const strength = esObjeto(i.strength) ? i.strength : undefined;
             const n = esObjeto(strength?.numerator)
               ? strength.numerator
@@ -228,7 +259,9 @@ export function readIps(bundle: unknown): IpsPreview {
           .filter(Boolean);
         const droga = activos.length
           ? activos.join(' + ')
-          : nombreDe(r.medicationCodeableConcept ?? medicamento?.code);
+          : conMayuscula(
+              nombreDe(r.medicationCodeableConcept ?? medicamento?.code),
+            );
 
         const dosage = Array.isArray(r.dosage)
           ? r.dosage.filter(esObjeto)[0]
@@ -264,7 +297,7 @@ export function readIps(bundle: unknown): IpsPreview {
       .map((r): VitalConditionDto => {
         const codigo = codigoSnomed(r.code);
         return {
-          nombre: recortar(nombreDe(r.code), MAX.nombre),
+          nombre: recortar(conMayuscula(nombreDe(r.code)), MAX.nombre),
           ...(codigo && codigo.length <= MAX.codigo ? { codigo } : {}),
         };
       })
@@ -274,7 +307,7 @@ export function readIps(bundle: unknown): IpsPreview {
 
   const vacunas = de('Immunization')
     .map((r) => ({
-      vacuna: nombreDe(r.vaccineCode),
+      vacuna: nombreDeVacuna(nombreDe(r.vaccineCode)),
       fecha: texto(r.occurrenceDateTime) ?? null,
     }))
     .filter((v) => v.vacuna);
