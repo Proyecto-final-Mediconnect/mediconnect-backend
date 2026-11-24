@@ -33,6 +33,7 @@ import type {
   PatientDocumentType,
   UploadPatientDocumentDto,
 } from './dto/upload-patient-document.dto';
+import { InvalidIpsError, readIps, type IpsPreview } from './ips/read-ips';
 
 export const PATIENT_DOCUMENTS_BUCKET = 'patient-documents';
 
@@ -45,6 +46,24 @@ export const MAX_DOCUMENT_BYTES = MAX_FILE_BYTES;
  */
 export const MAX_ACTIVE_DOCUMENTS_PER_PATIENT = 50;
 export const MAX_TOTAL_BYTES_PER_PATIENT = 200 * 1024 * 1024;
+
+/**
+ * El resumen de salud IPS (ENG-246, ADR-022) se guarda con este tipo. Se acepta
+ * también como `application/json`, que es lo que manda un navegador o un
+ * celular para un `.json`.
+ */
+export const IPS_MIME_TYPE = 'application/fhir+json';
+const IPS_UPLOAD_MIME_TYPES: ReadonlySet<string> = new Set([
+  IPS_MIME_TYPE,
+  'application/json',
+]);
+/** Un resumen IPS es texto: más que esto no es un resumen. */
+export const MAX_IPS_BYTES = 1024 * 1024;
+
+/** El resumen de salud, ordenado para mostrar. Sin el DNI del documento. */
+export type IpsDocumentView = Omit<IpsPreview, 'documento'> & {
+  documento: Omit<IpsPreview['documento'], 'dni'>;
+};
 
 /** Cuánto vive una URL de descarga: lo justo para abrirla (Sprint 0 §5.3.1). */
 export const DOWNLOAD_URL_TTL_SECONDS = FILE_LINK_TTL_SECONDS;
@@ -145,10 +164,17 @@ export class PatientDocumentsService {
     if (file.size === 0) {
       throw new BadRequestException('El archivo está vacío.');
     }
+    // El resumen de salud IPS (ENG-246) es un JSON: no tiene firma de bytes,
+    // así que se valida leyéndolo entero.
+    const ips = IPS_UPLOAD_MIME_TYPES.has(file.mimetype)
+      ? this.parseIps(file)
+      : null;
     // Se mira el contenido y no solo el `Content-Type` (ver `file-signature.ts`).
-    const ext = allowedExtension(file.mimetype, file.buffer);
+    const ext = ips ? 'json' : allowedExtension(file.mimetype, file.buffer);
     if (!ext) {
-      throw new BadRequestException('Solo se pueden subir PDF, JPG o PNG.');
+      throw new BadRequestException(
+        'Solo se pueden subir PDF, JPG, PNG o un resumen de salud IPS.',
+      );
     }
     if (file.size > this.files.maxFileBytes) {
       throw new BadRequestException('El archivo no puede pasar los 10 MB.');
@@ -159,15 +185,28 @@ export class PatientDocumentsService {
       this.logger.warn(`PDF rechazado (${risk}) del paciente ${patientId}`);
       throw new BadRequestException(pdfRiskMessage(risk));
     }
+    const mimeType = ips ? IPS_MIME_TYPE : file.mimetype;
 
     // La fila cuelga de `patients`: sin perfil completo no hay a quién colgarla.
     const patient = await this.prisma.patient.findUnique({
       where: { profile_id: patientId },
-      select: { profile_id: true },
+      select: { profile_id: true, dni: true },
     });
     if (!patient) {
       throw new ConflictException(
         'Completá tu perfil de paciente antes de subir documentos.',
+      );
+    }
+    // El resumen de otra persona no entra a esta historia: el médico lo leería
+    // como si fuera del paciente. Solo se compara si los dos traen DNI.
+    const dniDelResumen = ips?.documento.dni;
+    if (
+      dniDelResumen &&
+      patient.dni &&
+      dniDelResumen !== patient.dni.replace(/\D/g, '')
+    ) {
+      throw new BadRequestException(
+        'El DNI de este resumen de salud no es el tuyo, así que no lo sumamos a tu historia.',
       );
     }
 
@@ -195,7 +234,7 @@ export class PatientDocumentsService {
       .getServiceClient()
       .storage.from(PATIENT_DOCUMENTS_BUCKET)
       .upload(storagePath, body, {
-        contentType: file.mimetype,
+        contentType: mimeType,
         upsert: false,
       });
     if (error) {
@@ -219,7 +258,7 @@ export class PatientDocumentsService {
           source_institution: dto.sourceInstitution ?? null,
           storage_path: storagePath,
           sha256,
-          mime_type: file.mimetype,
+          mime_type: mimeType,
           size_bytes: file.size,
         },
         select: VIEW_SELECT,
@@ -363,6 +402,107 @@ export class PatientDocumentsService {
   }
 
   /**
+   * El resumen de salud IPS de un documento, ordenado para mostrar (ENG-246):
+   * problemas, alergias, medicación y vacunas. Mismas reglas de acceso y de
+   * auditoría que abrir el archivo: el paciente lee los suyos; un profesional,
+   * los de un paciente cuya HC puede leer, y si no se puede registrar el acceso
+   * no se muestra nada.
+   *
+   * Antes de leerlo se compara con el SHA-256 que se guardó al subirlo: si el
+   * archivo no es el mismo, no se muestra.
+   */
+  async ipsSummary(
+    viewerId: string,
+    documentId: string,
+  ): Promise<IpsDocumentView> {
+    const doc = await this.prisma.patientDocument.findUnique({
+      where: { id: documentId },
+      select: {
+        id: true,
+        patient_id: true,
+        storage_path: true,
+        mime_type: true,
+        sha256: true,
+        withdrawn_at: true,
+      },
+    });
+    if (!doc || doc.withdrawn_at) {
+      throw new NotFoundException('No encontramos ese documento.');
+    }
+
+    const propio = sameUuid(viewerId, doc.patient_id);
+    if (!propio) {
+      await this.records.assertCanReadFor(viewerId, doc.patient_id);
+    }
+    if (doc.mime_type !== IPS_MIME_TYPE) {
+      throw new NotFoundException('Ese documento no es un resumen de salud.');
+    }
+    if (propio) {
+      await this.auditOwnDownload(viewerId, doc.id, 'PATIENT_DOCUMENT_VIEW');
+    } else {
+      await this.auditProfessionalAccess(
+        viewerId,
+        'PATIENT_DOCUMENT_VIEW',
+        doc.id,
+        { patientId: doc.patient_id },
+      );
+    }
+
+    const bytes = await this.files.read(
+      PATIENT_DOCUMENTS_BUCKET,
+      doc.storage_path,
+      doc.patient_id,
+    );
+    if (createHash('sha256').update(bytes).digest('hex') !== doc.sha256) {
+      this.logger.error(
+        `El documento ${doc.id} no coincide con el SHA-256 que se guardó al subirlo`,
+      );
+      throw new InternalServerErrorException(
+        'Este documento no coincide con el que se subió, así que no lo mostramos.',
+      );
+    }
+
+    let preview: IpsPreview;
+    try {
+      preview = readIps(JSON.parse(bytes.toString('utf8')));
+    } catch {
+      // Se validó al subirlo: si ahora no se puede leer, algo cambió.
+      throw new InternalServerErrorException(
+        'No pudimos leer este resumen de salud. Probá de nuevo en unos minutos.',
+      );
+    }
+    const { titulo, fecha } = preview.documento;
+    return { ...preview, documento: { titulo, fecha } };
+  }
+
+  /**
+   * Lee y valida un resumen de salud IPS que se está subiendo. Si no es uno, 400
+   * con un mensaje para la persona. Nunca se loguea el contenido.
+   */
+  private parseIps(file: UploadedDocumentFile): IpsPreview {
+    if (file.size > MAX_IPS_BYTES) {
+      throw new BadRequestException('El resumen de salud no puede pasar 1 MB.');
+    }
+    let json: unknown;
+    try {
+      json = JSON.parse(file.buffer.toString('utf8'));
+    } catch {
+      throw new BadRequestException(
+        'No pudimos leer el archivo: el resumen de salud tiene que ser un JSON válido.',
+      );
+    }
+    try {
+      return readIps(json);
+    } catch (err) {
+      throw new BadRequestException(
+        err instanceof InvalidIpsError
+          ? err.message
+          : 'No pudimos leer el archivo. Revisá que sea un resumen de salud IPS.',
+      );
+    }
+  }
+
+  /**
    * Retira un documento propio: deja de mostrarse pero queda registrado. Es la
    * única escritura que admite el trigger de `patient_documents`.
    */
@@ -403,12 +543,18 @@ export class PatientDocumentsService {
   }
 
   /** La descarga del propio paciente: se registra, pero sin negarle su archivo. */
-  private async auditOwnDownload(patientId: string, documentId: string) {
+  private async auditOwnDownload(
+    patientId: string,
+    documentId: string,
+    action:
+      | 'PATIENT_DOCUMENT_DOWNLOAD'
+      | 'PATIENT_DOCUMENT_VIEW' = 'PATIENT_DOCUMENT_DOWNLOAD',
+  ) {
     try {
       await this.prisma.auditLog.create({
         data: {
           actor_id: patientId,
-          action: 'PATIENT_DOCUMENT_DOWNLOAD',
+          action,
           resource_type: 'patient_documents',
           resource_id: documentId,
           metadata: { patientId },
@@ -424,7 +570,10 @@ export class PatientDocumentsService {
   /** Deja el acceso de un profesional en `audit_logs`; si falla, no se entrega nada. */
   private async auditProfessionalAccess(
     viewerId: string,
-    action: 'PATIENT_DOCUMENT_DOWNLOAD' | 'PATIENT_DOCUMENT_LIST',
+    action:
+      | 'PATIENT_DOCUMENT_DOWNLOAD'
+      | 'PATIENT_DOCUMENT_LIST'
+      | 'PATIENT_DOCUMENT_VIEW',
     resourceId: string,
     metadata: Record<string, string | number>,
   ) {

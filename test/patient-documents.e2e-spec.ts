@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
+import { createHash } from 'node:crypto';
 import { generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
 import { App } from 'supertest/types';
@@ -19,6 +22,10 @@ const PATIENT = '11111111-1111-4111-8111-111111111111';
 const PROFESSIONAL = '22222222-2222-4222-8222-222222222222';
 const DOC = '33333333-3333-4333-8333-333333333333';
 const PDF = Buffer.from('%PDF-1.7\ncontenido');
+/** El resumen de salud IPS de ejemplo de SALUD-AR (ENG-246). */
+const IPS = readFileSync(
+  join(__dirname, 'fixtures/ips-argentina-ejemplo.json'),
+);
 
 const ROW = {
   id: DOC,
@@ -49,6 +56,7 @@ describe('Documentos del paciente (e2e)', () => {
     };
   };
   let upload: jest.Mock;
+  let download: jest.Mock;
 
   beforeAll(async () => {
     ({ publicKey, privateKey } = await generateKeyPair('ES256'));
@@ -79,6 +87,10 @@ describe('Documentos del paciente (e2e)', () => {
       },
     };
     upload = jest.fn().mockResolvedValue({ error: null });
+    download = jest.fn().mockResolvedValue({
+      data: { arrayBuffer: () => Promise.resolve(IPS) },
+      error: null,
+    });
 
     const supabase = {
       getClient: () => ({ from: () => ({}), auth: {} }),
@@ -97,6 +109,7 @@ describe('Documentos del paciente (e2e)', () => {
         storage: {
           from: () => ({
             upload,
+            download,
             createSignedUrl: () =>
               Promise.resolve({
                 data: { signedUrl: 'https://x/signed' },
@@ -296,5 +309,47 @@ describe('Documentos del paciente (e2e)', () => {
       .get('/patients/me/documents?limit=101')
       .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
       .expect(400);
+  });
+
+  // ENG-246: el resumen de salud IPS es un documento más, y se lee ordenado.
+  it('sube un resumen de salud IPS como documento', async () => {
+    await request(app.getHttpServer())
+      .post('/patients/me/documents')
+      .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+      .field('type', 'INFORME')
+      .field('title', 'Resumen de salud')
+      .attach('file', IPS, {
+        filename: 'resumen.json',
+        contentType: 'application/json',
+      })
+      .expect(201);
+    expect(prisma.patientDocument.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ mime_type: 'application/fhir+json' }),
+      }),
+    );
+  });
+
+  it('GET patient-documents/:id/ips lo devuelve ordenado al profesional y lo audita', async () => {
+    prisma.patientDocument.findUnique.mockResolvedValue({
+      id: DOC,
+      patient_id: PATIENT,
+      storage_path: `${PATIENT}/x.json`,
+      mime_type: 'application/fhir+json',
+      sha256: createHash('sha256').update(IPS).digest('hex'),
+      withdrawn_at: null,
+    });
+
+    const res = await request(app.getHttpServer())
+      .get(`/patient-documents/${DOC}/ips`)
+      .set('Authorization', `Bearer ${await signToken(PROFESSIONAL)}`)
+      .expect(200);
+
+    expect(res.body.propuesta.conditions).toEqual([
+      { nombre: 'asma', codigo: 'SNOMED 195967001' },
+    ]);
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: 'PATIENT_DOCUMENT_VIEW' }),
+    });
   });
 });

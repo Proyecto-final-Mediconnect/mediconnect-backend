@@ -41,8 +41,9 @@ export class PatientDocumentsController {
   constructor(private readonly documents: PatientDocumentsService) {}
 
   /**
-   * Sube un documento propio: el archivo en `file` (PDF, JPG o PNG, hasta
-   * 10 MB) y sus datos como campos del multipart.
+   * Sube un documento propio: el archivo en `file` (PDF, JPG o PNG hasta 10 MB,
+   * o un resumen de salud IPS en JSON hasta 1 MB) y sus datos como campos del
+   * multipart.
    *
    * Rate limit como el alta de entradas de la HC: cada subida deja una fila y un
    * archivo que no se pueden borrar.
@@ -105,6 +106,20 @@ export class PatientDocumentsController {
   ) {
     const { userId } = requireAuth(req);
     return this.documents.listFor(userId, patientId, query);
+  }
+
+  /**
+   * El resumen de salud IPS de un documento, ordenado (ENG-246). Lo leen el
+   * paciente y los profesionales que pueden leer su HC.
+   */
+  @Get('patient-documents/:documentId/ips')
+  ipsSummary(
+    @Req() req: Request,
+    @Param('documentId', new ParseUUIDPipe({ version: '4' }))
+    documentId: string,
+  ) {
+    const { userId } = requireAuth(req);
+    return this.documents.ipsSummary(userId, documentId);
   }
 
   /** Una URL de cinco minutos para abrir el archivo. */

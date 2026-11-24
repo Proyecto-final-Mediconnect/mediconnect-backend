@@ -39,6 +39,8 @@ const EXTENSIONS: Readonly<Record<string, string>> = {
   'application/pdf': 'pdf',
   'image/jpeg': 'jpg',
   'image/png': 'png',
+  // El resumen de salud IPS (ENG-246).
+  'application/fhir+json': 'json',
 };
 
 export function isEncryptedObject(path: string): boolean {
@@ -139,6 +141,42 @@ export class StoredFilesService {
         now.getTime() + FILE_LINK_TTL_SECONDS * 1000,
       ).toISOString(),
     };
+  }
+
+  /**
+   * Baja un archivo para leerlo en el backend (ENG-246: el resumen de salud que
+   * se muestra ordenado), descifrándolo si está cifrado. Quien lo pide ya tiene
+   * que haber autorizado y auditado la lectura.
+   */
+  async read(bucket: string, path: string, patientId: string): Promise<Buffer> {
+    const { data, error } = await this.supabase
+      .getServiceClient()
+      .storage.from(bucket)
+      .download(path);
+    if (error || !data) {
+      this.logger.error(
+        `No se pudo bajar ${bucket}/${path}: ${error?.message ?? 'sin datos'}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos abrir el archivo. Probá de nuevo en unos minutos.',
+      );
+    }
+    const bytes = Buffer.from(await data.arrayBuffer());
+    if (!isEncryptedObject(path)) return bytes;
+    try {
+      return await this.cipher.openFile(
+        patientId,
+        storedFileAt(bucket, objectIdOf(path)),
+        bytes,
+      );
+    } catch (err) {
+      this.logger.error(
+        `No se pudo descifrar ${bucket}/${path}: ${(err as Error).name}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos abrir el archivo. Probá de nuevo en unos minutos.',
+      );
+    }
   }
 
   /** Baja y descifra el archivo de un link. Vencido o alterado: 404. */
