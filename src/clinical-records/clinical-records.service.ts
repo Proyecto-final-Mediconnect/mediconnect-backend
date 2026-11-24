@@ -999,6 +999,47 @@ export class ClinicalRecordsService {
   }
 
   /**
+   * Deja constancia de que alguien descargó la HC en PDF (ENG-231).
+   *
+   * Mismas reglas que la lectura: el paciente exporta la suya; un profesional,
+   * solo la de un paciente cuya HC puede leer (`assertCanReadFor`). Falla
+   * cerrado igual que `recordAccess`: sin registro, la web no genera el PDF.
+   */
+  async recordExport(
+    viewerId: string,
+    patientId: string,
+    exported: { entryCount: number; filtered: boolean },
+  ): Promise<void> {
+    const asPatient = sameUuid(viewerId, patientId);
+    if (!asPatient) {
+      await this.assertCanReadFor(viewerId, patientId);
+    }
+
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          actor_id: viewerId,
+          action: 'CLINICAL_RECORD_EXPORT',
+          resource_type: 'clinical_record_entries',
+          resource_id: patientId,
+          metadata: {
+            role: asPatient ? 'PACIENTE' : 'PROFESIONAL',
+            entryCount: exported.entryCount,
+            filtered: exported.filtered,
+          },
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `No se pudo auditar la exportación de ${viewerId} de la HC de ${patientId}: ${String(error)}`,
+      );
+      throw new InternalServerErrorException(
+        'No pudimos registrar la descarga de la historia clínica, así que no la generamos. Probá de nuevo en unos minutos.',
+      );
+    }
+  }
+
+  /**
    * Recalcula la cadena de un paciente y dice si está íntegra.
    *
    * Es la verificación **puntual** —al abrir una HC, antes de agregarle algo—, no
