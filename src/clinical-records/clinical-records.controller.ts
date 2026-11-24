@@ -17,6 +17,7 @@ import { requireAuth } from '../common/http/require-auth';
 import { ClinicalRecordsService } from './clinical-records.service';
 import { CorrectClinicalEntryDto } from './dto/correct-clinical-entry.dto';
 import { CreateClinicalEntryDto } from './dto/create-clinical-entry.dto';
+import { ExportClinicalRecordDto } from './dto/export-clinical-record.dto';
 
 /**
  * Historia clínica de un paciente (ENG-58).
@@ -85,6 +86,28 @@ export class ClinicalRecordsController {
   ) {
     const { userId } = requireAuth(req);
     return this.records.readPatientVital(userId, patientId);
+  }
+
+  /**
+   * Registra que alguien descargó la HC en PDF (ENG-231).
+   *
+   * El PDF lo arma la web con lo que ya leyó por el `GET`. Antes de entregarlo,
+   * pide esto: mismas reglas de acceso que la lectura y una fila en
+   * `audit_logs` (`CLINICAL_RECORD_EXPORT`). Si no se puede registrar, la web no
+   * genera el archivo.
+   */
+  @Post('exports')
+  // Cada pedido escribe una fila en `audit_logs`, como la lectura.
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async recordExport(
+    @Req() req: Request,
+    @Param('patientId', new ParseUUIDPipe({ version: '4' }))
+    patientId: string,
+    @Body() dto: ExportClinicalRecordDto,
+  ): Promise<void> {
+    const { userId } = requireAuth(req);
+    await this.records.recordExport(userId, patientId, dto);
   }
 
   /**

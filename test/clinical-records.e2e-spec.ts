@@ -442,6 +442,99 @@ describe('Historia clínica (e2e)', () => {
     });
   });
 
+  describe('POST exports (ENG-231)', () => {
+    const exportUrl = (id: string = PATIENT) => `${url(id)}/exports`;
+    const exportBody = { entryCount: 7, filtered: false };
+
+    it('sin token devuelve 401 y no registra nada', async () => {
+      await request(app.getHttpServer())
+        .post(exportUrl())
+        .send(exportBody)
+        .expect(401);
+
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('registra quién descargó la HC y qué alcance tuvo, y devuelve 204', async () => {
+      await request(app.getHttpServer())
+        .post(exportUrl())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send({ entryCount: 3, filtered: true })
+        .expect(204);
+
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: {
+          actor_id: PROFESSIONAL,
+          action: 'CLINICAL_RECORD_EXPORT',
+          resource_type: 'clinical_record_entries',
+          resource_id: PATIENT,
+          metadata: { role: 'PROFESIONAL', entryCount: 3, filtered: true },
+        },
+      });
+    });
+
+    it('el paciente descarga la suya sin turno de por medio', async () => {
+      prisma.appointment.findFirst.mockResolvedValue(null);
+
+      await request(app.getHttpServer())
+        .post(exportUrl())
+        .set('Authorization', `Bearer ${await signToken(PATIENT)}`)
+        .send(exportBody)
+        .expect(204);
+
+      expect(prisma.appointment.findFirst).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          actor_id: PATIENT,
+          metadata: expect.objectContaining({ role: 'PACIENTE' }),
+        }),
+      });
+    });
+
+    it('un profesional sin acceso a la HC recibe 403 y no se registra nada', async () => {
+      prisma.appointment.findFirst.mockResolvedValue(null);
+      prisma.clinicalRecordEntry.findFirst.mockResolvedValue(null);
+
+      await request(app.getHttpServer())
+        .post(exportUrl())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send(exportBody)
+        .expect(403);
+
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['sin cuerpo', {}],
+      ['un conteo negativo', { entryCount: -1, filtered: false }],
+      ['un conteo que no es entero', { entryCount: 1.5, filtered: false }],
+      ['filtered que no es booleano', { entryCount: 1, filtered: 'sí' }],
+      ['un campo de más', { ...exportBody, actorId: PATIENT }],
+    ])('rechaza %s con 400 sin registrar', async (_caso, cuerpo) => {
+      await request(app.getHttpServer())
+        .post(exportUrl())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send(cuerpo)
+        .expect(400);
+
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('si no se puede registrar, responde 500 para que no se genere el PDF', async () => {
+      prisma.auditLog.create.mockRejectedValue(new Error('audit caído'));
+
+      const res = await request(app.getHttpServer())
+        .post(exportUrl())
+        .set('Authorization', `Bearer ${await signToken()}`)
+        .send(exportBody)
+        .expect(500);
+
+      expect((res.body as { message: string }).message).toMatch(
+        /no la generamos/,
+      );
+    });
+  });
+
   describe('GET', () => {
     it('sin token devuelve 401', async () => {
       await request(app.getHttpServer()).get(url()).expect(401);
