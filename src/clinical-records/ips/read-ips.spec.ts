@@ -27,14 +27,13 @@ describe('readIps (ENG-246)', () => {
     const preview = readIps(EJEMPLO);
 
     expect(preview.propuesta).toEqual({
-      allergies: [{ que: 'alergia a la penicilina', gravedad: 'Grave' }],
-      medications: [{ droga: 'salbutamol 200 mcg', dosis: '1 disparo' }],
-      conditions: [{ nombre: 'asma', codigo: 'SNOMED 195967001' }],
+      allergies: [{ que: 'Penicilina', gravedad: 'Grave' }],
+      medications: [{ droga: 'Salbutamol 200 mcg', dosis: '1 disparo' }],
+      conditions: [{ nombre: 'Asma', codigo: 'SNOMED 195967001' }],
     });
     expect(preview.vacunas).toEqual([
       {
-        vacuna:
-          'producto que contiene solamente antígeno de virus de la influenza',
+        vacuna: 'Antígeno de virus de la influenza',
         fecha: '2017-05-22',
       },
     ]);
@@ -106,7 +105,7 @@ describe('readIps (ENG-246)', () => {
     );
 
     expect(preview.propuesta.medications).toEqual([
-      { droga: 'enalapril', dosis: '10 mg cada 12 h' },
+      { droga: 'Enalapril', dosis: '10 mg cada 12 h' },
     ]);
   });
 
@@ -151,5 +150,48 @@ describe('readIps (ENG-246)', () => {
 
     expect(preview.propuesta.allergies).toEqual([]);
     expect(preview.documento).toEqual({ titulo: null, fecha: null, dni: null });
+  });
+
+  // En el MediPass, "A qué" es la sustancia: así "Penicilina" que ya cargó el
+  // paciente y la "alergia a la penicilina" del resumen son la misma.
+  it('deja la sustancia de cada alergia y los nombres con mayúscula, como los escribe el paciente', () => {
+    const preview = readIps(
+      documento(
+        {
+          resourceType: 'AllergyIntolerance',
+          code: { text: 'alergia al látex (trastorno)' },
+        },
+        {
+          resourceType: 'AllergyIntolerance',
+          code: { text: 'Alergia a los mariscos' },
+        },
+        {
+          resourceType: 'AllergyIntolerance',
+          code: { text: 'intolerancia a la lactosa' },
+        },
+        {
+          resourceType: 'Condition',
+          code: { text: 'diabetes mellitus tipo 2' },
+        },
+        {
+          resourceType: 'Immunization',
+          vaccineCode: {
+            text: 'producto que contiene exactamente vacuna antitetánica',
+          },
+        },
+      ),
+    );
+
+    expect(preview.propuesta.allergies).toEqual([
+      { que: 'Látex' },
+      { que: 'Mariscos' },
+      { que: 'Intolerancia a la lactosa' },
+    ]);
+    expect(preview.propuesta.conditions).toEqual([
+      { nombre: 'Diabetes mellitus tipo 2' },
+    ]);
+    expect(preview.vacunas).toEqual([
+      { vacuna: 'Vacuna antitetánica', fecha: null },
+    ]);
   });
 });

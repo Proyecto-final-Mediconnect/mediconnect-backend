@@ -346,7 +346,7 @@ describe('Documentos del paciente (e2e)', () => {
       .expect(200);
 
     expect(res.body.propuesta.conditions).toEqual([
-      { nombre: 'asma', codigo: 'SNOMED 195967001' },
+      { nombre: 'Asma', codigo: 'SNOMED 195967001' },
     ]);
     expect(prisma.auditLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ action: 'PATIENT_DOCUMENT_VIEW' }),
